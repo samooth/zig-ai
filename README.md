@@ -16,12 +16,12 @@ Motor de inferencia de transformers en Zig con FlashAttention, matmul multi-back
 
 ```
 zig-ai-engine/
-├── build.zig              # Build system (detecta CUDA automáticamente)
+├── build.zig              # Build system (detecta CUDA/OpenBLAS automáticamente)
 ├── build.zig.zon          # Manifesto del paquete
 ├── src/
 │   ├── tensor.zig         # Tensor genérico multidimensional
 │   ├── matmul/
-│   │   ├── root.zig       # Motor matmul unificado
+│   │   ├── root.zig       # Motor matmul unificado (multi-backend)
 │   │   ├── types.zig      # Tipos y configuraciones
 │   │   ├── naive.zig      # GEMM naive
 │   │   ├── simd.zig       # GEMM con vectorización
@@ -37,21 +37,34 @@ zig-ai-engine/
 │   │   ├── fa_utils.zig         # RoPE, softmax, utilidades
 │   │   └── fa_kernels.zig       # Launchers CUDA
 │   ├── transformer/
-│   │   └── layer.zig            # Capa Transformer + KV-Cache
-│   ├── cuda/
-│   │   └── cudaz_stub.zig       # Bindings CUDA Driver API
-│   └── main.zig                 # CLI principal
+│   │   ├── layer.zig       # Capa Transformer completa
+│   │   ├── pipeline.zig    # Pipeline de capas
+│   │   ├── norm.zig        # RMSNorm / LayerNorm
+│   │   ├── ffn.zig         # FFN SwiGLU
+│   │   ├── rope.zig        # Rotatory Position Embedding
+│   │   ├── gqa.zig         # Grouped Query Attention
+│   │   └── embedding.zig   # Embedding / lm_head
+│   ├── kv_cache/
+│   │   ├── kv_cache_manager.zig  # Gestión de KV-Cache cuantizado
+│   │   ├── quant_types.zig       # Formatos de cuantización
+│   │   └── gpu_dequant.zig       # Dequant en GPU
+│   ├── tokenizer/bpe.zig   # Tokenizer BPE
+│   ├── loader/safetensors.zig    # Carga de pesos
+│   ├── cuda/cudaz_stub.zig       # Bindings CUDA Driver API (stub sin GPU)
+│   └── main.zig                  # CLI principal
 ├── cuda/
 │   ├── online_softmax.cuh       # Online softmax (warp/block reduce)
 │   ├── matmul_utils.cuh         # Tiles shared-memory
 │   ├── flash_attention.cu       # Kernel FA v1
-│   └── flash_attention_v2.cu    # Kernel FA v2
+│   ├── flash_attention_v2.cu    # Kernel FA v2
+│   └── dequantize_kernels.cu    # Kernels de dequantización
 └── tests/
     ├── test_tensor.zig
     ├── test_matmul.zig
     ├── test_flash_attention.zig
     ├── test_online_softmax.zig
     ├── test_transformer.zig
+    ├── test_kv_cache.zig
     └── benchmark.zig
 ```
 
