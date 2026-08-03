@@ -1,5 +1,12 @@
 const std = @import("std");
 
+fn isPunct(c: u8) bool {
+    return (c >= 0x21 and c <= 0x2F) or
+        (c >= 0x3A and c <= 0x40) or
+        (c >= 0x5B and c <= 0x60) or
+        (c >= 0x7B and c <= 0x7E);
+}
+
 /// BPE Tokenizer — Implementación limpia del algoritmo Byte-Pair Encoding
 /// Compatible con formatos tipo GPT-2 / Llama tokenizer.json simplificado
 /// 
@@ -87,7 +94,7 @@ pub const BPETokenizer = struct {
     }
 
     /// Cargar vocabulario desde un archivo de texto (formato: token
-)
+    /// )
     pub fn loadVocabFromText(self: *Self, text: []const u8) !void {
         var lines = std.mem.splitScalar(u8, text, '\n');
         var id: u32 = 0;
@@ -100,7 +107,7 @@ pub const BPETokenizer = struct {
     }
 
     /// Cargar merges desde archivo de texto (formato: left right
-)
+    /// )
     pub fn loadMergesFromText(self: *Self, text: []const u8) !void {
         var lines = std.mem.splitScalar(u8, text, '\n');
         var priority: u32 = 0;
@@ -124,11 +131,11 @@ pub const BPETokenizer = struct {
         var i: usize = 0;
         while (i < text.len) : (i += 1) {
             const c = text[i];
-            if (std.ascii.isWhitespace(c) or std.ascii.isPunct(c)) {
+            if (std.ascii.isWhitespace(c) or isPunct(c)) {
                 if (i > start) {
                     try words.append(text[start..i]);
                 }
-                if (std.ascii.isPunct(c)) {
+                if (isPunct(c)) {
                     try words.append(text[i..i+1]);
                 }
                 start = i + 1;

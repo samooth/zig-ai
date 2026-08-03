@@ -54,14 +54,14 @@ fn gemmPanelF32(
     A: Tensor(f32),
     B: Tensor(f32),
     C: *Tensor(f32),
-    i0: usize, i1: usize,
+    row0: usize, row1: usize,
     j0: usize, j1: usize,
     k0: usize, k1: usize,
     MR: usize, NR: usize,
 ) void {
-    var i = i0;
-    while (i < i1) : (i += MR) {
-        const i_end = @min(i + MR, i1);
+    var i = row0;
+    while (i < row1) : (i += MR) {
+        const i_end = @min(i + MR, row1);
 
         var j = j0;
         while (j < j1) : (j += NR) {
@@ -76,7 +76,7 @@ fn microKernelF32(
     A: Tensor(f32),
     B: Tensor(f32),
     C: *Tensor(f32),
-    i0: usize, i1: usize,
+    row0: usize, row1: usize,
     j0: usize, j1: usize,
     k0: usize, k1: usize,
 ) void {
@@ -88,7 +88,7 @@ fn microKernelF32(
     const max_cols = 8;
     var accum: [max_rows][max_cols]f32 = undefined;
 
-    const rows = i1 - i0;
+    const rows = row1 - row0;
     const cols = j1 - j0;
 
     for (0..rows) |ri| {
@@ -102,7 +102,7 @@ fn microKernelF32(
 
     while (k < k_vec_end) : (k += VecLen) {
         for (0..rows) |ri| {
-            const i = i0 + ri;
+            const i = row0 + ri;
             var a_vec: Vec = undefined;
             for (0..VecLen) |v| {
                 a_vec[v] = A.at2(i, k + v);
@@ -124,7 +124,7 @@ fn microKernelF32(
     // Remainder scalar
     while (k < k1) : (k += 1) {
         for (0..rows) |ri| {
-            const i = i0 + ri;
+            const i = row0 + ri;
             const a_val = A.at2(i, k);
             for (0..cols) |cj| {
                 const j = j0 + cj;
@@ -135,7 +135,7 @@ fn microKernelF32(
 
     // Escribir resultado a C
     for (0..rows) |ri| {
-        const i = i0 + ri;
+        const i = row0 + ri;
         for (0..cols) |cj| {
             const j = j0 + cj;
             C.ptr2(i, j).* += accum[ri][cj];

@@ -233,9 +233,34 @@ pub const KVCacheManager = struct {
         self.metrics.bytes_saved += saved;
     }
 
-    /// Recupera K/V de-cuantizados para atención
-    pub fn retrieveForAttention(
+    /// Conveniencia: append de tokens en FP16 crudo (sin cuantizar)
+    pub fn appendTokensF16(
         self: *Self,
+        seq_id: u64,
+        layer_idx: u32,
+        head_idx: u32,
+        k_data: []const f16,
+        v_data: []const f16,
+    ) !void {
+        const k_bytes: []const u8 = std.mem.sliceAsBytes(k_data);
+        const v_bytes: []const u8 = std.mem.sliceAsBytes(v_data);
+        try self.appendTokens(seq_id, layer_idx, head_idx, k_bytes, v_bytes);
+    }
+
+    /// Avanza el contador de tokens de una secuencia en 1
+    pub fn advanceSequence(self: *Self, seq_id: u64) !void {
+        const seq = self.sequences.getPtr(seq_id) orelse return error.SequenceNotFound;
+        seq.current_len += 1;
+    }
+
+    /// Longitud actual (en tokens) de una secuencia
+    pub fn getSequenceLen(self: *Self, seq_id: u64) !usize {
+        const seq = self.sequences.getPtr(seq_id) orelse return error.SequenceNotFound;
+        return seq.current_len;
+    }
+
+    /// Recupera K/V de-cuantizados para atención
+    pub fn retrieveForAttention(        self: *Self,
         seq_id: u64,
         layer_idx: u32,
         head_idx: u32,
@@ -257,7 +282,7 @@ pub const KVCacheManager = struct {
         const num_elements = @as(usize, seq.current_len) * @as(usize, self.config.head_dim);
 
         // Si tenemos GPU, usar de-cuantización acelerada
-        if (self.gpu_engine) |*engine| {
+        if (self.gpu_engine) |_| {
             // TODO: Integrar con buffers GPU persistentes
             // Por ahora, de-cuantización CPU fallback
             try self.dequantizeCpu(k_buf, lconf.k_format, out_k[0..num_elements]);

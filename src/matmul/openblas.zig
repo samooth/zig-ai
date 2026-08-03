@@ -45,10 +45,10 @@ extern "c" fn cblas_dgemm(
     ldc: i32,
 ) void;
 
-const CblasRowMajor = 101;
-const CblasColMajor = 102;
-const CblasNoTrans = 111;
-const CblasTrans = 112;
+const CblasRowMajor: i32 = 101;
+const CblasColMajor: i32 = 102;
+const CblasNoTrans: i32 = 111;
+const CblasTrans: i32 = 112;
 
 /// GEMM via OpenBLAS
 /// A: [M, K], B: [K, N], C: [M, N]

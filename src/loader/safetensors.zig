@@ -67,6 +67,7 @@ pub const SafetensorsFile = struct {
     pub fn deinit(self: *Self) void {
         var tensor_iter = self.tensors.iterator();
         while (tensor_iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
             self.allocator.free(entry.value_ptr.name);
             self.allocator.free(entry.value_ptr.shape);
         }
@@ -142,7 +143,7 @@ pub const SafetensorsFile = struct {
                 idx = skipJsonValue(json, idx);
             } else {
                 // Parsear tensor info
-                var info = try self.parseTensorInfo(key, json, &idx);
+                const info = try self.parseTensorInfo(key, json, &idx);
                 // key se mueve a info.name, no liberar
                 const name_copy = try self.allocator.dupe(u8, info.name);
                 errdefer self.allocator.free(name_copy);
@@ -157,7 +158,6 @@ pub const SafetensorsFile = struct {
     }
 
     fn parseTensorInfo(self: *Self, name: []const u8, json: []const u8, idx: *usize) !TensorInfo {
-        _ = self;
         var pos = idx.*;
 
         if (pos >= json.len or json[pos] != '{') return SafetensorsError.InvalidJson;
@@ -171,8 +171,8 @@ pub const SafetensorsFile = struct {
             pos = skipWhitespace(json, pos);
             if (pos < json.len and json[pos] == '}') break;
 
-            const key = try parseJsonString(std.heap.page_allocator, json, &pos);
-            defer std.heap.page_allocator.free(key);
+            const key = try parseJsonString(self.allocator, json, &pos);
+            defer self.allocator.free(key);
 
             pos = skipWhitespace(json, pos);
             if (pos >= json.len or json[pos] != ':') return SafetensorsError.InvalidJson;
@@ -180,11 +180,11 @@ pub const SafetensorsFile = struct {
             pos = skipWhitespace(json, pos);
 
             if (std.mem.eql(u8, key, "dtype")) {
-                const dtype_str = try parseJsonString(std.heap.page_allocator, json, &pos);
-                defer std.heap.page_allocator.free(dtype_str);
+                const dtype_str = try parseJsonString(self.allocator, json, &pos);
+                defer self.allocator.free(dtype_str);
                 dtype = try Dtype.fromString(dtype_str);
             } else if (std.mem.eql(u8, key, "shape")) {
-                shape = try parseShape(std.heap.page_allocator, json, &pos);
+                shape = try parseShape(self.allocator, json, &pos);
             } else if (std.mem.eql(u8, key, "data_offsets")) {
                 offsets = try parseOffsets(json, &pos);
             } else {
@@ -199,9 +199,8 @@ pub const SafetensorsFile = struct {
         pos += 1;
         idx.* = pos;
 
-        const name_owned = try std.heap.page_allocator.dupe(u8, name);
-        // Nota: en uso real, el allocator debería ser self.allocator
-        // Aquí usamos page_allocator para el parseo temporal
+        const name_owned = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(name_owned);
 
         return TensorInfo{
             .name = name_owned,
@@ -219,9 +218,8 @@ pub const SafetensorsFile = struct {
         const data_start = 8 + self.file_data.len - self.file_data.len + info.data_offsets[0];
         const data_end = 8 + self.file_data.len - self.file_data.len + info.data_offsets[1];
         const tensor_bytes = self.file_data[data_start..data_end];
-        const num_elements = tensor_bytes.len / 2;
 
-        var tensor = try Tensor(f16).initUninitialized(allocator, info.shape);
+        const tensor = try Tensor(f16).initUninitialized(allocator, info.shape);
         @memcpy(std.mem.sliceAsBytes(tensor.data), tensor_bytes);
         return tensor;
     }
@@ -346,7 +344,7 @@ fn skipJsonValue(json: []const u8, idx: usize) usize {
         },
         '{', '[' => {
             const open = json[pos];
-            const close = if (open == '{') '}' else ']';
+            const close: u8 = if (open == '{') '}' else ']';
             var depth: usize = 1;
             pos += 1;
             while (pos < json.len and depth > 0) {
@@ -377,7 +375,7 @@ test "safetensors parse header" {
     const allocator = std.testing.allocator;
 
     // Construir un safetensors mínimo en memoria
-    const header = "{"weight":{"dtype":"F16","shape":[2,2],"data_offsets":[0,8]}}";
+    const header = "{ \"weight\": { \"dtype\": \"F16\", \"shape\": [2,2], \"data_offsets\": [0,8] } }";
     const header_len = header.len;
 
     var data = try allocator.alloc(u8, 8 + header_len + 8);

@@ -102,29 +102,28 @@ pub const TransformerLayer = struct {
         var engine = try MatmulEngine.init(allocator, backend, precision.compute);
         errdefer engine.deinit();
 
-        const fa_eng = try FlashAttention.init(allocator, fa_config_val, ptx_path);
+        var fa_eng = try FlashAttention.init(allocator, fa_config_val, ptx_path);
         errdefer fa_eng.deinit();
-
         const N = fa_config_val.N;
         const num_heads = fa_config_val.num_heads;
         const d = fa_config_val.d;
         const batch_size = fa_config_val.batch_size;
 
-        const q_proj = try Tensor(f16).alloc(allocator, &.{ batch_size, num_heads, N, d });
+        var q_proj = try Tensor(f16).alloc(allocator, &.{ batch_size, num_heads, N, d });
         errdefer q_proj.deinit();
-        const k_proj = try Tensor(f16).alloc(allocator, &.{ batch_size, num_kv_heads, N, d });
+        var k_proj = try Tensor(f16).alloc(allocator, &.{ batch_size, num_kv_heads, N, d });
         errdefer k_proj.deinit();
-        const v_proj = try Tensor(f16).alloc(allocator, &.{ batch_size, num_kv_heads, N, d });
+        var v_proj = try Tensor(f16).alloc(allocator, &.{ batch_size, num_kv_heads, N, d });
         errdefer v_proj.deinit();
-        const attn_out = try Tensor(f16).alloc(allocator, &.{ batch_size, num_heads, N, d });
+        var attn_out = try Tensor(f16).alloc(allocator, &.{ batch_size, num_heads, N, d });
         errdefer attn_out.deinit();
-        const ffn_gate = try Tensor(f16).alloc(allocator, &.{ batch_size, N, intermediate_dim });
+        var ffn_gate = try Tensor(f16).alloc(allocator, &.{ batch_size, N, intermediate_dim });
         errdefer ffn_gate.deinit();
-        const ffn_up = try Tensor(f16).alloc(allocator, &.{ batch_size, N, intermediate_dim });
+        var ffn_up = try Tensor(f16).alloc(allocator, &.{ batch_size, N, intermediate_dim });
         errdefer ffn_up.deinit();
-        const ffn_out = try Tensor(f16).alloc(allocator, &.{ batch_size, N, hidden_dim });
+        var ffn_out = try Tensor(f16).alloc(allocator, &.{ batch_size, N, hidden_dim });
         errdefer ffn_out.deinit();
-        const norm_buf = try Tensor(f16).alloc(allocator, &.{ batch_size, N, hidden_dim });
+        var norm_buf = try Tensor(f16).alloc(allocator, &.{ batch_size, N, hidden_dim });
         errdefer norm_buf.deinit();
 
         return .{
@@ -204,21 +203,22 @@ pub const TransformerLayer = struct {
         hidden_state: Tensor(f16),
         output: *Tensor(f16),
         position: usize,
-        is_prefill: bool,
+        _is_prefill: bool,
     ) !void {
+        _ = _is_prefill;
         const batch_size = hidden_state.shape[0];
         const seq_len = hidden_state.shape[1];
 
         // Reinterpretar como 2D para GEMM
-        var X_2d = try hidden_state.reshape(&[_]usize{ batch_size * seq_len, self.hidden_dim });
+        const X_2d = try hidden_state.reshape(&[_]usize{ batch_size * seq_len, self.hidden_dim });
         defer { if (X_2d.allocator) |a| { a.free(X_2d.shape); a.free(X_2d.strides); } }
 
         // === 1. Pre-Attention RMSNorm ===
-        var norm_2d = try self.norm_buf.reshape(&[_]usize{ batch_size * seq_len, self.hidden_dim });
+        const norm_2d = try self.norm_buf.reshape(&[_]usize{ batch_size * seq_len, self.hidden_dim });
         defer { if (norm_2d.allocator) |a| { a.free(norm_2d.shape); a.free(norm_2d.strides); } }
 
         if (self.attn_norm) |gamma| {
-            norm.rmsNorm(f16, hidden_state, gamma, self.rms_eps, &self.norm_buf);
+            norm.rmsNorm(f16, f32, hidden_state, gamma, self.rms_eps, &self.norm_buf);
         }
 
         // === 2. Proyecciones Q, K, V ===
@@ -298,12 +298,12 @@ pub const TransformerLayer = struct {
         // === 10. Post-Attention RMSNorm ===
         var attn_residual = output.*;
         if (self.ffn_norm) |gamma| {
-            norm.rmsNorm(f16, attn_residual, gamma, self.rms_eps, &self.norm_buf);
+            norm.rmsNorm(f16, f32, attn_residual, gamma, self.rms_eps, &self.norm_buf);
             attn_residual = self.norm_buf;
         }
 
         // === 11. FFN SwiGLU ===
-        var attn_res_2d = try attn_residual.reshape(&[_]usize{ batch_size * seq_len, self.hidden_dim });
+        const attn_res_2d = try attn_residual.reshape(&[_]usize{ batch_size * seq_len, self.hidden_dim });
         defer { if (attn_res_2d.allocator) |a| { a.free(attn_res_2d.shape); a.free(attn_res_2d.strides); } }
 
         var ffn_out_2d = try self.ffn_out.reshape(&[_]usize{ batch_size * seq_len, self.hidden_dim });
@@ -332,9 +332,9 @@ pub const TransformerLayer = struct {
     fn storeKvCache(self: *Self, mgr: *KVCacheManager, seq_len: usize) !void {
         for (0..self.num_kv_heads) |kv_h| {
             for (0..seq_len) |pos| {
-                var k_slice = try self.allocator.alloc(f16, self.head_dim);
+                const k_slice = try self.allocator.alloc(f16, self.head_dim);
                 defer self.allocator.free(k_slice);
-                var v_slice = try self.allocator.alloc(f16, self.head_dim);
+                const v_slice = try self.allocator.alloc(f16, self.head_dim);
                 defer self.allocator.free(v_slice);
 
                 const k_offset = ((0 * self.num_kv_heads + kv_h) * self.k_proj.shape[2] + pos) * self.head_dim;
@@ -386,7 +386,7 @@ pub const TransformerLayer = struct {
         try self.matmul_engine.linearProjection(f16, X, self.w_v_t.?, &V_2d);
     }
     fn projectOut(self: *Self, output: *Tensor(f16)) !void {
-        var attn_2d = try self.attn_out.reshape(&[_]usize{ output.shape[0] * output.shape[1], self.num_heads * self.head_dim });
+        const attn_2d = try self.attn_out.reshape(&[_]usize{ output.shape[0] * output.shape[1], self.num_heads * self.head_dim });
         defer { if (attn_2d.allocator) |a| { a.free(attn_2d.shape); a.free(attn_2d.strides); } }
         var out_2d = try output.reshape(&[_]usize{ output.shape[0] * output.shape[1], self.hidden_dim });
         defer { if (out_2d.allocator) |a| { a.free(out_2d.shape); a.free(out_2d.strides); } }
@@ -395,7 +395,7 @@ pub const TransformerLayer = struct {
 
     // ─── Proyecciones cuantizadas ───
     fn projectQQuantized(self: *Self, X: Tensor(f16)) !void {
-        var Q_2d = try self.q_proj.reshape(&[_]usize{ X.shape[0], self.num_heads * self.head_dim });
+        const Q_2d = try self.q_proj.reshape(&[_]usize{ X.shape[0], self.num_heads * self.head_dim });
         defer { if (Q_2d.allocator) |a| { a.free(Q_2d.shape); a.free(Q_2d.strides); } }
         var X_f32 = try Tensor(f32).alloc(self.allocator, X.shape);
         defer X_f32.deinit();
@@ -406,7 +406,7 @@ pub const TransformerLayer = struct {
         for (Q_f32.data, Q_2d.data) |s, *d| d.* = @floatCast(s);
     }
     fn projectKQuantized(self: *Self, X: Tensor(f16)) !void {
-        var K_2d = try self.k_proj.reshape(&[_]usize{ X.shape[0], self.num_kv_heads * self.head_dim });
+        const K_2d = try self.k_proj.reshape(&[_]usize{ X.shape[0], self.num_kv_heads * self.head_dim });
         defer { if (K_2d.allocator) |a| { a.free(K_2d.shape); a.free(K_2d.strides); } }
         var X_f32 = try Tensor(f32).alloc(self.allocator, X.shape);
         defer X_f32.deinit();
@@ -417,7 +417,7 @@ pub const TransformerLayer = struct {
         for (K_f32.data, K_2d.data) |s, *d| d.* = @floatCast(s);
     }
     fn projectVQuantized(self: *Self, X: Tensor(f16)) !void {
-        var V_2d = try self.v_proj.reshape(&[_]usize{ X.shape[0], self.num_kv_heads * self.head_dim });
+        const V_2d = try self.v_proj.reshape(&[_]usize{ X.shape[0], self.num_kv_heads * self.head_dim });
         defer { if (V_2d.allocator) |a| { a.free(V_2d.shape); a.free(V_2d.strides); } }
         var X_f32 = try Tensor(f32).alloc(self.allocator, X.shape);
         defer X_f32.deinit();
@@ -428,9 +428,9 @@ pub const TransformerLayer = struct {
         for (V_f32.data, V_2d.data) |s, *d| d.* = @floatCast(s);
     }
     fn projectOutQuantized(self: *Self, output: *Tensor(f16)) !void {
-        var attn_2d = try self.attn_out.reshape(&[_]usize{ output.shape[0] * output.shape[1], self.num_heads * self.head_dim });
+        const attn_2d = try self.attn_out.reshape(&[_]usize{ output.shape[0] * output.shape[1], self.num_heads * self.head_dim });
         defer { if (attn_2d.allocator) |a| { a.free(attn_2d.shape); a.free(attn_2d.strides); } }
-        var out_2d = try output.reshape(&[_]usize{ output.shape[0] * output.shape[1], self.hidden_dim });
+        const out_2d = try output.reshape(&[_]usize{ output.shape[0] * output.shape[1], self.hidden_dim });
         defer { if (out_2d.allocator) |a| { a.free(out_2d.shape); a.free(out_2d.strides); } }
         var attn_f32 = try Tensor(f32).alloc(self.allocator, attn_2d.shape);
         defer attn_f32.deinit();
@@ -452,7 +452,7 @@ fn loadWeightFile(allocator: std.mem.Allocator, base: []const u8, name: []const 
     defer file.close();
     const size = try file.getEndPos();
     const num_elements = size / 2;
-    var tensor = try Tensor(f16).initUninitialized(allocator, &.{num_elements});
+    const tensor = try Tensor(f16).initUninitialized(allocator, &.{num_elements});
     _ = try file.readAll(std.mem.sliceAsBytes(tensor.data));
     return tensor;
 }
@@ -467,7 +467,7 @@ fn loadWeightFileF32(allocator: std.mem.Allocator, base: []const u8, name: []con
     defer file.close();
     const size = try file.getEndPos();
     const num_elements = size / 4;
-    var tensor = try Tensor(f32).initUninitialized(allocator, &.{num_elements});
+    const tensor = try Tensor(f32).initUninitialized(allocator, &.{num_elements});
     _ = try file.readAll(std.mem.sliceAsBytes(tensor.data));
     return tensor;
 }

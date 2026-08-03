@@ -47,17 +47,20 @@ pub const TileConfig = struct {
 
 /// Detectar capacidades SIMD en comptime
 pub const SimdInfo = struct {
+    const builtin = @import("builtin");
+    const featureSetHas = std.Target.x86.featureSetHas;
+
     pub const vec_len_f32 = blk: {
-        if (@hasFeature("avx512f")) break :blk 16;
-        if (@hasFeature("avx2")) break :blk 8;
-        if (@hasFeature("sse2")) break :blk 4;
+        if (featureSetHas(builtin.cpu.features, .avx512f)) break :blk 16;
+        if (featureSetHas(builtin.cpu.features, .avx2)) break :blk 8;
+        if (featureSetHas(builtin.cpu.features, .sse2)) break :blk 4;
         break :blk 1;
     };
 
     pub const vec_len_f64 = blk: {
-        if (@hasFeature("avx512f")) break :blk 8;
-        if (@hasFeature("avx2")) break :blk 4;
-        if (@hasFeature("sse2")) break :blk 2;
+        if (featureSetHas(builtin.cpu.features, .avx512f)) break :blk 8;
+        if (featureSetHas(builtin.cpu.features, .avx2)) break :blk 4;
+        if (featureSetHas(builtin.cpu.features, .sse2)) break :blk 2;
         break :blk 1;
     };
 

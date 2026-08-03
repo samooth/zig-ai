@@ -69,7 +69,7 @@ pub fn launchFlashAttentionV1(kernel: cudaz.CUfunction, config: FlashAttentionCo
     buffers: FlashAttentionBuffers, stream: cudaz.CUstream) !void {
     const launch_config = computeLaunchConfig(config);
     const smem_size = computeSharedMemSize(config);
-    const args = .{
+    var args = .{
         &buffers.d_q, &buffers.d_k, &buffers.d_v, &buffers.d_o,
         @as(c_int, @intCast(config.N)),
         @as(c_int, @intCast(config.num_heads)),
@@ -82,21 +82,25 @@ pub fn launchFlashAttentionV1(kernel: cudaz.CUfunction, config: FlashAttentionCo
     };
     try cudaz.cuLaunchKernel(kernel, launch_config.grid_x, launch_config.grid_y, launch_config.grid_z,
         launch_config.block_x, launch_config.block_y, launch_config.block_z,
-        @intCast(smem_size), stream, &args, null);
+        @intCast(smem_size), stream, @ptrCast(&args), null);
 }
 
 pub fn launchFlashAttentionV2(kernel: cudaz.CUfunction, config: FlashAttentionConfig,
     buffers: FlashAttentionBuffers, stream: cudaz.CUstream) !void {
     const launch_config = computeLaunchConfig(config);
     const smem_size = computeSharedMemSize(config);
-    const args = .{
+    var args = .{
         &buffers.d_q, &buffers.d_k, &buffers.d_v, &buffers.d_o,
         @as(c_int, @intCast(config.N)),
         @as(c_int, @intCast(config.d)),
         config.scale(),
         @as(c_int, @intFromBool(config.causal)),
+        @as(c_int, @intCast(config.bq)),
+        @as(c_int, @intCast(config.bkv)),
+        @as(c_int, @intCast(config.num_heads)),
+        stream,
     };
     try cudaz.cuLaunchKernel(kernel, launch_config.grid_x, launch_config.grid_y, launch_config.grid_z,
         launch_config.block_x, launch_config.block_y, launch_config.block_z,
-        @intCast(smem_size), stream, &args, null);
+        @intCast(smem_size), stream, @ptrCast(&args), null);
 }

@@ -95,7 +95,8 @@ pub const GpuDequantEngine = struct {
     pub fn deinit(self: *Self) void {
         self.buffers.free();
         cudaz.cuStreamDestroy(self.stream);
-        for (self.kernels.valueIterator()) |func| {
+        var it = self.kernels.valueIterator();
+        while (it.next()) |func| {
             _ = func;
         }
         self.kernels.deinit();

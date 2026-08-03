@@ -7,23 +7,39 @@ pub fn build(b: *std.Build) void {
     // Detectar CUDA
     const cuda_path = b.option([]const u8, "cuda-path", "Path to CUDA installation")
         orelse std.process.getEnvVarOwned(b.allocator, "CUDA_PATH") catch "/usr/local/cuda";
+    const cuda_bin_path = std.fmt.allocPrint(b.allocator, "{s}/bin", .{cuda_path}) catch "/usr/local/cuda/bin";
+    const cuda_lib_path = std.fmt.allocPrint(b.allocator, "{s}/lib64", .{cuda_path}) catch "/usr/local/cuda/lib64";
+    const cuda_inc_path = std.fmt.allocPrint(b.allocator, "{s}/include", .{cuda_path}) catch "/usr/local/cuda/include";
 
     const has_cuda = blk: {
-        const nvcc = b.findProgram(&.{"nvcc"}, &.{cuda_path ++ "/bin"}) catch break :blk false;
+        const nvcc = b.findProgram(&.{"nvcc"}, &.{cuda_bin_path}) catch break :blk false;
         _ = nvcc;
         break :blk true;
     };
+
+    const cuda_lib_dir_exists = blk: {
+        if (!has_cuda) break :blk false;
+        _ = std.fs.cwd().access(cuda_lib_path, .{}) catch break :blk false;
+        break :blk true;
+    };
+    const cuda_inc_dir_exists = blk: {
+        if (!has_cuda) break :blk false;
+        _ = std.fs.cwd().access(cuda_inc_path, .{}) catch break :blk false;
+        break :blk true;
+    };
+
+    const has_openblas = b.option(bool, "openblas", "Link OpenBLAS") orelse false;
 
     var ptx_output: ?std.Build.LazyPath = null;
     var cubin_output: ?std.Build.LazyPath = null;
     var dequant_ptx: ?std.Build.LazyPath = null;
 
     if (has_cuda) {
-        const nvcc_path = b.findProgram(&.{"nvcc"}, &.{cuda_path ++ "/bin"}) catch unreachable;
+        const nvcc_path = b.findProgram(&.{"nvcc"}, &.{cuda_bin_path}) catch unreachable;
 
         const compile_ptx = b.addSystemCommand(&.{
             nvcc_path,
-            "-arch=sm_80", "-code=sm_80,compute_80",
+            "-arch=compute_80", "-code=compute_80",
             "-ptx", "-o",
         });
         ptx_output = compile_ptx.addOutputFileArg("flash_attention.ptx");
@@ -31,14 +47,16 @@ pub fn build(b: *std.Build) void {
 
         const compile_cubin = b.addSystemCommand(&.{
             nvcc_path,
-            "-arch=sm_80", "-cubin", "-o",
+            "-arch=compute_80", "-code=sm_80",
+            "-cubin", "-o",
         });
         cubin_output = compile_cubin.addOutputFileArg("flash_attention_sm80.cubin");
         compile_cubin.addFileArg(b.path("cuda/flash_attention.cu"));
 
         const compile_dequant = b.addSystemCommand(&.{
             nvcc_path,
-            "-arch=sm_80", "-ptx", "-o",
+            "-arch=compute_80", "-code=compute_80",
+            "-ptx", "-o",
         });
         dequant_ptx = compile_dequant.addOutputFileArg("dequantize_kernels.ptx");
         compile_dequant.addFileArg(b.path("cuda/dequantize_kernels.cu"));
@@ -52,12 +70,21 @@ pub fn build(b: *std.Build) void {
     });
 
     // === Módulo matmul ===
+    const options = b.addOptions();
+    options.addOption(bool, "has_cuda", has_cuda);
+    options.addOption(bool, "has_openblas", has_openblas);
     const matmul_mod = b.addModule("matmul", .{
         .root_source_file = b.path("src/matmul/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     matmul_mod.addImport("core", core_mod);
+    matmul_mod.addOptions("build_options", options);
+
+    // === Módulo cudaz stub ===
+    const cudaz_mod = b.addModule("cudaz", .{
+        .root_source_file = b.path("src/cuda/cudaz_stub.zig"),
+    });
 
     // === Módulo fa ===
     const fa_mod = b.addModule("fa", .{
@@ -67,11 +94,7 @@ pub fn build(b: *std.Build) void {
     });
     fa_mod.addImport("core", core_mod);
     fa_mod.addImport("matmul", matmul_mod);
-
-    // === Módulo cudaz stub ===
-    const cudaz_mod = b.addModule("cudaz", .{
-        .root_source_file = b.path("src/cuda/cudaz_stub.zig"),
-    });
+    fa_mod.addImport("cudaz", cudaz_mod);
 
     // === Módulo kv_cache ===
     const kv_cache_mod = b.addModule("kv_cache", .{
@@ -200,12 +223,13 @@ pub fn build(b: *std.Build) void {
         exe.root_module.addAnonymousImport("dequantize_ptx", .{ .root_source_file = ptx });
     }
 
+    exe.linkLibC();
     if (has_cuda) {
         exe.linkSystemLibrary("cuda");
-        exe.addLibraryPath(.{ .cwd_relative = cuda_path ++ "/lib64" });
-        exe.addIncludePath(.{ .cwd_relative = cuda_path ++ "/include" });
+        exe.linkSystemLibrary("cudart");
+        if (cuda_lib_dir_exists) exe.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
+        if (cuda_inc_dir_exists) exe.addIncludePath(.{ .cwd_relative = cuda_inc_path });
         exe.linkSystemLibrary("cublas");
-        exe.linkLibC();
     }
 
     b.installArtifact(exe);
@@ -236,7 +260,7 @@ pub fn build(b: *std.Build) void {
         "src/loader/safetensors.zig",
     };
 
-    for (test_files) |tf| {
+    inline for (test_files) |tf| {
         const t = b.addTest(.{
             .root_source_file = b.path(tf),
             .target = target,
@@ -256,11 +280,12 @@ pub fn build(b: *std.Build) void {
         t.root_module.addImport("tokenizer", tokenizer_mod);
         t.root_module.addImport("loader", loader_mod);
         t.root_module.addImport("pipeline", pipeline_mod);
+        t.linkLibC();
         if (has_cuda) {
             t.linkSystemLibrary("cuda");
-            t.addLibraryPath(.{ .cwd_relative = cuda_path ++ "/lib64" });
+            t.linkSystemLibrary("cudart");
+            if (cuda_lib_dir_exists) t.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
             t.linkSystemLibrary("cublas");
-            t.linkLibC();
         }
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
@@ -280,11 +305,12 @@ pub fn build(b: *std.Build) void {
     bench.root_module.addImport("transformer", transformer_mod);
     bench.root_module.addImport("kv_cache", kv_cache_mod);
     bench.root_module.addImport("cudaz", cudaz_mod);
+    bench.linkLibC();
     if (has_cuda) {
         bench.linkSystemLibrary("cuda");
-        bench.addLibraryPath(.{ .cwd_relative = cuda_path ++ "/lib64" });
+        bench.linkSystemLibrary("cudart");
+        if (cuda_lib_dir_exists) bench.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
         bench.linkSystemLibrary("cublas");
-        bench.linkLibC();
     }
     b.installArtifact(bench);
     const run_bench = b.addRunArtifact(bench);

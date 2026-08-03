@@ -2,12 +2,14 @@ const std = @import("std");
 const Tensor = @import("core").Tensor;
 const fa = @import("fa");
 const transformer = @import("transformer");
+const cudaz = @import("cudaz");
 
 const TransformerLayer = transformer.TransformerLayer;
 const LayerPrecision = transformer.LayerPrecision;
 const FlashAttentionConfig = fa.fa_config.FlashAttentionConfig;
 
 test "transformer layer init/deinit" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const config = FlashAttentionConfig{
         .N = 32, .d = 64, .num_heads = 4, .batch_size = 1,
@@ -19,7 +21,7 @@ test "transformer layer init/deinit" {
         .use_quantized = false,
     };
 
-    var layer = try TransformerLayer.init(allocator, 0, config, "cuda/flash_attention.ptx", 256, precision);
+    var layer = try TransformerLayer.init(allocator, 0, config, "cuda/flash_attention.ptx", 256, precision, config.num_heads, 1024);
     defer layer.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), layer.layer_idx);

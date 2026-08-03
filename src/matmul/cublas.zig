@@ -11,10 +11,10 @@ const Tensor = @import("core").Tensor;
 // Declaraciones externas CUDA / cuBLAS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-extern "c" fn cublasCreate(handle: **anyopaque) i32;
-extern "c" fn cublasDestroy(handle: *anyopaque) void;
-extern "c" fn cublasSetStream(handle: *anyopaque, stream: *anyopaque) i32;
-extern "c" fn cublasGetStream(handle: *anyopaque, stream: **anyopaque) i32;
+extern "c" fn cublasCreate_v2(handle: **anyopaque) i32;
+extern "c" fn cublasDestroy_v2(handle: *anyopaque) void;
+extern "c" fn cublasSetStream_v2(handle: *anyopaque, stream: *anyopaque) i32;
+extern "c" fn cublasGetStream_v2(handle: *anyopaque, stream: **anyopaque) i32;
 
 extern "c" fn cublasSgemm(
     handle: *anyopaque, transa: i32, transb: i32,
@@ -86,8 +86,8 @@ const cudaMemcpyHostToDevice = 1;
 const cudaMemcpyDeviceToHost = 2;
 const cudaMemcpyDeviceToDevice = 3;
 
-const CUBLAS_OP_N = 0;
-const CUBLAS_OP_T = 1;
+const CUBLAS_OP_N: c_int = 0;
+const CUBLAS_OP_T: c_int = 1;
 const CUBLAS_STATUS_SUCCESS = 0;
 
 // CUDA data types para GemmEx
@@ -119,7 +119,7 @@ pub const CuBlasHandle = struct {
 
     pub fn init() !CuBlasHandle {
         var raw: *anyopaque = undefined;
-        const status = cublasCreate(&raw);
+        const status = cublasCreate_v2(&raw);
         if (status != CUBLAS_STATUS_SUCCESS) {
             std.log.err("cublasCreate failed: {}", .{status});
             return error.CuBlasInitFailed;
@@ -128,12 +128,12 @@ pub const CuBlasHandle = struct {
     }
 
     pub fn deinit(self: CuBlasHandle) void {
-        _ = cublasDestroy(self.raw);
+        _ = cublasDestroy_v2(self.raw);
     }
 
     /// Asociar un stream CUDA para operaciones async
-    pub fn setStream(self: CuBlasHandle, stream: *anyopaque) !void {
-        const status = cublasSetStream(self.raw, stream);
+    pub fn setStream(self: *CuBlasHandle, stream: *anyopaque) !void {
+        const status = cublasSetStream_v2(self.raw, stream);
         if (status != CUBLAS_STATUS_SUCCESS) return error.CuBlasSetStreamFailed;
         self.stream = stream;
     }
@@ -308,7 +308,7 @@ pub const GpuMemoryPool = struct {
     }
 
     /// Liberar todos los bloques no en uso
-    pub defragment(self: *GpuMemoryPool) void {
+    pub fn defragment(self: *GpuMemoryPool) void {
         var i: usize = self.blocks.items.len;
         while (i > 0) : (i -= 1) {
             const block = &self.blocks.items[i - 1];
@@ -319,7 +319,9 @@ pub const GpuMemoryPool = struct {
         }
     }
 
-    pub fn stats(self: GpuMemoryPool) struct { total: usize, used: usize, free: usize } {
+    pub const PoolStats = struct { total: usize, used: usize, free: usize };
+
+    pub fn stats(self: GpuMemoryPool) PoolStats {
         var total: usize = 0;
         var used: usize = 0;
         for (self.blocks.items) |block| {
@@ -408,7 +410,8 @@ pub fn gemmCuBlasF32Async(
 ) !void {
     std.debug.assert(A.isContiguous() and B.isContiguous() and C.isContiguous());
 
-    try handle.setStream(stream.raw);
+    var h = handle;
+    try h.setStream(stream.raw);
 
     const size_A = A.data.len * @sizeOf(f32);
     const size_B = B.data.len * @sizeOf(f32);
@@ -437,7 +440,7 @@ pub fn gemmCuBlasF32Async(
     const ldc: i32 = @intCast(N);
 
     const status = cublasSgemm(
-        handle.raw,
+        h.raw,
         op_a, op_b,
         @intCast(M), @intCast(N), @intCast(K),
         &alpha,
@@ -451,7 +454,6 @@ pub fn gemmCuBlasF32Async(
         std.log.err("cublasSgemm async failed: {}", .{status});
         return error.CuBlasGemmFailed;
     }
-
     // Download async
     const status_d2h = cudaMemcpyAsync(C.data.ptr, d_C_ptr, size_C, cudaMemcpyDeviceToHost, stream.raw);
     if (status_d2h != 0) return error.CudaMemcpyAsyncFailed;
@@ -549,12 +551,12 @@ pub fn gemmBatchF32(
     // Download batch
     for (C_batch, 0..) |C, b| {
         const offset = b * M * N;
-        const status = cudaMemcpy(
+        const copy_status = cudaMemcpy(
             C.data.ptr,
             @ptrCast(@alignCast(@as([*]u8, @ptrCast(d_C.dev_ptr)) + offset * @sizeOf(f32))),
             C.data.len * @sizeOf(f32), cudaMemcpyDeviceToHost,
         );
-        if (status != 0) return error.CudaMemcpyFailed;
+        if (copy_status != 0) return error.CudaMemcpyFailed;
     }
 
     handle.sync();
@@ -836,12 +838,12 @@ pub fn gemmBatchExF16F32(
     // Download
     for (C_batch, 0..) |C, b| {
         const offset = b * M * N;
-        const status = cudaMemcpy(
+        const copy_status = cudaMemcpy(
             C.data.ptr,
             @ptrCast(@alignCast(@as([*]u8, @ptrCast(d_C.dev_ptr)) + offset * @sizeOf(f32))),
             C.data.len * @sizeOf(f32), cudaMemcpyDeviceToHost,
         );
-        if (status != 0) return error.CudaMemcpyFailed;
+        if (copy_status != 0) return error.CudaMemcpyFailed;
     }
 
     handle.sync();

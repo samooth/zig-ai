@@ -95,17 +95,17 @@ pub fn Tensor(comptime T: type) type {
                 .shape = shape,
                 .strides = strides,
                 .offset = offset,
-                .allocator = null,
+                .allocator = self.allocator,
                 .owns_data = false,
             };
         }
 
         pub fn deinit(self: *Self) void {
             if (self.owns_data) {
-                if (self.allocator) |alloc| {
-                    alloc.free(self.data);
-                    alloc.free(self.shape);
-                    alloc.free(self.strides);
+                if (self.allocator) |a| {
+                    a.free(self.data);
+                    a.free(self.shape);
+                    a.free(self.strides);
                 }
             }
         }
@@ -240,20 +240,20 @@ pub fn Tensor(comptime T: type) type {
 
         pub fn randn(self: Self, rng: *std.Random.Xoshiro256) void {
             var it = self.iterator();
-            while (it.next()) |ptr| {
-                const u1 = rng.random().float(f32);
-                const u2 = rng.random().float(f32);
-                const r = @sqrt(-2.0 * @log(u1));
-                const theta = 2.0 * std.math.pi * u2;
-                ptr.* = @as(T, @floatCast(r * @cos(theta)));
+            while (it.next()) |p| {
+                const r1 = rng.random().float(f32);
+                const r2 = rng.random().float(f32);
+                const r = @sqrt(-2.0 * @log(r1));
+                const theta = 2.0 * std.math.pi * r2;
+                p.* = @as(T, @floatCast(r * @cos(theta)));
             }
         }
 
         pub fn randUniform(self: Self, rng: *std.Random.Xoshiro256, min: f32, max: f32) void {
             var it = self.iterator();
-            while (it.next()) |ptr| {
+            while (it.next()) |p| {
                 const f = rng.random().float(f32);
-                ptr.* = @as(T, @floatCast(min + f * (max - min)));
+                p.* = @as(T, @floatCast(min + f * (max - min)));
             }
         }
 

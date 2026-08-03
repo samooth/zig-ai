@@ -50,7 +50,7 @@ pub fn main() !void {
         .use_quantized = false,
     };
 
-    var layer = try TransformerLayer.init(allocator, 0, config, "cuda/flash_attention.ptx", 1024, precision);
+    var layer = try TransformerLayer.init(allocator, 0, config, "cuda/flash_attention.ptx", 1024, precision, config.num_heads, 4096);
     defer layer.deinit();
 
     try stdout.print("[+] Capa transformer inicializada\n", .{});
@@ -67,13 +67,13 @@ pub fn main() !void {
 
     // Warmup
     try stdout.print("[*] Warmup...\n", .{});
-    try layer.forward(hidden_state, &output);
+    try layer.forward(hidden_state, &output, 0, true);
 
     // Benchmark
     const iterations: usize = 10;
     var timer = try std.time.Timer.start();
     for (0..iterations) |_| {
-        try layer.forward(hidden_state, &output);
+    try layer.forward(hidden_state, &output, 0, true);
     }
     const total_ns = timer.read();
     const avg_ms = @as(f64, @floatFromInt(total_ns)) / @as(f64, @floatFromInt(iterations)) / 1_000_000.0;

@@ -162,6 +162,8 @@ pub const KVCacheConfig = struct {
     num_layers: u32,
     /// Número de cabezas de atención
     num_heads: u32,
+    /// Número de cabezas K/V (GQA; <= num_heads)
+    num_kv_heads: u32,
     /// Dimensión por cabeza
     head_dim: u32,
     /// Longitud máxima de secuencia
@@ -180,6 +182,7 @@ pub const KVCacheConfig = struct {
         return .{
             .num_layers = num_layers,
             .num_heads = num_heads,
+            .num_kv_heads = num_heads,
             .head_dim = head_dim,
             .max_seq_len = max_seq_len,
             .layer_configs = null,
@@ -194,6 +197,7 @@ pub const KVCacheConfig = struct {
         return .{
             .num_layers = num_layers,
             .num_heads = num_heads,
+            .num_kv_heads = num_heads,
             .head_dim = head_dim,
             .max_seq_len = max_seq_len,
             .layer_configs = null,
@@ -209,6 +213,12 @@ pub const KVCacheConfig = struct {
         const elements_total = elements_per_layer * self.num_layers * 2; // K + V
         const bits = format.bitsPerElement();
         return (elements_total * bits) / 8;
+    }
+
+    /// Mapea un head de query a su head K/V (GQA)
+    pub fn qHeadToKvHead(self: KVCacheConfig, q_head: usize) usize {
+        const group_size = self.num_heads / self.num_kv_heads;
+        return q_head / group_size;
     }
 };
 

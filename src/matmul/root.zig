@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const Tensor = @import("core").Tensor;
+const build_options = @import("build_options");
 
 const naive = @import("naive.zig");
 const simd = @import("simd.zig");
@@ -38,21 +39,31 @@ pub const Backend = enum {
     auto,
 };
 
+pub const PrecisionMode = enum {
+    f32,
+    f16,
+    bf16,
+    int8,
+    int4,
+};
+
 pub const MatmulEngine = struct {
     const Self = @This();
 
     allocator: std.mem.Allocator,
     backend: Backend,
-    thread_pool: ?std.Thread.Pool,
+    precision: PrecisionMode,
+    thread_pool: ?*std.Thread.Pool,
     cublas_handle: ?cublas.CuBlasHandle,
     cuda_stream: ?cublas.CudaStream,
     gpu_pool: ?cublas.GpuMemoryPool,
     tile_config: types.TileConfig,
 
-    pub fn init(allocator: std.mem.Allocator, preferred: Backend) !Self {
+    pub fn init(allocator: std.mem.Allocator, preferred: Backend, precision: PrecisionMode) !Self {
         var engine = Self{
             .allocator = allocator,
             .backend = preferred,
+            .precision = precision,
             .thread_pool = null,
             .cublas_handle = null,
             .cuda_stream = null,
@@ -66,18 +77,20 @@ pub const MatmulEngine = struct {
 
         switch (engine.backend) {
             .parallel => {
-                var pool: std.Thread.Pool = undefined;
+                const pool = try allocator.create(std.Thread.Pool);
+                errdefer allocator.destroy(pool);
                 const n_cpus = try std.Thread.getCpuCount();
                 try pool.init(.{ .allocator = allocator, .n_jobs = n_cpus });
                 engine.thread_pool = pool;
             },
             .cublas => {
+                if (!build_options.has_cuda) return error.CuBlasNotLinked;
                 engine.cublas_handle = try cublas.CuBlasHandle.init();
                 engine.cuda_stream = try cublas.CudaStream.create();
                 var gpu_pool = cublas.GpuMemoryPool.init(allocator);
                 gpu_pool.setStream(engine.cuda_stream.?.raw);
                 engine.gpu_pool = gpu_pool;
-                try engine.cublas_handle.?.setStream(engine.cuda_stream.?.raw);
+                if (engine.cublas_handle) |*h| try h.setStream(engine.cuda_stream.?.raw);
             },
             else => {},
         }
@@ -86,10 +99,15 @@ pub const MatmulEngine = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        if (self.thread_pool) |*pool| pool.deinit();
-        if (self.cuda_stream) |stream| stream.destroy();
-        if (self.gpu_pool) |*pool| pool.deinit();
-        if (self.cublas_handle) |handle| handle.deinit();
+        if (self.thread_pool) |pool| {
+            pool.deinit();
+            self.allocator.destroy(pool);
+        }
+        if (build_options.has_cuda) {
+            if (self.cuda_stream) |stream| stream.destroy();
+            if (self.gpu_pool) |*pool| pool.deinit();
+            if (self.cublas_handle) |handle| handle.deinit();
+        }
     }
 
     // ─── GEMM general ───
@@ -115,31 +133,35 @@ pub const MatmulEngine = struct {
         switch (self.backend) {
             .naive => naive.gemmNaive(T, A, B, C, M, N, K, trans_a, trans_b, 1.0, 0.0),
             .simd => {
-                if (trans_b) {
+                if (comptime T != f32 and T != f64) {
+                    naive.gemmNaive(T, A, B, C, M, N, K, trans_a, trans_b, 1.0, 0.0);
+                } else if (trans_b) {
                     simd.gemmSimd(T, A, B, C, M, N, K);
                 } else {
-                    var Bt = try B.transpose();
+                    const Bt = try B.transpose();
                     defer { if (Bt.allocator) |a| { a.free(Bt.shape); a.free(Bt.strides); } }
                     simd.gemmSimd(T, A, Bt, C, M, N, K);
                 }
             },
             .tiled => {
-                if (trans_b) {
+                if (comptime T != f32) {
+                    naive.gemmNaive(T, A, B, C, M, N, K, trans_a, trans_b, 1.0, 0.0);
+                } else if (trans_b) {
                     tiled.gemmTiled(T, A, B, C, M, N, K, self.tile_config);
                 } else {
-                    var Bt = try B.transpose();
+                    const Bt = try B.transpose();
                     defer { if (Bt.allocator) |a| { a.free(Bt.shape); a.free(Bt.strides); } }
                     tiled.gemmTiled(T, A, Bt, C, M, N, K, self.tile_config);
                 }
             },
             .parallel => {
-                if (self.thread_pool) |*pool| {
+                if (self.thread_pool) |pool| {
                     if (trans_b) {
                         try parallel.gemmParallel(T, pool, A, B, C, M, N, K, .{
                             .num_threads = pool.threads.len, .use_simd = true,
                         });
                     } else {
-                        var Bt = try B.transpose();
+                        const Bt = try B.transpose();
                         defer { if (Bt.allocator) |a| { a.free(Bt.shape); a.free(Bt.strides); } }
                         try parallel.gemmParallel(T, pool, A, Bt, C, M, N, K, .{
                             .num_threads = pool.threads.len, .use_simd = true,
@@ -147,8 +169,9 @@ pub const MatmulEngine = struct {
                     }
                 } else return error.ThreadPoolNotInitialized;
             },
-            .openblas => openblas.gemmOpenBlas(T, A, B, C, M, N, K, trans_a, trans_b, 1.0, 0.0),
+            .openblas => if (build_options.has_openblas) openblas.gemmOpenBlas(T, A, B, C, M, N, K, trans_a, trans_b, 1.0, 0.0) else return error.OpenBlasNotLinked,
             .cublas => {
+                if (!build_options.has_cuda) return error.CuBlasNotLinked;
                 if (self.cublas_handle) |handle| {
                     if (T == f32) {
                         if (self.cuda_stream != null and self.gpu_pool != null) {
@@ -177,7 +200,7 @@ pub const MatmulEngine = struct {
         std.debug.assert(X.shape[1] == W_T.shape[1]);
         std.debug.assert(Y.shape[0] == X.shape[0]);
         std.debug.assert(Y.shape[1] == W_T.shape[0]);
-        try self.gemm(T, X, W_T, Y, false, false);
+        try self.gemm(T, X, W_T, Y, false, true);
     }
 
     // ─── FFN SwiGLU ───
@@ -187,8 +210,14 @@ pub const MatmulEngine = struct {
         try self.linearProjection(T, X, W_up_T, up_out);
     }
 
-    // ─── Batch GEMM (cuBLAS) ───
+    // ─── GEMM cuantizado (INT8) ───
 
+    pub fn gemmQuantized(self: *Self, A: Tensor(f32), B_q: QuantizedTensor, C: *Tensor(f32), M: usize, N: usize, K: usize) !void {
+        _ = self;
+        quant.gemmWithQuantizedB(A, B_q, C, M, N, K);
+    }
+
+    // ─── Batch GEMM (cuBLAS) ───
     pub fn gemmBatch(self: *Self, A_batch: []const Tensor(f32), B_batch: []const Tensor(f32), C_batch: []const *Tensor(f32), M: usize, N: usize, K: usize) !void {
         if (self.backend != .cublas) return error.BatchGemmRequiresCuBlas;
         if (self.cublas_handle) |handle| {
@@ -242,7 +271,9 @@ pub const MatmulEngine = struct {
         };
     }
 
-    pub fn gpuPoolStats(self: Self) ?struct { total: usize, used: usize, free: usize } {
+    pub const PoolStats = cublas.GpuMemoryPool.PoolStats;
+
+    pub fn gpuPoolStats(self: Self) ?PoolStats {
         if (self.gpu_pool) |pool| return pool.stats();
         return null;
     }

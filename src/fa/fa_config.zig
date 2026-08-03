@@ -29,10 +29,7 @@ pub const FlashAttentionConfig = struct {
         return self.batch_size * self.num_heads * self.N * self.d;
     }
     pub fn validate(self: FlashAttentionConfig) !void {
-        if (self.d != 64 and self.d != 128) {
-            std.log.err("Invalid head dimension: {d}. Must be 64 or 128.", .{self.d});
-            return error.InvalidConfig;
-        }
+        if (self.d != 64 and self.d != 128) return error.InvalidConfig;
         if (self.N == 0 or self.batch_size == 0 or self.num_heads == 0) return error.InvalidConfig;
         if (self.bq == 0 or self.bkv == 0) return error.InvalidConfig;
     }

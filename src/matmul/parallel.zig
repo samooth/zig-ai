@@ -35,12 +35,13 @@ pub fn gemmParallel(
 
     var start_row: usize = 0;
     for (0..num_threads) |t| {
-        const extra = if (t < remainder) 1 else 0;
+        const extra: usize = if (t < remainder) 1 else 0;
         const end_row = start_row + rows_per_thread + extra;
 
         if (end_row > start_row) {
             wg.start();
-            try pool.spawn(workerFn(T), .{
+            const Worker = workerFn(T);
+            try pool.spawn(Worker.worker, .{
                 A, B, C,
                 start_row, end_row,
                 N, K,
@@ -112,7 +113,7 @@ fn workerFn(comptime T: type) type {
                 }
             }
         }
-    }.worker;
+    };
 }
 
 

@@ -122,28 +122,26 @@ pub fn cuLaunchKernel(
     if (res != .SUCCESS) return error.CudaError;
 }
 
-const cudalib = if (@hasDecl(@import("std"), "c"))
-    @cImport({ @cInclude("cuda.h"); })
-else struct {
-    pub extern "cuda" fn cuInit(flags: c_uint) CUresult;
-    pub extern "cuda" fn cuDeviceGet(device: *CUdevice, ordinal: c_int) CUresult;
-    pub extern "cuda" fn cuCtxCreate(ctx: *CUcontext, flags: c_uint, dev: CUdevice) CUresult;
-    pub extern "cuda" fn cuCtxDestroy(ctx: CUcontext) CUresult;
-    pub extern "cuda" fn cuModuleLoad(module: *CUmodule, fname: [*:0]const u8) CUresult;
-    pub extern "cuda" fn cuModuleUnload(module: CUmodule) CUresult;
-    pub extern "cuda" fn cuModuleGetFunction(hfunc: *CUfunction, hmod: CUmodule, name: [*:0]const u8) CUresult;
-    pub extern "cuda" fn cuMemAlloc(dptr: *CUdeviceptr, bytesize: usize) CUresult;
-    pub extern "cuda" fn cuMemFree(dptr: CUdeviceptr) CUresult;
-    pub extern "cuda" fn cuMemAllocHost(pp: **anyopaque, bytesize: usize) CUresult;
-    pub extern "cuda" fn cuMemFreeHost(p: *anyopaque) CUresult;
-    pub extern "cuda" fn cuMemcpyHtoDAsync(dst: CUdeviceptr, src: *const anyopaque, bytes: usize, stream: CUstream) CUresult;
-    pub extern "cuda" fn cuMemcpyDtoHAsync(dst: *anyopaque, src: CUdeviceptr, bytes: usize, stream: CUstream) CUresult;
-    pub extern "cuda" fn cuStreamCreate(phStream: *CUstream, flags: c_uint) CUresult;
-    pub extern "cuda" fn cuStreamDestroy(hStream: CUstream) CUresult;
-    pub extern "cuda" fn cuStreamSynchronize(hStream: CUstream) CUresult;
-    pub extern "cuda" fn cuLaunchKernel(f: CUfunction, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, by: c_uint, bz: c_uint, sm: c_uint, stream: CUstream, params: ?*anyopaque, extra: ?*anyopaque) CUresult;
-    pub extern "cuda" fn cuDeviceGetName(name: [*]u8, len: c_int, dev: CUdevice) CUresult;
-    pub extern "cuda" fn cuDeviceTotalMem(mem: *usize, dev: CUdevice) CUresult;
+const cudalib = struct {
+    fn cuInit(flags: c_uint) CUresult { _ = flags; return .ERROR_NOT_INITIALIZED; }
+    fn cuDeviceGet(device: *CUdevice, ordinal: c_int) CUresult { _ = device; _ = ordinal; return .ERROR_NO_DEVICE; }
+    fn cuCtxCreate(ctx: *CUcontext, flags: c_uint, dev: CUdevice) CUresult { _ = ctx; _ = flags; _ = dev; return .ERROR_NOT_INITIALIZED; }
+    fn cuCtxDestroy(ctx: CUcontext) CUresult { _ = ctx; return .SUCCESS; }
+    fn cuModuleLoad(module: *CUmodule, fname: [*:0]const u8) CUresult { _ = module; _ = fname; return .ERROR_NOT_INITIALIZED; }
+    fn cuModuleUnload(module: CUmodule) CUresult { _ = module; return .SUCCESS; }
+    fn cuModuleGetFunction(hfunc: *CUfunction, hmod: CUmodule, name: [*:0]const u8) CUresult { _ = hfunc; _ = hmod; _ = name; return .ERROR_NOT_INITIALIZED; }
+    fn cuMemAlloc(dptr: *CUdeviceptr, bytesize: usize) CUresult { _ = dptr; _ = bytesize; return .ERROR_NOT_INITIALIZED; }
+    fn cuMemFree(dptr: CUdeviceptr) CUresult { _ = dptr; return .SUCCESS; }
+    fn cuMemAllocHost(pp: **anyopaque, bytesize: usize) CUresult { _ = pp; _ = bytesize; return .ERROR_NOT_INITIALIZED; }
+    fn cuMemFreeHost(p: *anyopaque) CUresult { _ = p; return .SUCCESS; }
+    fn cuMemcpyHtoDAsync(dst: CUdeviceptr, src: *const anyopaque, bytes: usize, stream: CUstream) CUresult { _ = dst; _ = src; _ = bytes; _ = stream; return .ERROR_NOT_INITIALIZED; }
+    fn cuMemcpyDtoHAsync(dst: *anyopaque, src: CUdeviceptr, bytes: usize, stream: CUstream) CUresult { _ = dst; _ = src; _ = bytes; _ = stream; return .ERROR_NOT_INITIALIZED; }
+    fn cuStreamCreate(phStream: *CUstream, flags: c_uint) CUresult { _ = phStream; _ = flags; return .ERROR_NOT_INITIALIZED; }
+    fn cuStreamDestroy(hStream: CUstream) CUresult { _ = hStream; return .SUCCESS; }
+    fn cuStreamSynchronize(hStream: CUstream) CUresult { _ = hStream; return .ERROR_NOT_INITIALIZED; }
+    fn cuLaunchKernel(f: CUfunction, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, by: c_uint, bz: c_uint, sm: c_uint, stream: CUstream, params: ?*anyopaque, extra: ?*anyopaque) CUresult { _ = f; _ = gx; _ = gy; _ = gz; _ = bx; _ = by; _ = bz; _ = sm; _ = stream; _ = params; _ = extra; return .ERROR_NOT_INITIALIZED; }
+    fn cuDeviceGetName(name: [*]u8, len: c_int, dev: CUdevice) CUresult { _ = name; _ = len; _ = dev; return .ERROR_NO_DEVICE; }
+    fn cuDeviceTotalMem(mem: *usize, dev: CUdevice) CUresult { _ = mem; _ = dev; return .ERROR_NO_DEVICE; }
 };
 
 pub const Dim3 = extern struct { x: c_uint = 1, y: c_uint = 1, z: c_uint = 1 };

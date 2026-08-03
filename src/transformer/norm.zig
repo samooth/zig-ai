@@ -3,7 +3,7 @@ const Tensor = @import("core").Tensor;
 
 /// RMSNorm: x * rsqrt(mean(x^2) + eps) * gamma
 /// Usado en Llama, Mistral, Qwen, etc.
-pub fn rmsNorm(comptime T: type, input: Tensor(T), gamma: Tensor(T), eps: T, output: *Tensor(T)) void {
+pub fn rmsNorm(comptime T: type, comptime G: type, input: Tensor(T), gamma: Tensor(G), eps: f32, output: *Tensor(T)) void {
     std.debug.assert(input.shape.len >= 2);
     std.debug.assert(gamma.shape.len == 1);
     const hidden_dim = gamma.shape[0];
@@ -74,7 +74,7 @@ pub fn layerNorm(comptime T: type, input: Tensor(T), gamma: Tensor(T), beta: ?Te
 /// Aplica RMSNorm in-place (sobrescribe input)
 pub fn rmsNormInPlace(comptime T: type, input: *Tensor(T), gamma: Tensor(T), eps: T) void {
     var output = input.*;
-    rmsNorm(T, input.*, gamma, eps, &output);
+    rmsNorm(T, T, input.*, gamma, eps, &output);
     input.* = output;
 }
 
@@ -93,7 +93,7 @@ test "rmsNorm basic" {
     input.data[4] = 1.0; input.data[5] = 1.0; input.data[6] = 1.0; input.data[7] = 1.0;
     @memset(gamma.data, 1.0);
 
-    rmsNorm(f32, input, gamma, 1e-5, &output);
+    rmsNorm(f32, f32, input, gamma, 1e-5, &output);
 
     // Verificar que no es NaN
     for (output.data) |v| {

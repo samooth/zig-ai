@@ -1,8 +1,8 @@
 const std = @import("std");
 const cudaz = @import("cudaz");
-const fa_config = @import("fa_config.zig");
+pub const fa_config = @import("fa_config.zig");
+pub const fa_utils = @import("fa_utils.zig");
 const fa_kernels = @import("fa_kernels.zig");
-const fa_utils = @import("fa_utils.zig");
 const Tensor = @import("core").Tensor;
 
 const FlashAttentionConfig = fa_config.FlashAttentionConfig;
@@ -89,7 +89,7 @@ pub const FlashAttention = struct {
     /// Forward device-to-device (todo en GPU)
     pub fn forwardDevice(self: *Self, d_q: cudaz.CUdeviceptr, d_k: cudaz.CUdeviceptr,
         d_v: cudaz.CUdeviceptr, d_o: cudaz.CUdeviceptr) !void {
-        var temp = FlashAttentionBuffers{
+        const temp = FlashAttentionBuffers{
             .d_q = d_q, .d_k = d_k, .d_v = d_v, .d_o = d_o,
             .bytes = self.config.total_qkv_bytes(),
         };
@@ -122,6 +122,8 @@ pub const FlashAttention = struct {
 pub const FlashAttentionCpu = struct {
     allocator: std.mem.Allocator,
     config: FlashAttentionConfig,
+
+    const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, config: FlashAttentionConfig) Self {
         return .{ .allocator = allocator, .config = config };
@@ -157,7 +159,9 @@ pub const FlashAttentionCpu = struct {
                 }
                 for (0..N) |i| {
                     var max_val: f32 = -std.math.inf(f32);
-                    for (0..N) |j| if (scores[i * N + j] > max_val) max_val = scores[i * N + j];
+                    for (0..N) |j| {
+                        if (scores[i * N + j] > max_val) max_val = scores[i * N + j];
+                    }
                     var sum: f32 = 0;
                     for (0..N) |j| { softmax_out[i * N + j] = @exp(scores[i * N + j] - max_val); sum += softmax_out[i * N + j]; }
                     for (0..N) |j| softmax_out[i * N + j] /= sum;
