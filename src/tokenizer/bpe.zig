@@ -1,4 +1,5 @@
 const std = @import("std");
+const gguf_tokenizer = @import("gguf_tokenizer");
 
 fn isPunct(c: u8) bool {
     return (c >= 0x21 and c <= 0x2F) or
@@ -18,6 +19,8 @@ fn isPunct(c: u8) bool {
 
 pub const BPETokenizer = struct {
     allocator: std.mem.Allocator,
+    /// "gpt2", "llama", "qwen2", ... (para pre-tokenización específica)
+    model: []const u8,
     vocab: std.StringHashMap(u32),           // token_str -> id
     vocab_inv: std.AutoHashMap(u32, []const u8),  // id -> token_str
     merges: std.ArrayList(MergePair),
@@ -25,6 +28,8 @@ pub const BPETokenizer = struct {
     bos_token: ?u32,
     eos_token: ?u32,
     pad_token: ?u32,
+    add_bos: bool,
+    add_eos: bool,
 
     const Self = @This();
 
@@ -43,6 +48,7 @@ pub const BPETokenizer = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
+            .model = "gpt2",
             .vocab = std.StringHashMap(u32).init(allocator),
             .vocab_inv = std.AutoHashMap(u32, []const u8).init(allocator),
             .merges = .empty,
@@ -50,7 +56,30 @@ pub const BPETokenizer = struct {
             .bos_token = null,
             .eos_token = null,
             .pad_token = null,
+            .add_bos = false,
+            .add_eos = false,
         };
+    }
+
+    /// Construir un tokenizer a partir de un tokenizer GGUF embebido (D2).
+    /// Los tokens/merges se duplican (ownership propio).
+    pub fn fromTokenizer(allocator: std.mem.Allocator, t: *const gguf_tokenizer.GgufTokenizer) !Self {
+        var tok = Self.init(allocator);
+        errdefer tok.deinit();
+        tok.model = t.model;
+        for (t.tokens, 0..) |token_str, i| {
+            try tok.addToken(token_str, @intCast(i));
+        }
+        for (t.merges, 0..) |m, i| {
+            try tok.addMerge(m.left, m.right, @intCast(i));
+        }
+        tok.bos_token = t.bos_id;
+        tok.eos_token = t.eos_id;
+        tok.unk_token = t.unk_id orelse 0;
+        tok.pad_token = t.pad_id;
+        tok.add_bos = t.add_bos;
+        tok.add_eos = t.add_eos;
+        return tok;
     }
 
     pub fn deinit(self: *Self) void {

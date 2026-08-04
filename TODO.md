@@ -71,6 +71,8 @@ paths solo-0.14. Instalado en `~/.local/bin/zig-0.16`.
 | D4 | Special tokens (BOS/EOS/UNK/PAD) desde metadata GGUF | `src/tokenizer/bpe.zig` | 🟡 |
 | D5 | Decode correcto (bytes → utf8, `<0x..>` fallback) | `src/tokenizer/bpe.zig` | 🟡 |
 
+> **Estado Fase D**: D1 ✅ (`src/loader/gguf_tokenizer.zig`: modelo, pre, tokens, merges, token_types, special ids, add_bos/eos — vistas prestadas a datos mmap), D2 ✅ (`BPETokenizer.fromTokenizer` con `model` field), D4 ✅ (bos/eos/unk/pad desde metadata). Verificado contra Qwen2.5-7B real: model=gpt2, pre=qwen2, 152064 tokens, 151387 merges; encode de "Hello, world! This is a Zig test." → 11 tokens correctos. Pendiente: D3 (regex GPT-2 real), D5 (decode bytes→utf8).
+
 ## Fase E — Pipeline end-to-end (Importante)
 
 | # | Tarea | Archivo | Prioridad |

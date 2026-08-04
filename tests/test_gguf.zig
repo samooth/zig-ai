@@ -4,7 +4,9 @@
 //! si no está definida, el test se salta (error.SkipZigTest).
 const std = @import("std");
 const gguf = @import("gguf");
+const gguf_tokenizer = @import("gguf_tokenizer");
 const model_config = @import("model_config");
+const bpe = @import("tokenizer");
 
 test "load real gguf and verify config + tensor shapes" {
     const gpa = std.testing.allocator;
@@ -104,4 +106,55 @@ test "load real gguf and verify config + tensor shapes" {
     std.debug.print("token_embd dtype={s} shape=[{d} {d}] bytes={d}\n", .{
         embd.dtype.name(), embd.dims[0], embd.dims[1], embd_bytes.len,
     });
+}
+
+test "load real gguf tokenizer and build bpe (D1/D2/D4)" {
+    const gpa = std.testing.allocator;
+
+    const env_path = std.c.getenv("GGUF_MODEL_PATH") orelse {
+        std.debug.print("SKIP: GGUF_MODEL_PATH no está definida\n", .{});
+        return error.SkipZigTest;
+    };
+    const path = std.mem.span(env_path);
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var g = try gguf.GgufFile.fromFileMmap(io, gpa, path);
+    defer g.deinit();
+
+    var gt = try gguf_tokenizer.GgufTokenizer.fromGguf(gpa, &g);
+    defer gt.deinit();
+
+    std.debug.print("tokenizer model={s} pre={s} tokens={d} merges={d}\n", .{
+        gt.model, gt.pre, gt.tokens.len, gt.merges.len,
+    });
+    try std.testing.expect(gt.tokens.len >= 1000);
+    try std.testing.expect(gt.merges.len > 0);
+    try std.testing.expect(gt.bos_id != null);
+    try std.testing.expect(gt.eos_id != null);
+
+    // Construir el tokenizer BPE a partir del GGUF
+    var tok = try bpe.BPETokenizer.fromTokenizer(gpa, &gt);
+    defer tok.deinit();
+
+    try std.testing.expectEqualStrings(gt.model, tok.model);
+    try std.testing.expectEqual(gt.tokens.len, tok.vocab.count());
+
+    // Encoder produce ids válidos
+    const ids = try tok.encode("Hello, world! This is a Zig test.", .{});
+    defer gpa.free(ids);
+    std.debug.print("encode -> {d} tokens: ", .{ids.len});
+    for (ids) |id| {
+        const s = tok.vocab_inv.get(id);
+        std.debug.print("[{d}:'{s}'] ", .{ id, if (s) |x| x else "<unk>" });
+    }
+    std.debug.print("\n", .{});
+    try std.testing.expect(ids.len > 0);
+    for (ids) |id| {
+        try std.testing.expect(tok.vocab_inv.get(id) != null);
+    }
+
+    // Special tokens
+    try std.testing.expectEqual(gt.bos_id, tok.bos_token);
+    try std.testing.expectEqual(gt.eos_id, tok.eos_token);
 }

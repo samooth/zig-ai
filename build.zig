@@ -166,13 +166,6 @@ pub fn build(b: *std.Build) void {
     });
     gqa_mod.addImport("core", core_mod);
 
-    // === Módulo tokenizer ===
-    const tokenizer_mod = b.createModule(.{
-        .root_source_file = b.path("src/tokenizer/bpe.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     // === Módulo loader ===
     const loader_mod = b.createModule(.{
         .root_source_file = b.path("src/loader/safetensors.zig"),
@@ -195,6 +188,22 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     model_config_mod.addImport("gguf", gguf_mod);
+
+    // === Módulo gguf_tokenizer ===
+    const gguf_tokenizer_mod = b.createModule(.{
+        .root_source_file = b.path("src/loader/gguf_tokenizer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gguf_tokenizer_mod.addImport("gguf", gguf_mod);
+
+    // === Módulo tokenizer ===
+    const tokenizer_mod = b.createModule(.{
+        .root_source_file = b.path("src/tokenizer/bpe.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tokenizer_mod.addImport("gguf_tokenizer", gguf_tokenizer_mod);
 
     // === Módulo paged_attention ===
     const paged_attention_mod = b.createModule(.{
@@ -314,6 +323,7 @@ pub fn build(b: *std.Build) void {
         "src/loader/safetensors.zig",
         "src/loader/gguf.zig",
         "src/loader/model_config.zig",
+        "src/loader/gguf_tokenizer.zig",
     };
 
     inline for (test_files) |tf| {
@@ -334,9 +344,9 @@ pub fn build(b: *std.Build) void {
         tmod.addImport("gqa", gqa_mod);
         tmod.addImport("embedding", embedding_mod);
         tmod.addImport("tokenizer", tokenizer_mod);
-        tmod.addImport("loader", loader_mod);
         tmod.addImport("gguf", gguf_mod);
         tmod.addImport("model_config", model_config_mod);
+        tmod.addImport("gguf_tokenizer", gguf_tokenizer_mod);
         tmod.addImport("pipeline", pipeline_mod);
         tmod.addImport("paged_attention", paged_attention_mod);
         tmod.addImport("time", time_mod);
