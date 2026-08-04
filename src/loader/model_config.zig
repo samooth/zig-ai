@@ -45,12 +45,16 @@ pub const ModelConfig = struct {
             .layer_norm_rms_epsilon = try f32Meta(g, arch, "attention.layer_norm_rms_epsilon", 1e-5),
             .rope_dimension_count = try u64Meta(g, arch, "rope.dimension_count", 0),
             .rope_freq_base = try f32Meta(g, arch, "rope.freq_base", 10000.0),
-            .vocab_size = 0,
+            .vocab_size = try u64Meta(g, arch, "vocab_size", 0),
         };
 
-        cfg.vocab_size = try u64Meta(g, arch, "vocab_size", null);
+        // rope.dimension_count ausente → head_dim por cabeza
+        if (cfg.rope_dimension_count == 0) {
+            cfg.rope_dimension_count = cfg.embedding_length / cfg.head_count;
+        }
+
+        // vocab_size ausente → tamaño del array de tokens del tokenizer embebido
         if (cfg.vocab_size == 0) {
-            // Fallback: tamaño del array de tokens del tokenizer embebido
             if (g.getMeta("tokenizer.ggml.tokens")) |v| {
                 cfg.vocab_size = v.array.items.len;
             }

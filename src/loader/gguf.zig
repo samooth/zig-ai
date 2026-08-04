@@ -241,8 +241,9 @@ pub const TensorInfo = struct {
 
 pub const GgufFile = struct {
     allocator: std.mem.Allocator,
-    /// Copia completa del archivo (o vista mmap). El parser mantiene slices
-    /// apuntando aquí, por lo que debe vivir tanto como este struct.
+    /// Copia completa del archivo (fromBytes/fromFile) o vista mmap
+    /// (fromFileMmap). El parser mantiene slices apuntando aquí, por lo que
+    /// debe vivir tanto como este struct.
     data: []const u8,
     version: u32,
     alignment: u32,
@@ -250,13 +251,22 @@ pub const GgufFile = struct {
     tensor_data_offset: usize,
     tensors: std.StringHashMap(TensorInfo),
     metadata: std.StringHashMap(MetaValue),
+    /// Mapeo mmap del archivo (C4). Solo válido cuando se cargó con fromFileMmap.
+    io: std.Io = undefined,
+    mmap: ?std.Io.File.MemoryMap = null,
 
     const Self = @This();
 
     pub fn deinit(self: *Self) void {
         destroyMetadata(self.allocator, &self.metadata);
         self.tensors.deinit();
-        self.allocator.free(self.data);
+        if (self.mmap) |*mm| {
+            const file = mm.file;
+            mm.destroy(self.io);
+            file.close(self.io);
+        } else {
+            self.allocator.free(self.data);
+        }
     }
 
     /// Cargar desde bytes (copia el buffer)
@@ -271,7 +281,31 @@ pub const GgufFile = struct {
         const dir = std.Io.Dir.cwd();
         const data = try dir.readFileAlloc(io, path, allocator, .unlimited);
         errdefer allocator.free(data);
-        return parse(allocator, data);
+        var self = try parse(allocator, data);
+        self.io = io;
+        return self;
+    }
+
+    /// Cargar desde archivo con mmap (C4): solo se leen las páginas tocadas
+    /// (cabecera, metadata y tensor infos). El tensor_data se accede bajo
+    /// demanda vía `tensorData()` sin copiar el archivo completo.
+    pub fn fromFileMmap(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Self {
+        const dir = std.Io.Dir.cwd();
+        var file = try dir.openFile(io, path, .{ .mode = .read_only });
+        errdefer file.close(io);
+
+        const size = (try file.stat(io)).size;
+        var mm = try std.Io.File.MemoryMap.create(io, file, .{
+            .len = @intCast(size),
+            .protection = .{ .read = true },
+            .populate = false,
+        });
+        errdefer mm.destroy(io);
+
+        var self = try parse(allocator, mm.memory);
+        self.io = io;
+        self.mmap = mm;
+        return self;
     }
 
     fn parse(allocator: std.mem.Allocator, data: []const u8) !Self {
@@ -365,6 +399,155 @@ pub const GgufFile = struct {
         return if (self.getMeta("general.architecture")) |v| v.asString() else null;
     }
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// C6 — Mapeo de nombres GGUF → campos del modelo
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Rol de un tensor GGUF dentro del modelo
+pub const TensorRole = enum {
+    token_embd,
+    token_embd_norm,
+    output_norm,
+    output,
+    attn_q,
+    attn_k,
+    attn_v,
+    attn_o,
+    attn_q_bias,
+    attn_k_bias,
+    attn_v_bias,
+    attn_o_bias,
+    attn_norm,
+    ffn_norm,
+    ffn_gate,
+    ffn_up,
+    ffn_down,
+    ffn_gate_bias,
+    ffn_up_bias,
+    ffn_down_bias,
+    rope_freqs,
+    other,
+
+    /// True si el tensor es un peso de atención (matriz)
+    pub fn isAttnWeight(self: TensorRole) bool {
+        return switch (self) {
+            .attn_q, .attn_k, .attn_v, .attn_o => true,
+            else => false,
+        };
+    }
+
+    /// True si el tensor es un peso de FFN
+    pub fn isFfnWeight(self: TensorRole) bool {
+        return switch (self) {
+            .ffn_gate, .ffn_up, .ffn_down => true,
+            else => false,
+        };
+    }
+};
+
+pub const ParsedTensorName = struct {
+    layer: ?usize,
+    role: TensorRole,
+};
+
+/// Parsea un nombre de tensor GGUF y lo asigna a un rol + índice de capa.
+/// Convenciones soportadas (LLaMA-like, GGUF v3):
+///   token_embd.weight
+///   output_norm.weight / token_embd_norm.weight
+///   output.weight
+///   blk.{i}.attn_q.weight|.bias      (también attn_k/v/o)
+///   blk.{i}.attn_norm.weight
+///   blk.{i}.ffn_norm.weight
+///   blk.{i}.ffn_gate|ffn_up|ffn_down.weight|.bias
+///   blk.{i}.feed_forward.w1|w2|w3.weight   (falcon)
+///   blk.{i}.mlp.gate_proj|up_proj|down_proj.weight   (llama clásico)
+///   rope_freqs.weight
+pub fn parseTensorName(name: []const u8) ParsedTensorName {
+    var rest = name;
+
+    if (std.mem.eql(u8, rest, "token_embd.weight")) return .{ .layer = null, .role = .token_embd };
+    if (std.mem.eql(u8, rest, "output_norm.weight")) return .{ .layer = null, .role = .output_norm };
+    if (std.mem.eql(u8, rest, "token_embd_norm.weight")) return .{ .layer = null, .role = .token_embd_norm };
+    if (std.mem.eql(u8, rest, "output.weight")) return .{ .layer = null, .role = .output };
+    if (std.mem.eql(u8, rest, "rope_freqs.weight")) return .{ .layer = null, .role = .rope_freqs };
+
+    // blk.{i}....
+    if (!std.mem.startsWith(u8, rest, "blk.")) return .{ .layer = null, .role = .other };
+    rest = rest["blk.".len..];
+
+    const dot = std.mem.indexOfScalar(u8, rest, '.') orelse return .{ .layer = null, .role = .other };
+    const idx_str = rest[0..dot];
+    const layer = std.fmt.parseInt(usize, idx_str, 10) catch return .{ .layer = null, .role = .other };
+    rest = rest[dot + 1 ..];
+
+    // Strip trailing ".weight" / ".bias"
+    const is_bias = std.mem.endsWith(u8, rest, ".bias");
+    if (is_bias) rest = rest[0 .. rest.len - ".bias".len];
+    if (!is_bias and std.mem.endsWith(u8, rest, ".weight")) rest = rest[0 .. rest.len - ".weight".len];
+
+    const role: TensorRole = if (is_bias) blk: {
+        break :blk if (std.mem.eql(u8, rest, "attn_q"))
+            .attn_q_bias
+        else if (std.mem.eql(u8, rest, "attn_k"))
+            .attn_k_bias
+        else if (std.mem.eql(u8, rest, "attn_v"))
+            .attn_v_bias
+        else if (std.mem.eql(u8, rest, "attn_o"))
+            .attn_o_bias
+        else if (std.mem.eql(u8, rest, "attn_output"))
+            .attn_o_bias
+        else if (std.mem.eql(u8, rest, "ffn_gate"))
+            .ffn_gate_bias
+        else if (std.mem.eql(u8, rest, "ffn_up"))
+            .ffn_up_bias
+        else if (std.mem.eql(u8, rest, "ffn_down"))
+            .ffn_down_bias
+        else
+            .other;
+    } else blk: {
+        // aliases clásicos de FFN
+        const ffn_alias: ?TensorRole = if (std.mem.eql(u8, rest, "feed_forward.w1"))
+            .ffn_gate
+        else if (std.mem.eql(u8, rest, "feed_forward.w3"))
+            .ffn_up
+        else if (std.mem.eql(u8, rest, "feed_forward.w2"))
+            .ffn_down
+        else if (std.mem.eql(u8, rest, "mlp.gate_proj"))
+            .ffn_gate
+        else if (std.mem.eql(u8, rest, "mlp.up_proj"))
+            .ffn_up
+        else if (std.mem.eql(u8, rest, "mlp.down_proj"))
+            .ffn_down
+        else
+            null;
+        if (ffn_alias) |r| {
+            break :blk r;
+        }
+        break :blk if (std.mem.eql(u8, rest, "attn_q"))
+            .attn_q
+        else if (std.mem.eql(u8, rest, "attn_k"))
+            .attn_k
+        else if (std.mem.eql(u8, rest, "attn_v"))
+            .attn_v
+        else if (std.mem.eql(u8, rest, "attn_o") or std.mem.eql(u8, rest, "attn_output"))
+            .attn_o
+        else if (std.mem.eql(u8, rest, "attn_norm"))
+            .attn_norm
+        else if (std.mem.eql(u8, rest, "ffn_norm"))
+            .ffn_norm
+        else if (std.mem.eql(u8, rest, "ffn_gate"))
+            .ffn_gate
+        else if (std.mem.eql(u8, rest, "ffn_up"))
+            .ffn_up
+        else if (std.mem.eql(u8, rest, "ffn_down"))
+            .ffn_down
+        else
+            .other;
+    };
+
+    return .{ .layer = layer, .role = role };
+}
 
 fn alignOffset(offset: usize, alignment: usize) usize {
     if (alignment == 0) return offset;
@@ -642,4 +825,40 @@ test "gguf dequant q8_0" {
     try std.testing.expectApproxEqRel(@as(f32, 3.5), out[1], 1e-3);
     try std.testing.expectApproxEqRel(@as(f32, 0.5), out[2], 1e-3);
     try std.testing.expectApproxEqRel(@as(f32, -0.5), out[3], 1e-3);
+}
+
+test "gguf parse tensor names (C6)" {
+    const t = std.testing;
+    const expect = t.expectEqual;
+
+    const embd = parseTensorName("token_embd.weight");
+    try expect(TensorRole.token_embd, embd.role);
+    try expect(@as(?usize, null), embd.layer);
+
+    const out = parseTensorName("output.weight");
+    try expect(TensorRole.output, out.role);
+
+    const q = parseTensorName("blk.3.attn_q.weight");
+    try expect(TensorRole.attn_q, q.role);
+    try expect(@as(?usize, 3), q.layer);
+
+    const v_bias = parseTensorName("blk.12.attn_v.bias");
+    try expect(TensorRole.attn_v_bias, v_bias.role);
+    try expect(@as(?usize, 12), v_bias.layer);
+
+    const gate = parseTensorName("blk.0.ffn_gate.weight");
+    try expect(TensorRole.ffn_gate, gate.role);
+    try t.expect(gate.role.isFfnWeight());
+
+    const w1 = parseTensorName("blk.5.feed_forward.w1.weight");
+    try expect(TensorRole.ffn_gate, w1.role);
+
+    const gate_proj = parseTensorName("blk.1.mlp.gate_proj.weight");
+    try expect(TensorRole.ffn_gate, gate_proj.role);
+
+    const attn_norm = parseTensorName("blk.0.attn_norm.weight");
+    try expect(TensorRole.attn_norm, attn_norm.role);
+
+    const other = parseTensorName("some_weird.tensor");
+    try expect(TensorRole.other, other.role);
 }

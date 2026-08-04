@@ -304,6 +304,7 @@ pub fn build(b: *std.Build) void {
         "tests/test_transformer.zig",
         "tests/test_kv_cache.zig",
         "tests/test_paged_attention.zig",
+        "tests/test_gguf.zig",
         "src/transformer/norm.zig",
         "src/transformer/ffn.zig",
         "src/transformer/rope.zig",

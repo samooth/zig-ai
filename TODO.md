@@ -59,7 +59,7 @@ paths solo-0.14. Instalado en `~/.local/bin/zig-0.16`.
 | C7 | `ModelConfig` (hidden_size, layers, heads, kv_heads, intermediate, vocab, rope_theta) | `src/loader/model_config.zig` | 🔴 |
 | C8 | Test: cargar GGUF real (tiny) y verificar shapes | `tests/test_gguf.zig` | 🟡 |
 
-> **Estado Fase C**: C1 ✅, C2 ✅ (parser metadata KV con arrays anidados + strings), C3 ✅, C5 ✅ parcial (dequant F16/F32/BF16/Q8_0/Q4_0), C7 ✅ (`src/loader/model_config.zig`: architecture, context_length, embedding_length, block_count, feed_forward_length, head_count/kv, rms_eps, rope_dim/freq_base, vocab_size; fallback a `tokenizer.ggml.tokens`). `src/loader/gguf.zig` con `GgmlType`, `MetaValue` (union taggada), `TensorInfo`, `GgufFile` (fromBytes/fromFile, `tensorData()`), 5 tests verdes. Pendiente: C4 (mmap), C6 (mapeo de nombres), C8 (GGUF real).
+> **Estado Fase C**: C1 ✅, C2 ✅ (parser metadata KV con arrays anidados + strings), C3 ✅, C4 ✅ (`fromFileMmap` vía `std.Io.File.MemoryMap`, lectura lazy por páginas; `tensorData()` sin copiar el archivo), C5 ✅ parcial (dequant F16/F32/BF16/Q8_0/Q4_0), C6 ✅ (`parseTensorName` → `TensorRole` + índice de capa, con aliases attn_output/feed_forward/mlp), C7 ✅ (`src/loader/model_config.zig`: architecture, context_length, embedding_length, block_count, feed_forward_length, head_count/kv, rms_eps, rope_dim/freq_base, vocab_size; fallbacks a `tokenizer.ggml.tokens` y head_dim), C8 ✅ (tests/test_gguf.zig: carga real vía mmap, verifica config + shapes; requiere `GGUF_MODEL_PATH`, salta si no está). Verificado contra Qwen2.5-7B q4_k_m real (4.4GB): arch=qwen2, 339 tensores, embedding=3584, layers=28, kv_heads=4, ffn=18944, vocab=152064. Pendiente: Fase D (tokenizer desde GGUF).
 
 ## Fase D — Tokenizer desde GGUF (Importante)
 
