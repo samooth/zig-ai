@@ -54,14 +54,15 @@ pub fn computeLaunchConfig(config: FlashAttentionConfig) GridBlockConfig {
     };
 }
 
-pub fn ptxExists(path: []const u8) bool {
-    const file = std.fs.cwd().openFile(path, .{}) catch return false;
-    file.close(); return true;
+pub fn ptxExists(io: std.Io, path: []const u8) bool {
+    const dir = std.Io.Dir.cwd();
+    dir.access(io, path, .{}) catch return false;
+    return true;
 }
 
-pub fn getPtxPath(allocator: std.mem.Allocator) ![]const u8 {
+pub fn getPtxPath(io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
     const paths = [_][]const u8{ "cuda/flash_attention.ptx", "flash_attention.ptx", "../cuda/flash_attention.ptx" };
-    for (paths) |p| if (ptxExists(p)) return try allocator.dupe(u8, p);
+    for (paths) |p| if (ptxExists(io, p)) return try allocator.dupe(u8, p);
     return error.PtxNotFound;
 }
 

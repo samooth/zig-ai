@@ -105,13 +105,10 @@ pub const SafetensorsFile = struct {
     }
 
     /// Cargar desde archivo
-    pub fn fromFile(allocator: std.mem.Allocator, path: []const u8) !Self {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-        const size = try file.getEndPos();
-        const data = try allocator.alloc(u8, size);
+    pub fn fromFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Self {
+        const dir = std.Io.Dir.cwd();
+        const data = try dir.readFileAlloc(io, path, allocator, .unlimited);
         errdefer allocator.free(data);
-        _ = try file.readAll(data);
         return try fromBytes(allocator, data);
     }
 

@@ -172,21 +172,21 @@ pub const TransformerLayer = struct {
         if (self.w_o_t_q) |*w| w.deinit();
     }
 
-    pub fn loadWeights(self: *Self, checkpoint_dir: []const u8) !void {
+    pub fn loadWeights(self: *Self, io: std.Io, checkpoint_dir: []const u8) !void {
         const base = try std.fmt.allocPrint(self.allocator, "{s}/layer.{d}.", .{ checkpoint_dir, self.layer_idx });
         defer self.allocator.free(base);
 
-        self.w_q_t = try loadWeightFile(self.allocator, base, "self_attn.q_proj.weight_t");
-        self.w_k_t = try loadWeightFile(self.allocator, base, "self_attn.k_proj.weight_t");
-        self.w_v_t = try loadWeightFile(self.allocator, base, "self_attn.v_proj.weight_t");
-        self.w_o_t = try loadWeightFile(self.allocator, base, "self_attn.o_proj.weight_t");
-        self.w_gate_t = try loadWeightFile(self.allocator, base, "mlp.gate_proj.weight_t");
-        self.w_up_t = try loadWeightFile(self.allocator, base, "mlp.up_proj.weight_t");
-        self.w_down_t = try loadWeightFile(self.allocator, base, "mlp.down_proj.weight_t");
+        self.w_q_t = try loadWeightFile(io, self.allocator, base, "self_attn.q_proj.weight_t");
+        self.w_k_t = try loadWeightFile(io, self.allocator, base, "self_attn.k_proj.weight_t");
+        self.w_v_t = try loadWeightFile(io, self.allocator, base, "self_attn.v_proj.weight_t");
+        self.w_o_t = try loadWeightFile(io, self.allocator, base, "self_attn.o_proj.weight_t");
+        self.w_gate_t = try loadWeightFile(io, self.allocator, base, "mlp.gate_proj.weight_t");
+        self.w_up_t = try loadWeightFile(io, self.allocator, base, "mlp.up_proj.weight_t");
+        self.w_down_t = try loadWeightFile(io, self.allocator, base, "mlp.down_proj.weight_t");
 
         // Cargar norm weights (f32)
-        self.attn_norm = try loadWeightFileF32(self.allocator, base, "input_layernorm.weight");
-        self.ffn_norm = try loadWeightFileF32(self.allocator, base, "post_attention_layernorm.weight");
+        self.attn_norm = try loadWeightFileF32(io, self.allocator, base, "input_layernorm.weight");
+        self.ffn_norm = try loadWeightFileF32(io, self.allocator, base, "post_attention_layernorm.weight");
 
         if (self.precision.use_quantized) {
             const qcfg = matmul.QuantConfig{ .bits = 8, .symmetric = true, .per_channel = true, .group_size = 0 };
@@ -442,33 +442,33 @@ pub const TransformerLayer = struct {
     }
 };
 
-fn loadWeightFile(allocator: std.mem.Allocator, base: []const u8, name: []const u8) !Tensor(f16) {
+fn loadWeightFile(io: std.Io, allocator: std.mem.Allocator, base: []const u8, name: []const u8) !Tensor(f16) {
     const path = try std.fmt.allocPrint(allocator, "{s}{s}.bin", .{ base, name });
     defer allocator.free(path);
-    const file = std.fs.cwd().openFile(path, .{}) catch {
+    const dir = std.Io.Dir.cwd();
+    const bytes = dir.readFileAlloc(io, path, allocator, .unlimited) catch {
         std.log.err("FATAL: Weight file not found: {s}", .{path});
         return TransformerError.WeightFileNotFound;
     };
-    defer file.close();
-    const size = try file.getEndPos();
-    const num_elements = size / 2;
+    defer allocator.free(bytes);
+    const num_elements = bytes.len / 2;
     const tensor = try Tensor(f16).initUninitialized(allocator, &.{num_elements});
-    _ = try file.readAll(std.mem.sliceAsBytes(tensor.data));
+    @memcpy(std.mem.sliceAsBytes(tensor.data), bytes);
     return tensor;
 }
 
-fn loadWeightFileF32(allocator: std.mem.Allocator, base: []const u8, name: []const u8) !Tensor(f32) {
+fn loadWeightFileF32(io: std.Io, allocator: std.mem.Allocator, base: []const u8, name: []const u8) !Tensor(f32) {
     const path = try std.fmt.allocPrint(allocator, "{s}{s}.bin", .{ base, name });
     defer allocator.free(path);
-    const file = std.fs.cwd().openFile(path, .{}) catch {
+    const dir = std.Io.Dir.cwd();
+    const bytes = dir.readFileAlloc(io, path, allocator, .unlimited) catch {
         std.log.err("FATAL: Weight file not found: {s}", .{path});
         return TransformerError.WeightFileNotFound;
     };
-    defer file.close();
-    const size = try file.getEndPos();
-    const num_elements = size / 4;
+    defer allocator.free(bytes);
+    const num_elements = bytes.len / 4;
     const tensor = try Tensor(f32).initUninitialized(allocator, &.{num_elements});
-    _ = try file.readAll(std.mem.sliceAsBytes(tensor.data));
+    @memcpy(std.mem.sliceAsBytes(tensor.data), bytes);
     return tensor;
 }
 
