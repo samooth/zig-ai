@@ -60,6 +60,14 @@ pub fn build(b: *std.Build) void {
         });
         dequant_ptx = compile_dequant.addOutputFileArg("dequantize_kernels.ptx");
         compile_dequant.addFileArg(b.path("cuda/dequantize_kernels.cu"));
+
+        const compile_pa = b.addSystemCommand(&.{
+            nvcc_path,
+            "-arch=compute_80", "-code=sm_80",
+            "-cubin", "-o",
+        });
+        _ = compile_pa.addOutputFileArg("paged_attention_sm80.cubin");
+        compile_pa.addFileArg(b.path("src/cuda/paged_attention.cu"));
     }
 
     // === Módulo core ===
@@ -162,6 +170,13 @@ pub fn build(b: *std.Build) void {
     });
     loader_mod.addImport("core", core_mod);
 
+    // === NUEVO: Módulo paged_attention ===
+    const paged_attention_mod = b.addModule("paged_attention", .{
+        .root_source_file = b.path("src/paged_attention/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // === Módulo transformer (ACTUALIZADO) ===
     const transformer_mod = b.addModule("transformer", .{
         .root_source_file = b.path("src/transformer/layer.zig"),
@@ -212,6 +227,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("tokenizer", tokenizer_mod);
     exe.root_module.addImport("loader", loader_mod);
     exe.root_module.addImport("pipeline", pipeline_mod);
+    exe.root_module.addImport("paged_attention", paged_attention_mod);
 
     if (ptx_output) |ptx| {
         exe.root_module.addAnonymousImport("flash_attention_ptx", .{ .root_source_file = ptx });
@@ -251,6 +267,7 @@ pub fn build(b: *std.Build) void {
         "tests/test_online_softmax.zig",
         "tests/test_transformer.zig",
         "tests/test_kv_cache.zig",
+        "tests/test_paged_attention.zig",
         "src/transformer/norm.zig",
         "src/transformer/ffn.zig",
         "src/transformer/rope.zig",
@@ -280,6 +297,7 @@ pub fn build(b: *std.Build) void {
         t.root_module.addImport("tokenizer", tokenizer_mod);
         t.root_module.addImport("loader", loader_mod);
         t.root_module.addImport("pipeline", pipeline_mod);
+        t.root_module.addImport("paged_attention", paged_attention_mod);
         t.linkLibC();
         if (has_cuda) {
             t.linkSystemLibrary("cuda");

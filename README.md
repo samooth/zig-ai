@@ -50,7 +50,19 @@ zig-ai-engine/
 │   │   └── gpu_dequant.zig       # Dequant en GPU
 │   ├── tokenizer/bpe.zig   # Tokenizer BPE
 │   ├── loader/safetensors.zig    # Carga de pesos
-│   ├── cuda/cudaz_stub.zig       # Bindings CUDA Driver API (stub sin GPU)
+│   ├── paged_attention/
+│   │   ├── root.zig              # PagedAttention: exports y configuración
+│   │   ├── block.zig             # Bloque físico con refcount
+│   │   ├── allocator.zig         # Pool allocator con COW y swap
+│   │   ├── block_table.zig       # Mapeo lógico->físico por secuencia
+│   │   ├── paged_kv_cache.zig    # Gestor KV cache paginado
+│   │   ├── attention.zig         # Kernel CPU reference (online softmax)
+│   │   ├── scheduler.zig         # Batch scheduler con preemption
+│   │   ├── prefix_cache.zig      # Deduplicación por hash de bloques
+│   │   └── gpu_kernels.zig       # Stubs CUDA
+│   ├── cuda/
+│   │   ├── cudaz_stub.zig       # Bindings CUDA Driver API (stub sin GPU)
+│   │   └── paged_attention.cu   # Kernels CUDA paginados (decode, reshape, copy)
 │   └── main.zig                  # CLI principal
 ├── cuda/
 │   ├── online_softmax.cuh       # Online softmax (warp/block reduce)
@@ -65,6 +77,7 @@ zig-ai-engine/
     ├── test_online_softmax.zig
     ├── test_transformer.zig
     ├── test_kv_cache.zig
+    ├── test_paged_attention.zig
     └── benchmark.zig
 ```
 
