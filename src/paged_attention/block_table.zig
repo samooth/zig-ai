@@ -12,7 +12,7 @@ pub const BlockTable = struct {
     pub fn init(gpa: std.mem.Allocator, block_size: usize) Self {
         return .{
             .allocator = gpa,
-            .table = std.ArrayList(usize).init(gpa),
+            .table = .empty,
             .block_size = block_size,
         };
     }
@@ -21,7 +21,7 @@ pub const BlockTable = struct {
         for (self.table.items) |phys_id| {
             block_alloc.release(phys_id);
         }
-        self.table.deinit();
+        self.table.deinit(self.allocator);
     }
 
     pub fn numBlocks(self: *const Self) usize {
@@ -36,7 +36,7 @@ pub const BlockTable = struct {
         if (offset == 0) {
             const phys_id = block_alloc.alloc() orelse return error.OutOfMemory;
             block_alloc.acquire(phys_id);
-            try self.table.append(phys_id);
+            try self.table.append(self.allocator, phys_id);
         }
         self.num_tokens += 1;
 
@@ -54,7 +54,7 @@ pub const BlockTable = struct {
             if (offset == 0) {
                 const phys_id = block_alloc.alloc() orelse return error.OutOfMemory;
                 block_alloc.acquire(phys_id);
-                try self.table.append(phys_id);
+                try self.table.append(self.allocator, phys_id);
             }
 
             const fill = @min(remaining, self.block_size - offset);
@@ -68,7 +68,7 @@ pub const BlockTable = struct {
 
     pub fn fork(self: *const Self, block_alloc: *BlockAllocator) !BlockTable {
         var new_table = BlockTable.init(self.allocator, self.block_size);
-        try new_table.table.ensureTotalCapacityPrecise(self.table.items.len);
+        try new_table.table.ensureTotalCapacityPrecise(self.allocator, self.table.items.len);
         for (self.table.items) |phys_id| {
             block_alloc.acquire(phys_id);
             new_table.table.appendAssumeCapacity(phys_id);

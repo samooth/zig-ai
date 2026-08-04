@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
 
     // Detectar CUDA
     const cuda_path = b.option([]const u8, "cuda-path", "Path to CUDA installation")
-        orelse std.process.getEnvVarOwned(b.allocator, "CUDA_PATH") catch "/usr/local/cuda";
+        orelse b.graph.environ_map.get("CUDA_PATH") orelse "/usr/local/cuda";
     const cuda_bin_path = std.fmt.allocPrint(b.allocator, "{s}/bin", .{cuda_path}) catch "/usr/local/cuda/bin";
     const cuda_lib_path = std.fmt.allocPrint(b.allocator, "{s}/lib64", .{cuda_path}) catch "/usr/local/cuda/lib64";
     const cuda_inc_path = std.fmt.allocPrint(b.allocator, "{s}/include", .{cuda_path}) catch "/usr/local/cuda/include";
@@ -17,14 +17,16 @@ pub fn build(b: *std.Build) void {
         break :blk true;
     };
 
+    const io = b.graph.io;
+    const cwd = std.Io.Dir.cwd();
     const cuda_lib_dir_exists = blk: {
         if (!has_cuda) break :blk false;
-        _ = std.fs.cwd().access(cuda_lib_path, .{}) catch break :blk false;
+        std.Io.Dir.access(cwd, io, cuda_lib_path, .{}) catch break :blk false;
         break :blk true;
     };
     const cuda_inc_dir_exists = blk: {
         if (!has_cuda) break :blk false;
-        _ = std.fs.cwd().access(cuda_inc_path, .{}) catch break :blk false;
+        std.Io.Dir.access(cwd, io, cuda_inc_path, .{}) catch break :blk false;
         break :blk true;
     };
 
@@ -71,8 +73,15 @@ pub fn build(b: *std.Build) void {
     }
 
     // === Módulo core ===
-    const core_mod = b.addModule("core", .{
+    const core_mod = b.createModule(.{
         .root_source_file = b.path("src/tensor.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // === Módulo time ===
+    const time_mod = b.createModule(.{
+        .root_source_file = b.path("src/utils/time.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -81,21 +90,22 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(bool, "has_cuda", has_cuda);
     options.addOption(bool, "has_openblas", has_openblas);
-    const matmul_mod = b.addModule("matmul", .{
+    const matmul_mod = b.createModule(.{
         .root_source_file = b.path("src/matmul/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     matmul_mod.addImport("core", core_mod);
+    matmul_mod.addImport("time", time_mod);
     matmul_mod.addOptions("build_options", options);
 
     // === Módulo cudaz stub ===
-    const cudaz_mod = b.addModule("cudaz", .{
+    const cudaz_mod = b.createModule(.{
         .root_source_file = b.path("src/cuda/cudaz_stub.zig"),
     });
 
     // === Módulo fa ===
-    const fa_mod = b.addModule("fa", .{
+    const fa_mod = b.createModule(.{
         .root_source_file = b.path("src/fa/flash_attention.zig"),
         .target = target,
         .optimize = optimize,
@@ -103,9 +113,10 @@ pub fn build(b: *std.Build) void {
     fa_mod.addImport("core", core_mod);
     fa_mod.addImport("matmul", matmul_mod);
     fa_mod.addImport("cudaz", cudaz_mod);
+    fa_mod.addImport("time", time_mod);
 
     // === Módulo kv_cache ===
-    const kv_cache_mod = b.addModule("kv_cache", .{
+    const kv_cache_mod = b.createModule(.{
         .root_source_file = b.path("src/kv_cache.zig"),
         .target = target,
         .optimize = optimize,
@@ -113,16 +124,16 @@ pub fn build(b: *std.Build) void {
     kv_cache_mod.addImport("core", core_mod);
     kv_cache_mod.addImport("cudaz", cudaz_mod);
 
-    // === NUEVO: Módulo norm ===
-    const norm_mod = b.addModule("norm", .{
+    // === Módulo norm ===
+    const norm_mod = b.createModule(.{
         .root_source_file = b.path("src/transformer/norm.zig"),
         .target = target,
         .optimize = optimize,
     });
     norm_mod.addImport("core", core_mod);
 
-    // === NUEVO: Módulo ffn ===
-    const ffn_mod = b.addModule("ffn", .{
+    // === Módulo ffn ===
+    const ffn_mod = b.createModule(.{
         .root_source_file = b.path("src/transformer/ffn.zig"),
         .target = target,
         .optimize = optimize,
@@ -130,8 +141,8 @@ pub fn build(b: *std.Build) void {
     ffn_mod.addImport("core", core_mod);
     ffn_mod.addImport("matmul", matmul_mod);
 
-    // === NUEVO: Módulo embedding ===
-    const embedding_mod = b.addModule("embedding", .{
+    // === Módulo embedding ===
+    const embedding_mod = b.createModule(.{
         .root_source_file = b.path("src/transformer/embedding.zig"),
         .target = target,
         .optimize = optimize,
@@ -139,46 +150,46 @@ pub fn build(b: *std.Build) void {
     embedding_mod.addImport("core", core_mod);
     embedding_mod.addImport("matmul", matmul_mod);
 
-    // === NUEVO: Módulo rope ===
-    const rope_mod = b.addModule("rope", .{
+    // === Módulo rope ===
+    const rope_mod = b.createModule(.{
         .root_source_file = b.path("src/transformer/rope.zig"),
         .target = target,
         .optimize = optimize,
     });
     rope_mod.addImport("core", core_mod);
 
-    // === NUEVO: Módulo gqa ===
-    const gqa_mod = b.addModule("gqa", .{
+    // === Módulo gqa ===
+    const gqa_mod = b.createModule(.{
         .root_source_file = b.path("src/transformer/gqa.zig"),
         .target = target,
         .optimize = optimize,
     });
     gqa_mod.addImport("core", core_mod);
 
-    // === NUEVO: Módulo tokenizer ===
-    const tokenizer_mod = b.addModule("tokenizer", .{
+    // === Módulo tokenizer ===
+    const tokenizer_mod = b.createModule(.{
         .root_source_file = b.path("src/tokenizer/bpe.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    // === NUEVO: Módulo loader ===
-    const loader_mod = b.addModule("loader", .{
+    // === Módulo loader ===
+    const loader_mod = b.createModule(.{
         .root_source_file = b.path("src/loader/safetensors.zig"),
         .target = target,
         .optimize = optimize,
     });
     loader_mod.addImport("core", core_mod);
 
-    // === NUEVO: Módulo paged_attention ===
-    const paged_attention_mod = b.addModule("paged_attention", .{
+    // === Módulo paged_attention ===
+    const paged_attention_mod = b.createModule(.{
         .root_source_file = b.path("src/paged_attention/root.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    // === Módulo transformer (ACTUALIZADO) ===
-    const transformer_mod = b.addModule("transformer", .{
+    // === Módulo transformer ===
+    const transformer_mod = b.createModule(.{
         .root_source_file = b.path("src/transformer/layer.zig"),
         .target = target,
         .optimize = optimize,
@@ -193,8 +204,8 @@ pub fn build(b: *std.Build) void {
     transformer_mod.addImport("gqa", gqa_mod);
     transformer_mod.addImport("embedding", embedding_mod);
 
-    // === NUEVO: Módulo pipeline ===
-    const pipeline_mod = b.addModule("pipeline", .{
+    // === Módulo pipeline ===
+    const pipeline_mod = b.createModule(.{
         .root_source_file = b.path("src/transformer/pipeline.zig"),
         .target = target,
         .optimize = optimize,
@@ -205,48 +216,54 @@ pub fn build(b: *std.Build) void {
     pipeline_mod.addImport("transformer", transformer_mod);
     pipeline_mod.addImport("kv_cache", kv_cache_mod);
     pipeline_mod.addImport("embedding", embedding_mod);
+    pipeline_mod.addImport("time", time_mod);
 
     // === Ejecutable principal ===
-    const exe = b.addExecutable(.{
-        .name = "zig-ai-engine",
+    const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exe.root_module.addImport("core", core_mod);
-    exe.root_module.addImport("matmul", matmul_mod);
-    exe.root_module.addImport("fa", fa_mod);
-    exe.root_module.addImport("transformer", transformer_mod);
-    exe.root_module.addImport("kv_cache", kv_cache_mod);
-    exe.root_module.addImport("cudaz", cudaz_mod);
-    exe.root_module.addImport("norm", norm_mod);
-    exe.root_module.addImport("ffn", ffn_mod);
-    exe.root_module.addImport("rope", rope_mod);
-    exe.root_module.addImport("gqa", gqa_mod);
-    exe.root_module.addImport("embedding", embedding_mod);
-    exe.root_module.addImport("tokenizer", tokenizer_mod);
-    exe.root_module.addImport("loader", loader_mod);
-    exe.root_module.addImport("pipeline", pipeline_mod);
-    exe.root_module.addImport("paged_attention", paged_attention_mod);
+    exe_mod.addImport("core", core_mod);
+    exe_mod.addImport("matmul", matmul_mod);
+    exe_mod.addImport("fa", fa_mod);
+    exe_mod.addImport("transformer", transformer_mod);
+    exe_mod.addImport("kv_cache", kv_cache_mod);
+    exe_mod.addImport("cudaz", cudaz_mod);
+    exe_mod.addImport("norm", norm_mod);
+    exe_mod.addImport("ffn", ffn_mod);
+    exe_mod.addImport("rope", rope_mod);
+    exe_mod.addImport("gqa", gqa_mod);
+    exe_mod.addImport("embedding", embedding_mod);
+    exe_mod.addImport("tokenizer", tokenizer_mod);
+    exe_mod.addImport("loader", loader_mod);
+    exe_mod.addImport("pipeline", pipeline_mod);
+    exe_mod.addImport("paged_attention", paged_attention_mod);
+    exe_mod.addImport("time", time_mod);
 
     if (ptx_output) |ptx| {
-        exe.root_module.addAnonymousImport("flash_attention_ptx", .{ .root_source_file = ptx });
+        exe_mod.addAnonymousImport("flash_attention_ptx", .{ .root_source_file = ptx });
     }
     if (cubin_output) |cubin| {
-        exe.root_module.addAnonymousImport("flash_attention_cubin", .{ .root_source_file = cubin });
+        exe_mod.addAnonymousImport("flash_attention_cubin", .{ .root_source_file = cubin });
     }
     if (dequant_ptx) |ptx| {
-        exe.root_module.addAnonymousImport("dequantize_ptx", .{ .root_source_file = ptx });
+        exe_mod.addAnonymousImport("dequantize_ptx", .{ .root_source_file = ptx });
     }
 
-    exe.linkLibC();
+    exe_mod.link_libc = true;
     if (has_cuda) {
-        exe.linkSystemLibrary("cuda");
-        exe.linkSystemLibrary("cudart");
-        if (cuda_lib_dir_exists) exe.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
-        if (cuda_inc_dir_exists) exe.addIncludePath(.{ .cwd_relative = cuda_inc_path });
-        exe.linkSystemLibrary("cublas");
+        exe_mod.linkSystemLibrary("cuda", .{});
+        exe_mod.linkSystemLibrary("cudart", .{});
+        if (cuda_lib_dir_exists) exe_mod.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
+        if (cuda_inc_dir_exists) exe_mod.addIncludePath(.{ .cwd_relative = cuda_inc_path });
+        exe_mod.linkSystemLibrary("cublas", .{});
     }
+
+    const exe = b.addExecutable(.{
+        .name = "zig-ai-engine",
+        .root_module = exe_mod,
+    });
 
     b.installArtifact(exe);
 
@@ -278,32 +295,35 @@ pub fn build(b: *std.Build) void {
     };
 
     inline for (test_files) |tf| {
-        const t = b.addTest(.{
+        const tmod = b.createModule(.{
             .root_source_file = b.path(tf),
             .target = target,
             .optimize = optimize,
         });
-        t.root_module.addImport("core", core_mod);
-        t.root_module.addImport("matmul", matmul_mod);
-        t.root_module.addImport("fa", fa_mod);
-        t.root_module.addImport("transformer", transformer_mod);
-        t.root_module.addImport("kv_cache", kv_cache_mod);
-        t.root_module.addImport("cudaz", cudaz_mod);
-        t.root_module.addImport("norm", norm_mod);
-        t.root_module.addImport("ffn", ffn_mod);
-        t.root_module.addImport("rope", rope_mod);
-        t.root_module.addImport("gqa", gqa_mod);
-        t.root_module.addImport("embedding", embedding_mod);
-        t.root_module.addImport("tokenizer", tokenizer_mod);
-        t.root_module.addImport("loader", loader_mod);
-        t.root_module.addImport("pipeline", pipeline_mod);
-        t.root_module.addImport("paged_attention", paged_attention_mod);
-        t.linkLibC();
+        tmod.addImport("core", core_mod);
+        tmod.addImport("matmul", matmul_mod);
+        tmod.addImport("fa", fa_mod);
+        tmod.addImport("transformer", transformer_mod);
+        tmod.addImport("kv_cache", kv_cache_mod);
+        tmod.addImport("cudaz", cudaz_mod);
+        tmod.addImport("norm", norm_mod);
+        tmod.addImport("ffn", ffn_mod);
+        tmod.addImport("rope", rope_mod);
+        tmod.addImport("gqa", gqa_mod);
+        tmod.addImport("embedding", embedding_mod);
+        tmod.addImport("tokenizer", tokenizer_mod);
+        tmod.addImport("loader", loader_mod);
+        tmod.addImport("pipeline", pipeline_mod);
+        tmod.addImport("paged_attention", paged_attention_mod);
+        tmod.addImport("time", time_mod);
+
+        const t = b.addTest(.{ .root_module = tmod });
+        tmod.link_libc = true;
         if (has_cuda) {
-            t.linkSystemLibrary("cuda");
-            t.linkSystemLibrary("cudart");
-            if (cuda_lib_dir_exists) t.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
-            t.linkSystemLibrary("cublas");
+            tmod.linkSystemLibrary("cuda", .{});
+            tmod.linkSystemLibrary("cudart", .{});
+            if (cuda_lib_dir_exists) tmod.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
+            tmod.linkSystemLibrary("cublas", .{});
         }
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
@@ -311,25 +331,29 @@ pub fn build(b: *std.Build) void {
 
     // === Benchmark ===
     const bench_step = b.step("bench", "Run benchmarks");
-    const bench = b.addExecutable(.{
-        .name = "benchmark",
+    const bench_mod = b.createModule(.{
         .root_source_file = b.path("tests/benchmark.zig"),
         .target = target,
         .optimize = .ReleaseFast,
     });
-    bench.root_module.addImport("core", core_mod);
-    bench.root_module.addImport("matmul", matmul_mod);
-    bench.root_module.addImport("fa", fa_mod);
-    bench.root_module.addImport("transformer", transformer_mod);
-    bench.root_module.addImport("kv_cache", kv_cache_mod);
-    bench.root_module.addImport("cudaz", cudaz_mod);
-    bench.linkLibC();
+    bench_mod.addImport("core", core_mod);
+    bench_mod.addImport("matmul", matmul_mod);
+    bench_mod.addImport("fa", fa_mod);
+    bench_mod.addImport("transformer", transformer_mod);
+    bench_mod.addImport("kv_cache", kv_cache_mod);
+    bench_mod.addImport("cudaz", cudaz_mod);
+    bench_mod.addImport("time", time_mod);
+    bench_mod.link_libc = true;
     if (has_cuda) {
-        bench.linkSystemLibrary("cuda");
-        bench.linkSystemLibrary("cudart");
-        if (cuda_lib_dir_exists) bench.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
-        bench.linkSystemLibrary("cublas");
+        bench_mod.linkSystemLibrary("cuda", .{});
+        bench_mod.linkSystemLibrary("cudart", .{});
+        if (cuda_lib_dir_exists) bench_mod.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
+        bench_mod.linkSystemLibrary("cublas", .{});
     }
+    const bench = b.addExecutable(.{
+        .name = "benchmark",
+        .root_module = bench_mod,
+    });
     b.installArtifact(bench);
     const run_bench = b.addRunArtifact(bench);
     bench_step.dependOn(&run_bench.step);

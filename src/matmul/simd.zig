@@ -49,16 +49,18 @@ fn gemmSimdF32(
 
             while (k < k_vec_end) : (k += VecLen) {
                 // Cargar A[i, k..k+VecLen]
-                var a_vec: Vec = undefined;
+                var a_elems: [VecLen]f32 = undefined;
                 for (0..VecLen) |v| {
-                    a_vec[v] = A.at2(i, k + v);
+                    a_elems[v] = A.at2(i, k + v);
                 }
+                const a_vec: Vec = a_elems;
 
                 // Cargar B[j, k..k+VecLen] (B está en formato transpuesto)
-                var b_vec: Vec = undefined;
+                var b_elems: [VecLen]f32 = undefined;
                 for (0..VecLen) |v| {
-                    b_vec[v] = B.at2(j, k + v);
+                    b_elems[v] = B.at2(j, k + v);
                 }
+                const b_vec: Vec = b_elems;
 
                 sum_vec += a_vec * b_vec;
             }
@@ -96,15 +98,17 @@ fn gemmSimdF64(
             const k_vec_end = K - (K % VecLen);
 
             while (k < k_vec_end) : (k += VecLen) {
-                var a_vec: Vec = undefined;
+                var a_elems: [VecLen]f64 = undefined;
                 for (0..VecLen) |v| {
-                    a_vec[v] = A.at2(i, k + v);
+                    a_elems[v] = A.at2(i, k + v);
                 }
+                const a_vec: Vec = a_elems;
 
-                var b_vec: Vec = undefined;
+                var b_elems: [VecLen]f64 = undefined;
                 for (0..VecLen) |v| {
-                    b_vec[v] = B.at2(j, k + v);
+                    b_elems[v] = B.at2(j, k + v);
                 }
+                const b_vec: Vec = b_elems;
 
                 sum_vec += a_vec * b_vec;
             }
@@ -153,15 +157,17 @@ fn gemvSimdF32(
         const k_vec_end = K - (K % VecLen);
 
         while (k < k_vec_end) : (k += VecLen) {
-            var a_vec: Vec = undefined;
+            var a_elems: [VecLen]f32 = undefined;
             for (0..VecLen) |v| {
-                a_vec[v] = A.at2(i, k + v);
+                a_elems[v] = A.at2(i, k + v);
             }
+            const a_vec: Vec = a_elems;
 
-            var x_vec: Vec = undefined;
+            var x_elems: [VecLen]f32 = undefined;
             for (0..VecLen) |v| {
-                x_vec[v] = x.at(&[_]usize{k + v});
+                x_elems[v] = x.at(&[_]usize{k + v});
             }
+            const x_vec: Vec = x_elems;
 
             sum_vec += a_vec * x_vec;
         }

@@ -53,7 +53,7 @@ pub const MatmulEngine = struct {
     allocator: std.mem.Allocator,
     backend: Backend,
     precision: PrecisionMode,
-    thread_pool: ?*std.Thread.Pool,
+    num_threads: usize,
     cublas_handle: ?cublas.CuBlasHandle,
     cuda_stream: ?cublas.CudaStream,
     gpu_pool: ?cublas.GpuMemoryPool,
@@ -64,7 +64,7 @@ pub const MatmulEngine = struct {
             .allocator = allocator,
             .backend = preferred,
             .precision = precision,
-            .thread_pool = null,
+            .num_threads = 1,
             .cublas_handle = null,
             .cuda_stream = null,
             .gpu_pool = null,
@@ -77,11 +77,8 @@ pub const MatmulEngine = struct {
 
         switch (engine.backend) {
             .parallel => {
-                const pool = try allocator.create(std.Thread.Pool);
-                errdefer allocator.destroy(pool);
                 const n_cpus = try std.Thread.getCpuCount();
-                try pool.init(.{ .allocator = allocator, .n_jobs = n_cpus });
-                engine.thread_pool = pool;
+                engine.num_threads = n_cpus;
             },
             .cublas => {
                 if (!build_options.has_cuda) return error.CuBlasNotLinked;
@@ -99,10 +96,6 @@ pub const MatmulEngine = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        if (self.thread_pool) |pool| {
-            pool.deinit();
-            self.allocator.destroy(pool);
-        }
         if (build_options.has_cuda) {
             if (self.cuda_stream) |stream| stream.destroy();
             if (self.gpu_pool) |*pool| pool.deinit();
@@ -155,19 +148,18 @@ pub const MatmulEngine = struct {
                 }
             },
             .parallel => {
-                if (self.thread_pool) |pool| {
-                    if (trans_b) {
-                        try parallel.gemmParallel(T, pool, A, B, C, M, N, K, .{
-                            .num_threads = pool.threads.len, .use_simd = true,
-                        });
-                    } else {
-                        const Bt = try B.transpose();
-                        defer { if (Bt.allocator) |a| { a.free(Bt.shape); a.free(Bt.strides); } }
-                        try parallel.gemmParallel(T, pool, A, Bt, C, M, N, K, .{
-                            .num_threads = pool.threads.len, .use_simd = true,
-                        });
-                    }
-                } else return error.ThreadPoolNotInitialized;
+                if (self.num_threads == 0) return error.ThreadPoolNotInitialized;
+                if (trans_b) {
+                    try parallel.gemmParallel(T, self.allocator, A, B, C, M, N, K, .{
+                        .num_threads = self.num_threads, .use_simd = true,
+                    });
+                } else {
+                    const Bt = try B.transpose();
+                    defer { if (Bt.allocator) |a| { a.free(Bt.shape); a.free(Bt.strides); } }
+                    try parallel.gemmParallel(T, self.allocator, A, Bt, C, M, N, K, .{
+                        .num_threads = self.num_threads, .use_simd = true,
+                    });
+                }
             },
             .openblas => if (build_options.has_openblas) openblas.gemmOpenBlas(T, A, B, C, M, N, K, trans_a, trans_b, 1.0, 0.0) else return error.OpenBlasNotLinked,
             .cublas => {

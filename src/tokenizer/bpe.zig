@@ -45,7 +45,7 @@ pub const BPETokenizer = struct {
             .allocator = allocator,
             .vocab = std.StringHashMap(u32).init(allocator),
             .vocab_inv = std.AutoHashMap(u32, []const u8).init(allocator),
-            .merges = std.ArrayList(MergePair).init(allocator),
+            .merges = .empty,
             .unk_token = 0,
             .bos_token = null,
             .eos_token = null,
@@ -70,7 +70,7 @@ pub const BPETokenizer = struct {
             self.allocator.free(merge.left);
             self.allocator.free(merge.right);
         }
-        self.merges.deinit();
+        self.merges.deinit(self.allocator);
     }
 
     /// Añadir token al vocabulario
@@ -86,7 +86,7 @@ pub const BPETokenizer = struct {
     pub fn addMerge(self: *Self, left: []const u8, right: []const u8, priority: u32) !void {
         const owned_left = try self.allocator.dupe(u8, left);
         const owned_right = try self.allocator.dupe(u8, right);
-        try self.merges.append(.{
+        try self.merges.append(self.allocator, .{
             .left = owned_left,
             .right = owned_right,
             .priority = priority,
@@ -126,37 +126,36 @@ pub const BPETokenizer = struct {
     /// Pre-tokenización simple: divide por espacios y puntuación básica
     /// Para GPT-2 real se necesita regex más complejo, esto es suficiente para demo
     pub fn preTokenize(self: Self, text: []const u8, words: *std.ArrayList([]const u8)) !void {
-        _ = self;
         var start: usize = 0;
         var i: usize = 0;
         while (i < text.len) : (i += 1) {
             const c = text[i];
             if (std.ascii.isWhitespace(c) or isPunct(c)) {
                 if (i > start) {
-                    try words.append(text[start..i]);
+                    try words.append(self.allocator, text[start..i]);
                 }
                 if (isPunct(c)) {
-                    try words.append(text[i..i+1]);
+                    try words.append(self.allocator, text[i..i+1]);
                 }
                 start = i + 1;
             }
         }
         if (start < text.len) {
-            try words.append(text[start..]);
+            try words.append(self.allocator, text[start..]);
         }
     }
 
     /// Encode: texto -> tokens
     pub fn encode(self: *Self, text: []const u8, options: EncodeOptions) ![]u32 {
-        var tokens = std.ArrayList(u32).init(self.allocator);
-        errdefer tokens.deinit();
+        var tokens: std.ArrayList(u32) = .empty;
+        errdefer tokens.deinit(self.allocator);
 
         if (options.add_bos) {
-            if (self.bos_token) |bos| try tokens.append(bos);
+            if (self.bos_token) |bos| try tokens.append(self.allocator, bos);
         }
 
-        var words = std.ArrayList([]const u8).init(self.allocator);
-        defer words.deinit();
+        var words: std.ArrayList([]const u8) = .empty;
+        defer words.deinit(self.allocator);
         try self.preTokenize(text, &words);
 
         for (words.items) |word| {
@@ -164,23 +163,23 @@ pub const BPETokenizer = struct {
         }
 
         if (options.add_eos) {
-            if (self.eos_token) |eos| try tokens.append(eos);
+            if (self.eos_token) |eos| try tokens.append(self.allocator, eos);
         }
 
-        return tokens.toOwnedSlice();
+        return tokens.toOwnedSlice(self.allocator);
     }
 
     fn encodeWord(self: *Self, word: []const u8, tokens: *std.ArrayList(u32)) !void {
         // Inicializar word como secuencia de bytes individuales
-        var symbols = std.ArrayList([]const u8).init(self.allocator);
+        var symbols: std.ArrayList([]const u8) = .empty;
         defer {
             for (symbols.items) |s| self.allocator.free(s);
-            symbols.deinit();
+            symbols.deinit(self.allocator);
         }
 
         for (word) |byte| {
             const sym = try self.allocator.dupe(u8, &[_]u8{byte});
-            try symbols.append(sym);
+            try symbols.append(self.allocator, sym);
         }
 
         if (symbols.items.len == 0) return;
@@ -209,10 +208,10 @@ pub const BPETokenizer = struct {
 
             // Aplicar el mejor merge
             const merge = self.merges.items[best_merge.?];
-            var new_symbols = std.ArrayList([]const u8).init(self.allocator);
+            var new_symbols: std.ArrayList([]const u8) = .empty;
             errdefer {
                 for (new_symbols.items) |s| self.allocator.free(s);
-                new_symbols.deinit();
+                new_symbols.deinit(self.allocator);
             }
 
             var i: usize = 0;
@@ -221,42 +220,42 @@ pub const BPETokenizer = struct {
                     std.mem.eql(u8, symbols.items[i], merge.left) and
                     std.mem.eql(u8, symbols.items[i + 1], merge.right)) {
                     const merged = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ symbols.items[i], symbols.items[i + 1] });
-                    try new_symbols.append(merged);
+                    try new_symbols.append(self.allocator, merged);
                     i += 2;
                 } else {
                     const copied = try self.allocator.dupe(u8, symbols.items[i]);
-                    try new_symbols.append(copied);
+                    try new_symbols.append(self.allocator, copied);
                     i += 1;
                 }
             }
 
             // Liberar symbols antiguos
             for (symbols.items) |s| self.allocator.free(s);
-            symbols.deinit();
+            symbols.deinit(self.allocator);
             symbols = new_symbols;
         }
 
         // Mapear símbolos finales a IDs
         for (symbols.items) |sym| {
             const id = self.vocab.get(sym) orelse self.unk_token;
-            try tokens.append(id);
+            try tokens.append(self.allocator, id);
         }
     }
 
     /// Decode: tokens -> texto
     pub fn decode(self: Self, tokens: []const u32, allocator: std.mem.Allocator) ![]u8 {
-        var result = std.ArrayList(u8).init(allocator);
-        errdefer result.deinit();
+        var result: std.ArrayList(u8) = .empty;
+        errdefer result.deinit(allocator);
 
         for (tokens) |token| {
             if (self.vocab_inv.get(token)) |str| {
-                try result.appendSlice(str);
+                try result.appendSlice(allocator, str);
             } else {
-                try result.appendSlice("<unk>");
+                try result.appendSlice(allocator, "<unk>");
             }
         }
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(allocator);
     }
 
     /// Crear un tokenizer dummy para tests (vocab de bytes 0-255 + algunos merges)

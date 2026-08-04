@@ -258,7 +258,7 @@ pub const GpuMemoryPool = struct {
     pub fn init(allocator: std.mem.Allocator) GpuMemoryPool {
         return GpuMemoryPool{
             .allocator = allocator,
-            .blocks = std.ArrayList(Block).init(allocator),
+            .blocks = .empty,
             .stream = null,
         };
     }
@@ -267,7 +267,7 @@ pub const GpuMemoryPool = struct {
         for (self.blocks.items) |block| {
             _ = cudaFree(block.ptr);
         }
-        self.blocks.deinit();
+        self.blocks.deinit(self.allocator);
     }
 
     pub fn setStream(self: *GpuMemoryPool, stream: *anyopaque) void {
@@ -293,7 +293,7 @@ pub const GpuMemoryPool = struct {
 
         if (status != 0) return error.CudaMallocFailed;
 
-        try self.blocks.append(Block{ .ptr = ptr, .size = size, .in_use = true });
+        try self.blocks.append(self.allocator, Block{ .ptr = ptr, .size = size, .in_use = true });
         return ptr;
     }
 

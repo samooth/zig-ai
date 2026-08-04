@@ -45,7 +45,7 @@ pub const BlockAllocator = struct {
         for (0..num_blocks) |i| {
             blocks[i] = Block.init(i);
             blocks[i].data = memory_pool.ptr + i * block_bytes;
-            try free_list.append(i);
+            try free_list.append(gpa, i);
         }
 
         return .{
@@ -66,7 +66,7 @@ pub const BlockAllocator = struct {
         self.allocator.free(self.blocks);
         self.allocator.free(self.memory_pool);
         if (self.cpu_pool) |cpu| self.allocator.free(cpu);
-        self.free_list.deinit();
+        self.free_list.deinit(self.allocator);
     }
 
     pub fn alloc(self: *Self) ?usize {
@@ -82,7 +82,7 @@ pub const BlockAllocator = struct {
         block.block_hash = null;
         block.is_cpu = false;
         @memset(self.memory_pool[block_id * self.block_bytes ..][0..self.block_bytes], 0);
-        self.free_list.append(block_id) catch unreachable;
+        self.free_list.append(self.allocator, block_id) catch unreachable;
     }
 
     pub fn acquire(self: *Self, block_id: usize) void {

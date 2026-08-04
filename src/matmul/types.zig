@@ -72,11 +72,11 @@ pub const Timer = struct {
     start_time: i128,
 
     pub fn start() Timer {
-        return .{ .start_time = std.time.nanoTimestamp() };
+        return .{ .start_time = @import("time").Timer.now() };
     }
 
     pub fn elapsedNs(self: Timer) u64 {
-        return @intCast(std.time.nanoTimestamp() - self.start_time);
+        return @intCast(@import("time").Timer.now() - self.start_time);
     }
 
     pub fn elapsedMs(self: Timer) f64 {

@@ -380,7 +380,7 @@ test "INT8 symmetric quantize-dequantize" {
     var src = try Tensor(f32).alloc(allocator, &[_]usize{ 4, 4 });
     defer src.deinit();
 
-    var rng = std.rand.DefaultPrng.init(42);
+    var rng = std.Random.DefaultPrng.init(42);
     src.randUniform(&rng, -2.0, 2.0);
 
     const config = QuantConfig{ .bits = 8, .symmetric = true, .per_channel = false, .group_size = 0 };
@@ -407,7 +407,7 @@ test "INT8 per-channel quantize-dequantize" {
     var src = try Tensor(f32).alloc(allocator, &[_]usize{ 8, 16 });
     defer src.deinit();
 
-    var rng = std.rand.DefaultPrng.init(42);
+    var rng = std.Random.DefaultPrng.init(42);
     src.randUniform(&rng, -3.0, 3.0);
 
     const config = QuantConfig{ .bits = 8, .symmetric = true, .per_channel = true, .group_size = 0 };
@@ -433,7 +433,7 @@ test "INT4 symmetric quantize-dequantize" {
     var src = try Tensor(f32).alloc(allocator, &[_]usize{ 4, 4 });
     defer src.deinit();
 
-    var rng = std.rand.DefaultPrng.init(42);
+    var rng = std.Random.DefaultPrng.init(42);
     src.randUniform(&rng, -1.0, 1.0);
 
     const config = QuantConfig{ .bits = 4, .symmetric = true, .per_channel = false, .group_size = 0 };
@@ -470,7 +470,7 @@ test "GEMM with quantized weights" {
     var C_q = try Tensor(f32).alloc(allocator, &[_]usize{ M, N });
     defer C_q.deinit();
 
-    var rng = std.rand.DefaultPrng.init(42);
+    var rng = std.Random.DefaultPrng.init(42);
     A.randUniform(&rng, -1.0, 1.0);
     W.randUniform(&rng, -1.0, 1.0);
 

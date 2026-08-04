@@ -94,7 +94,7 @@ pub inline fn f16ToF32(v: f16) f32 { return @as(f32, @floatCast(v)); }
 pub inline fn f32ToF16(v: f32) f16 { return @floatCast(v); }
 
 pub fn benchmark(comptime func: anytype, args: anytype, iterations: usize) u64 {
-    var timer = std.time.Timer.start() catch unreachable;
+    const timer = @import("time").Timer.start();
     for (0..iterations) |_| { @call(.auto, func, args); }
-    return timer.read() / iterations;
+    return @intCast(timer.read() / @as(i128, @intCast(iterations)));
 }

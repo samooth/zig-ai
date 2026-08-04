@@ -49,21 +49,21 @@ pub const Scheduler = struct {
             .config = config,
             .kv_cache = kv_cache,
             .sequences = std.AutoHashMap(u64, Sequence).init(gpa),
-            .waiting_queue = std.ArrayList(Request).init(gpa),
-            .running = std.ArrayList(u64).init(gpa),
-            .preempted = std.ArrayList(u64).init(gpa),
+            .waiting_queue = .empty,
+            .running = .empty,
+            .preempted = .empty,
         };
     }
 
     pub fn deinit(self: *Self) void {
         var iter = self.sequences.iterator();
         while (iter.next()) |entry| {
-            entry.value_ptr.tokens.deinit();
+            entry.value_ptr.tokens.deinit(self.allocator);
         }
         self.sequences.deinit();
-        self.waiting_queue.deinit();
-        self.running.deinit();
-        self.preempted.deinit();
+        self.waiting_queue.deinit(self.allocator);
+        self.running.deinit(self.allocator);
+        self.preempted.deinit(self.allocator);
     }
 
     pub fn submit(self: *Self, req: Request) !u64 {
@@ -71,7 +71,7 @@ pub const Scheduler = struct {
         self.next_req_id += 1;
         var req_copy = req;
         req_copy.req_id = req_id;
-        try self.waiting_queue.append(req_copy);
+        try self.waiting_queue.append(self.allocator, req_copy);
         return req_id;
     }
 
@@ -99,15 +99,15 @@ pub const Scheduler = struct {
                 const seq_id = try self.kv_cache.createSequence();
                 var seq = Sequence{
                     .seq_id = seq_id,
-                    .tokens = std.ArrayList(u32).init(self.allocator),
+                    .tokens = .empty,
                     .phase = .prefill,
                     .max_new_tokens = req.max_new_tokens,
                     .arrival_time = self.step_count,
                     .priority = req.priority,
                 };
-                try seq.tokens.appendSlice(req.prompt_tokens);
+                try seq.tokens.appendSlice(self.allocator, req.prompt_tokens);
                 try self.sequences.put(seq_id, seq);
-                try self.running.append(seq_id);
+                try self.running.append(self.allocator, seq_id);
                 try self.kv_cache.allocatePrefill(seq_id, req.prompt_tokens.len);
                 if (prefix_len > 0) {
                     seq.num_processed = prefix_len;
@@ -150,7 +150,7 @@ pub const Scheduler = struct {
             }
             const victim_id = self.running.items[victim_idx];
             _ = self.running.orderedRemove(victim_idx);
-            try self.preempted.append(victim_id);
+            try self.preempted.append(self.allocator, victim_id);
 
             var seq = self.sequences.getPtr(victim_id).?;
             seq.phase = .preempted;
@@ -164,7 +164,7 @@ pub const Scheduler = struct {
 
     pub fn finishSequence(self: *Self, seq_id: u64) void {
         if (self.sequences.fetchRemove(seq_id)) |entry| {
-            entry.value.tokens.deinit();
+            entry.value.tokens.deinit(self.allocator);
         }
         for (self.running.items, 0..) |id, i| {
             if (id == seq_id) { _ = self.running.orderedRemove(i); break; }
@@ -177,7 +177,7 @@ pub const Scheduler = struct {
 
     pub fn appendToken(self: *Self, seq_id: u64, token: u32) !void {
         var seq = self.sequences.getPtr(seq_id) orelse return;
-        try seq.tokens.append(token);
+        try seq.tokens.append(self.allocator, token);
         seq.generated += 1;
         seq.num_processed += 1;
         try self.kv_cache.appendDecode(seq_id);

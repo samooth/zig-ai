@@ -10,13 +10,16 @@ const FlashAttentionConfig = fa.fa_config.FlashAttentionConfig;
 const TransformerLayer = transformer.TransformerLayer;
 const LayerPrecision = transformer.LayerPrecision;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
 
-    const stdout = std.io.getStdOut().writer();
+    var stdout_buffer: [0x100]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
     try stdout.print("\n", .{});
+    try stdout.flush();
     try stdout.print("=================================================\n", .{});
     try stdout.print("     Zig AI Engine — FlashAttention + Matmul     \n", .{});
     try stdout.print("=================================================\n", .{});
@@ -37,7 +40,7 @@ pub fn main() !void {
 
     if (!cuda_available) {
         try stdout.print("\n[!] CUDA no disponible. Ejecutando modo CPU...\n", .{});
-        try runCpuMode(allocator, config);
+        try runCpuMode(io, allocator, config);
         return;
     }
 
@@ -71,7 +74,7 @@ pub fn main() !void {
 
     // Benchmark
     const iterations: usize = 10;
-    var timer = try std.time.Timer.start();
+    const timer = @import("time").Timer.start();
     for (0..iterations) |_| {
     try layer.forward(hidden_state, &output, 0, true);
     }
@@ -90,8 +93,10 @@ pub fn main() !void {
     try stdout.print("=================================================\n", .{});
 }
 
-fn runCpuMode(allocator: std.mem.Allocator, config: FlashAttentionConfig) !void {
-    const stdout = std.io.getStdOut().writer();
+fn runCpuMode(io: std.Io, allocator: std.mem.Allocator, config: FlashAttentionConfig) !void {
+    var stdout_buffer: [0x100]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
 
     var fa_cpu = FlashAttentionCpu.init(allocator, config);
 
@@ -108,7 +113,7 @@ fn runCpuMode(allocator: std.mem.Allocator, config: FlashAttentionConfig) !void 
     fa.fa_utils.initUniform(&K, -0.1, 0.1, 43);
     fa.fa_utils.initUniform(&V, -0.1, 0.1, 44);
 
-    var timer = try std.time.Timer.start();
+    const timer = @import("time").Timer.start();
     try fa_cpu.forward(Q, K, V, &O);
     const elapsed = timer.read();
 

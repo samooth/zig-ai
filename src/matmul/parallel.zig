@@ -1,5 +1,5 @@
 
-//! GEMM paralelo usando std.Thread.Pool
+//! GEMM paralelo usando std.Thread.spawn
 //! Particiona por filas (row-wise) para mantener locality.
 
 const std = @import("std");
@@ -12,11 +12,11 @@ pub const ParallelConfig = struct {
     use_simd: bool,
 };
 
-/// GEMM paralelo con thread pool
+/// GEMM paralelo
 /// C = A @ B^T (B transpuesto)
 pub fn gemmParallel(
     comptime T: type,
-    pool: *std.Thread.Pool,
+    allocator: std.mem.Allocator,
     A: Tensor(T),
     B: Tensor(T),
     C: *Tensor(T),
@@ -27,33 +27,36 @@ pub fn gemmParallel(
 ) !void {
     @memset(C.data, 0);
 
-    const num_threads = config.num_threads;
+    const num_threads = @max(1, @min(config.num_threads, M));
     const rows_per_thread = M / num_threads;
     const remainder = M % num_threads;
 
-    var wg: std.Thread.WaitGroup = .{};
+    var threads = try allocator.alloc(std.Thread, num_threads);
+    defer allocator.free(threads);
+    @memset(threads, undefined);
 
+    const Worker = workerFn(T);
+
+    var spawned: usize = 0;
     var start_row: usize = 0;
     for (0..num_threads) |t| {
         const extra: usize = if (t < remainder) 1 else 0;
         const end_row = start_row + rows_per_thread + extra;
 
         if (end_row > start_row) {
-            wg.start();
-            const Worker = workerFn(T);
-            try pool.spawn(Worker.worker, .{
+            threads[spawned] = try std.Thread.spawn(.{}, Worker.worker, .{
                 A, B, C,
                 start_row, end_row,
                 N, K,
                 config.use_simd,
-                &wg,
             });
+            spawned += 1;
         }
 
         start_row = end_row;
     }
 
-    pool.waitAndWork(&wg);
+    for (threads[0..spawned]) |thread| thread.join();
 }
 
 fn workerFn(comptime T: type) type {
@@ -67,10 +70,7 @@ fn workerFn(comptime T: type) type {
             N: usize,
             K: usize,
             use_simd: bool,
-            wg: *std.Thread.WaitGroup,
         ) void {
-            defer wg.finish();
-
             if (use_simd and T == f32) {
                 // Usar SIMD por fila
                 for (row_start..row_end) |i| {
@@ -83,12 +83,14 @@ fn workerFn(comptime T: type) type {
                         const k_vec_end = K - (K % VecLen);
 
                         while (k < k_vec_end) : (k += VecLen) {
-                            var a_vec: Vec = undefined;
-                            var b_vec: Vec = undefined;
+                            var a_elems: [VecLen]f32 = undefined;
+                            var b_elems: [VecLen]f32 = undefined;
                             for (0..VecLen) |v| {
-                                a_vec[v] = A.at2(i, k + v);
-                                b_vec[v] = B.at2(j, k + v);
+                                a_elems[v] = A.at2(i, k + v);
+                                b_elems[v] = B.at2(j, k + v);
                             }
+                            const a_vec: Vec = a_elems;
+                            const b_vec: Vec = b_elems;
                             sum_vec += a_vec * b_vec;
                         }
 
@@ -115,5 +117,4 @@ fn workerFn(comptime T: type) type {
         }
     };
 }
-
 

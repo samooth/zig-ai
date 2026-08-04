@@ -295,13 +295,13 @@ pub const InferencePipeline = struct {
         matmul_engine: *matmul.MatmulEngine,
         config: GenerationConfig,
     ) !GenerationResult {
-        var tokens = std.ArrayList(u32).init(self.allocator);
-        errdefer tokens.deinit();
-        try tokens.append(first_token);
+        var tokens: std.ArrayList(u32) = .empty;
+        errdefer tokens.deinit(self.allocator);
+        try tokens.append(self.allocator, first_token);
 
         var rng = std.Random.Xoshiro256.init(config.seed);
 
-        const start_time = std.time.milliTimestamp();
+        const start_time = @import("time").Timer.now();
         var current_pos = try self.kv_manager.getSequenceLen(seq_id);
 
         for (0..config.max_new_tokens) |_| {
@@ -340,7 +340,7 @@ pub const InferencePipeline = struct {
             for (logits.data, 0..) |v, i| logits_f32[i] = @as(f32, @floatCast(v));
 
             const next_token = config.sampler.sample(logits_f32, &rng);
-            try tokens.append(next_token);
+            try tokens.append(self.allocator, next_token);
             current_pos += 1;
 
             if (config.stop_on_eos and config.eos_token != null and next_token == config.eos_token.?) {
@@ -348,12 +348,12 @@ pub const InferencePipeline = struct {
             }
         }
 
-        const end_time = std.time.milliTimestamp();
-        const gen_time_ms = @as(f64, @floatFromInt(end_time - start_time));
+        const end_time = @import("time").Timer.now();
+        const gen_time_ms = @as(f64, @floatFromInt((end_time - start_time) / std.time.ns_per_ms));
         const num_gen = tokens.items.len - 1; // excluir first_token
 
         return GenerationResult{
-            .tokens = try tokens.toOwnedSlice(),
+            .tokens = try tokens.toOwnedSlice(self.allocator),
             .num_tokens_generated = num_gen,
             .prefill_time_ms = 0, // Calculado externamente
             .generation_time_ms = gen_time_ms,

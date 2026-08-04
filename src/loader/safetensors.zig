@@ -234,17 +234,17 @@ pub const SafetensorsFile = struct {
 
     /// Listar todos los tensores disponibles
     pub fn listTensors(self: Self, allocator: std.mem.Allocator) ![][]const u8 {
-        var names = std.ArrayList([]const u8).init(allocator);
+        var names: std.ArrayList([]const u8) = .empty;
         errdefer {
             for (names.items) |n| allocator.free(n);
-            names.deinit();
+            names.deinit(allocator);
         }
 
         var iter = self.tensors.keyIterator();
         while (iter.next()) |key| {
-            try names.append(try allocator.dupe(u8, key.*));
+            try names.append(allocator, try allocator.dupe(u8, key.*));
         }
-        return names.toOwnedSlice();
+        return names.toOwnedSlice(allocator);
     }
 };
 
@@ -279,8 +279,8 @@ fn parseShape(allocator: std.mem.Allocator, json: []const u8, idx: *usize) ![]us
     if (pos >= json.len or json[pos] != '[') return SafetensorsError.InvalidJson;
     pos += 1;
 
-    var shape = std.ArrayList(usize).init(allocator);
-    errdefer shape.deinit();
+    var shape: std.ArrayList(usize) = .empty;
+    errdefer shape.deinit(allocator);
 
     while (pos < json.len) {
         pos = skipWhitespace(json, pos);
@@ -291,7 +291,7 @@ fn parseShape(allocator: std.mem.Allocator, json: []const u8, idx: *usize) ![]us
         if (start == pos) return SafetensorsError.InvalidJson;
 
         const num = try std.fmt.parseInt(usize, json[start..pos], 10);
-        try shape.append(num);
+        try shape.append(allocator, num);
 
         pos = skipWhitespace(json, pos);
         if (pos < json.len and json[pos] == ',') pos += 1;
@@ -300,7 +300,7 @@ fn parseShape(allocator: std.mem.Allocator, json: []const u8, idx: *usize) ![]us
     if (pos >= json.len or json[pos] != ']') return SafetensorsError.InvalidJson;
     pos += 1;
     idx.* = pos;
-    return shape.toOwnedSlice();
+    return shape.toOwnedSlice(allocator);
 }
 
 fn parseOffsets(json: []const u8, idx: *usize) ![2]usize {

@@ -103,17 +103,19 @@ fn microKernelF32(
     while (k < k_vec_end) : (k += VecLen) {
         for (0..rows) |ri| {
             const i = row0 + ri;
-            var a_vec: Vec = undefined;
+            var a_elems: [VecLen]f32 = undefined;
             for (0..VecLen) |v| {
-                a_vec[v] = A.at2(i, k + v);
+                a_elems[v] = A.at2(i, k + v);
             }
+            const a_vec: Vec = a_elems;
 
             for (0..cols) |cj| {
                 const j = j0 + cj;
-                var b_vec: Vec = undefined;
+                var b_elems: [VecLen]f32 = undefined;
                 for (0..VecLen) |v| {
-                    b_vec[v] = B.at2(j, k + v);
+                    b_elems[v] = B.at2(j, k + v);
                 }
+                const b_vec: Vec = b_elems;
 
                 const prod = a_vec * b_vec;
                 accum[ri][cj] += @reduce(.Add, prod);
