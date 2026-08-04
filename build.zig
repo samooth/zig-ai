@@ -181,6 +181,21 @@ pub fn build(b: *std.Build) void {
     });
     loader_mod.addImport("core", core_mod);
 
+    // === Módulo gguf ===
+    const gguf_mod = b.createModule(.{
+        .root_source_file = b.path("src/loader/gguf.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // === Módulo model_config ===
+    const model_config_mod = b.createModule(.{
+        .root_source_file = b.path("src/loader/model_config.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    model_config_mod.addImport("gguf", gguf_mod);
+
     // === Módulo paged_attention ===
     const paged_attention_mod = b.createModule(.{
         .root_source_file = b.path("src/paged_attention/root.zig"),
@@ -217,6 +232,8 @@ pub fn build(b: *std.Build) void {
     pipeline_mod.addImport("kv_cache", kv_cache_mod);
     pipeline_mod.addImport("embedding", embedding_mod);
     pipeline_mod.addImport("time", time_mod);
+    pipeline_mod.addImport("gguf", gguf_mod);
+    pipeline_mod.addImport("model_config", model_config_mod);
 
     // === Ejecutable principal ===
     const exe_mod = b.createModule(.{
@@ -237,6 +254,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("embedding", embedding_mod);
     exe_mod.addImport("tokenizer", tokenizer_mod);
     exe_mod.addImport("loader", loader_mod);
+    exe_mod.addImport("gguf", gguf_mod);
+    exe_mod.addImport("model_config", model_config_mod);
     exe_mod.addImport("pipeline", pipeline_mod);
     exe_mod.addImport("paged_attention", paged_attention_mod);
     exe_mod.addImport("time", time_mod);
@@ -292,6 +311,8 @@ pub fn build(b: *std.Build) void {
         "src/transformer/embedding.zig",
         "src/tokenizer/bpe.zig",
         "src/loader/safetensors.zig",
+        "src/loader/gguf.zig",
+        "src/loader/model_config.zig",
     };
 
     inline for (test_files) |tf| {
@@ -313,6 +334,8 @@ pub fn build(b: *std.Build) void {
         tmod.addImport("embedding", embedding_mod);
         tmod.addImport("tokenizer", tokenizer_mod);
         tmod.addImport("loader", loader_mod);
+        tmod.addImport("gguf", gguf_mod);
+        tmod.addImport("model_config", model_config_mod);
         tmod.addImport("pipeline", pipeline_mod);
         tmod.addImport("paged_attention", paged_attention_mod);
         tmod.addImport("time", time_mod);
