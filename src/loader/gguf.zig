@@ -693,6 +693,90 @@ pub fn dequantQ4_0(bytes: []const u8, out: []f32) void {
     }
 }
 
+/// Q4_K: super-bloques de 256. Cada bloque (144 bytes):
+///   d f16 (offset 0), dmin f16 (offset 2), scales[12] (offset 4, escalas
+///   de 6 bits para 8 grupos de 32), qs[128] (offset 16, nibbles).
+///   val = d*sc*q - min*sm   (ref: ggml dequantize_row_q4_K)
+pub fn dequantQ4_K(bytes: []const u8, out: []f32) void {
+    const qk = 256;
+    const block_bytes = 144;
+    var i: usize = 0;
+    var nb: usize = 0;
+    while (i < out.len) : (i += qk) {
+        const base = nb * block_bytes;
+        const d: f32 = @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, bytes[base..][0..2], .little))));
+        const min: f32 = @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, bytes[base + 2 ..][0..2], .little))));
+        const scales = bytes[base + 4 .. base + 16];
+        const qs = bytes[base + 16 .. base + 144];
+        var is: usize = 0;
+        var j: usize = 0;
+        while (j < qk) : (j += 64) {
+            const s1 = getScaleMinK4(is + 0, scales);
+            const d1 = d * @as(f32, @floatFromInt(s1.d));
+            const m1 = min * @as(f32, @floatFromInt(s1.m));
+            const s2 = getScaleMinK4(is + 1, scales);
+            const d2 = d * @as(f32, @floatFromInt(s2.d));
+            const m2 = min * @as(f32, @floatFromInt(s2.m));
+            const q = qs[(j / 64) * 32 ..];
+            for (0..32) |l| {
+                out[i + j + l] = d1 * @as(f32, @floatFromInt(q[l] & 0xF)) - m1;
+                out[i + j + 32 + l] = d2 * @as(f32, @floatFromInt(q[l] >> 4)) - m2;
+            }
+            is += 2;
+        }
+        nb += 1;
+    }
+}
+
+/// Q6_K: super-bloques de 256. Cada bloque (210 bytes):
+///   ql[128] (offset 0), qh[64] (offset 128), scales[16] i8 (offset 192),
+///   d f16 (offset 208).
+///   val = d * sc[is] * (q - 32)   (ref: ggml dequantize_row_q6_K)
+pub fn dequantQ6_K(bytes: []const u8, out: []f32) void {
+    const qk = 256;
+    const block_bytes = 210;
+    var i: usize = 0;
+    var nb: usize = 0;
+    while (i < out.len) : (i += qk) {
+        const base = nb * block_bytes;
+        const d: f32 = @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, bytes[base + 208 ..][0..2], .little))));
+        const ql = bytes[base .. base + 128];
+        const qh = bytes[base + 128 .. base + 192];
+        const sc = bytes[base + 192 .. base + 208];
+        var n: usize = 0;
+        while (n < qk) : (n += 128) {
+            const ql2 = ql[(n / 128) * 64 ..];
+            const qh2 = qh[(n / 128) * 32 ..];
+            const sc2 = sc[(n / 128) * 8 ..];
+            for (0..32) |l| {
+                const is = l / 16;
+                const q1: f32 = @floatFromInt(@as(i8, @bitCast((ql2[l] & 0xF) | ((qh2[l] >> 0) & 3) << 4)) - 32);
+                const q2: f32 = @floatFromInt(@as(i8, @bitCast((ql2[l + 32] & 0xF) | ((qh2[l] >> 2) & 3) << 4)) - 32);
+                const q3: f32 = @floatFromInt(@as(i8, @bitCast((ql2[l] >> 4) | ((qh2[l] >> 4) & 3) << 4)) - 32);
+                const q4: f32 = @floatFromInt(@as(i8, @bitCast((ql2[l + 32] >> 4) | ((qh2[l] >> 6) & 3) << 4)) - 32);
+                out[i + n + l] = d * @as(f32, @floatFromInt(@as(i8, @bitCast(sc2[is + 0])))) * q1;
+                out[i + n + l + 32] = d * @as(f32, @floatFromInt(@as(i8, @bitCast(sc2[is + 2])))) * q2;
+                out[i + n + l + 64] = d * @as(f32, @floatFromInt(@as(i8, @bitCast(sc2[is + 4])))) * q3;
+                out[i + n + l + 96] = d * @as(f32, @floatFromInt(@as(i8, @bitCast(sc2[is + 6])))) * q4;
+            }
+        }
+        nb += 1;
+    }
+}
+
+const ScaleMin = struct { d: u8, m: u8 };
+
+/// Decodifica escala (6 bits) y min (6 bits) de block_q4_K (ref: get_scale_min_k4)
+fn getScaleMinK4(j: usize, q: []const u8) ScaleMin {
+    if (j < 4) {
+        return .{ .d = q[j] & 63, .m = q[j + 4] & 63 };
+    }
+    return .{
+        .d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4),
+        .m = (q[j + 4] >> 4) | ((q[j] >> 6) << 4),
+    };
+}
+
 /// Dequantizar un tensor GGUF completo a f32
 pub fn dequantTensor(info: *const TensorInfo, bytes: []const u8, out: []f32) GgufError!void {
     if (out.len < info.numel()) return GgufError.InvalidData;
@@ -702,6 +786,8 @@ pub fn dequantTensor(info: *const TensorInfo, bytes: []const u8, out: []f32) Ggu
         .bf16 => dequantBF16(bytes, out),
         .q8_0 => dequantQ8_0(bytes, out),
         .q4_0 => dequantQ4_0(bytes, out),
+        .q4_k => dequantQ4_K(bytes, out),
+        .q6_k => dequantQ6_K(bytes, out),
         else => return GgufError.UnsupportedDtype,
     }
 }
@@ -825,6 +911,64 @@ test "gguf dequant q8_0" {
     try std.testing.expectApproxEqRel(@as(f32, 3.5), out[1], 1e-3);
     try std.testing.expectApproxEqRel(@as(f32, 0.5), out[2], 1e-3);
     try std.testing.expectApproxEqRel(@as(f32, -0.5), out[3], 1e-3);
+}
+
+test "gguf dequant q4_k" {
+    const allocator = std.testing.allocator;
+    // d=1.0, dmin=0.0, escalas todas 1 (d-scale), nibbles todos 15
+    var block = try allocator.alloc(u8, 144);
+    defer allocator.free(block);
+    @memset(block, 0);
+    std.mem.writeInt(u16, block[0..2], @bitCast(@as(f16, 1.0)), .little);
+    std.mem.writeInt(u16, block[2..4], @bitCast(@as(f16, 0.0)), .little);
+    for (0..12) |i| block[4 + i] = 0x01;
+    for (16..144) |i| block[i] = 0xFF; // cada nibble = 15
+
+    var out: [256]f32 = undefined;
+    dequantQ4_K(block, &out);
+    for (out) |v| {
+        try std.testing.expectApproxEqRel(@as(f32, 15.0), v, 1e-3);
+    }
+
+    // Segundo escenario: d=2, dmin=1, nibbles=0 -> val = -min*m
+    // get_scale_min_k4(j<4): m = scales[j+4] & 63 = 1 -> val = -1.0
+    // get_scale_min_k4(j>=4): m = (scales[j+4]>>4)|((scales[j]>>6)<<4) = 0 -> val = 0
+    std.mem.writeInt(u16, block[0..2], @bitCast(@as(f16, 2.0)), .little);
+    std.mem.writeInt(u16, block[2..4], @bitCast(@as(f16, 1.0)), .little);
+    for (0..12) |i| block[4 + i] = 0x01;
+    for (16..144) |i| block[i] = 0x00;
+    dequantQ4_K(block, &out);
+    for (out[0..128]) |v| {
+        try std.testing.expectApproxEqRel(@as(f32, -1.0), v, 1e-3);
+    }
+    for (out[128..256]) |v| {
+        try std.testing.expectApproxEqRel(@as(f32, 0.0), v, 1e-3);
+    }
+}
+
+test "gguf dequant q6_k" {
+    const allocator = std.testing.allocator;
+    // d=0.5, scales todos 1, ql/qh=0 -> q=-32 -> val = 0.5*1*(-32) = -16
+    var block = try allocator.alloc(u8, 210);
+    defer allocator.free(block);
+    @memset(block, 0);
+    for (192..208) |i| block[i] = 1; // scales = 1
+    std.mem.writeInt(u16, block[208..210], @bitCast(@as(f16, 0.5)), .little);
+
+    var out: [256]f32 = undefined;
+    dequantQ6_K(block, &out);
+    for (out) |v| {
+        try std.testing.expectApproxEqRel(@as(f32, -16.0), v, 1e-3);
+    }
+
+    // ql bajo = 0x0F (15) -> q1 = 15-32 = -17 -> val = -8.5
+    for (0..64) |l| block[l] = 0x0F;
+    dequantQ6_K(block, &out);
+    try std.testing.expectApproxEqRel(@as(f32, -8.5), out[0], 1e-3);
+    // ql[32..] bajo = 15 -> q2 = -17 en offset 32
+    try std.testing.expectApproxEqRel(@as(f32, -8.5), out[32], 1e-3);
+    // ql>>4 = 0 -> q3 = -32 en offset 64
+    try std.testing.expectApproxEqRel(@as(f32, -16.0), out[64], 1e-3);
 }
 
 test "gguf parse tensor names (C6)" {

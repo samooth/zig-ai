@@ -106,6 +106,19 @@ test "load real gguf and verify config + tensor shapes" {
     std.debug.print("token_embd dtype={s} shape=[{d} {d}] bytes={d}\n", .{
         embd.dtype.name(), embd.dims[0], embd.dims[1], embd_bytes.len,
     });
+
+    var dt_counts: [32]usize = [_]usize{0} ** 32;
+    var it = g.tensors.iterator();
+    while (it.next()) |e| {
+        const idx: usize = @intFromEnum(e.value_ptr.dtype);
+        if (idx < 32) dt_counts[idx] += 1;
+    }
+    for (dt_counts, 0..) |c, i| {
+        if (c > 0) {
+            const t_enum = std.enums.fromInt(gguf.GgmlType, @as(u32, @intCast(i)));
+            std.debug.print("dtype {s}: {d}\n", .{ t_enum.?.name(), c });
+        }
+    }
 }
 
 test "load real gguf tokenizer and build bpe (D1/D2/D4)" {

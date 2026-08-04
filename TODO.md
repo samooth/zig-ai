@@ -59,7 +59,7 @@ paths solo-0.14. Instalado en `~/.local/bin/zig-0.16`.
 | C7 | `ModelConfig` (hidden_size, layers, heads, kv_heads, intermediate, vocab, rope_theta) | `src/loader/model_config.zig` | 🔴 |
 | C8 | Test: cargar GGUF real (tiny) y verificar shapes | `tests/test_gguf.zig` | 🟡 |
 
-> **Estado Fase C**: C1 ✅, C2 ✅ (parser metadata KV con arrays anidados + strings), C3 ✅, C4 ✅ (`fromFileMmap` vía `std.Io.File.MemoryMap`, lectura lazy por páginas; `tensorData()` sin copiar el archivo), C5 ✅ parcial (dequant F16/F32/BF16/Q8_0/Q4_0), C6 ✅ (`parseTensorName` → `TensorRole` + índice de capa, con aliases attn_output/feed_forward/mlp), C7 ✅ (`src/loader/model_config.zig`: architecture, context_length, embedding_length, block_count, feed_forward_length, head_count/kv, rms_eps, rope_dim/freq_base, vocab_size; fallbacks a `tokenizer.ggml.tokens` y head_dim), C8 ✅ (tests/test_gguf.zig: carga real vía mmap, verifica config + shapes; requiere `GGUF_MODEL_PATH`, salta si no está). Verificado contra Qwen2.5-7B q4_k_m real (4.4GB): arch=qwen2, 339 tensores, embedding=3584, layers=28, kv_heads=4, ffn=18944, vocab=152064. Pendiente: Fase D (tokenizer desde GGUF).
+> **Estado Fase C**: C1 ✅, C2 ✅ (parser metadata KV con arrays anidados + strings), C3 ✅, C4 ✅ (`fromFileMmap` vía `std.Io.File.MemoryMap`, lectura lazy por páginas; `tensorData()` sin copiar el archivo), C5 ✅ (dequant F16/F32/BF16/Q8_0/Q4_0/Q4_K/Q6_K), C6 ✅ (`parseTensorName` → `TensorRole` + índice de capa, con aliases attn_output/feed_forward/mlp), C7 ✅ (`src/loader/model_config.zig`: architecture, context_length, embedding_length, block_count, feed_forward_length, head_count/kv, rms_eps, rope_dim/freq_base, vocab_size; fallbacks a `tokenizer.ggml.tokens` y head_dim), C8 ✅ (tests/test_gguf.zig: carga real vía mmap, verifica config + shapes; requiere `GGUF_MODEL_PATH`, salta si no está). Verificado contra Qwen2.5-7B q4_k_m real (4.4GB): arch=qwen2, 339 tensores, embedding=3584, layers=28, kv_heads=4, ffn=18944, vocab=152064. Pendiente: Fase D (tokenizer desde GGUF).
 
 ## Fase D — Tokenizer desde GGUF (Importante)
 
@@ -83,6 +83,7 @@ paths solo-0.14. Instalado en `~/.local/bin/zig-0.16`.
 | E4 | CLI: `--model model.gguf --prompt "..." -n 128` | `src/main.zig` | 🟡 |
 | E5 | Métricas: tok/s, ms/token, memoria KV | `src/main.zig` | 🟢 |
 | E6 | Modelos objetivo: Qwen2.5-1.5B Q8_0, TinyLlama-1.1B, Llama-3.2-1B | — | 🟢 |
+> **Estado Fase E**: E0 ✅ (dequant Q4_K/Q6_K añadidos a `gguf.zig` con `getScaleMinK4` para escalas de 6 bits, tests unitarios; verificado contra referencia ggml C). El modelo real usa q4_k (169 tensores), q6_k (29), f32 (141) — todos soportados ahora. Pendiente: E1 (main.zig pipeline), E2 (embedding/lm_head), E3 (RoPE), E4 (CLI), E5 (métricas), E6 (modelos objetivo).
 
 ## Fase F — PagedAttention (post-integrado, verificar)
 
