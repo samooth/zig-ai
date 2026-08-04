@@ -189,6 +189,16 @@ pub fn build(b: *std.Build) void {
     });
     model_config_mod.addImport("gguf", gguf_mod);
 
+    // === Módulo gguf_model ===
+    const gguf_model_mod = b.createModule(.{
+        .root_source_file = b.path("src/loader/gguf_model.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gguf_model_mod.addImport("gguf", gguf_mod);
+    gguf_model_mod.addImport("model_config", model_config_mod);
+    gguf_model_mod.addImport("core", core_mod);
+
     // === Módulo gguf_tokenizer ===
     const gguf_tokenizer_mod = b.createModule(.{
         .root_source_file = b.path("src/loader/gguf_tokenizer.zig"),
@@ -227,6 +237,8 @@ pub fn build(b: *std.Build) void {
     transformer_mod.addImport("rope", rope_mod);
     transformer_mod.addImport("gqa", gqa_mod);
     transformer_mod.addImport("embedding", embedding_mod);
+    transformer_mod.addImport("cudaz", cudaz_mod);
+    transformer_mod.addImport("gguf", gguf_mod);
 
     // === Módulo pipeline ===
     const pipeline_mod = b.createModule(.{
@@ -265,6 +277,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("loader", loader_mod);
     exe_mod.addImport("gguf", gguf_mod);
     exe_mod.addImport("model_config", model_config_mod);
+    exe_mod.addImport("gguf_model", gguf_model_mod);
     exe_mod.addImport("pipeline", pipeline_mod);
     exe_mod.addImport("paged_attention", paged_attention_mod);
     exe_mod.addImport("time", time_mod);
@@ -324,6 +337,7 @@ pub fn build(b: *std.Build) void {
         "src/loader/gguf.zig",
         "src/loader/model_config.zig",
         "src/loader/gguf_tokenizer.zig",
+        "src/loader/gguf_model.zig",
     };
 
     inline for (test_files) |tf| {
@@ -347,6 +361,7 @@ pub fn build(b: *std.Build) void {
         tmod.addImport("gguf", gguf_mod);
         tmod.addImport("model_config", model_config_mod);
         tmod.addImport("gguf_tokenizer", gguf_tokenizer_mod);
+        tmod.addImport("gguf_model", gguf_model_mod);
         tmod.addImport("pipeline", pipeline_mod);
         tmod.addImport("paged_attention", paged_attention_mod);
         tmod.addImport("time", time_mod);

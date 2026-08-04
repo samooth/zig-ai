@@ -6,7 +6,15 @@ const std = @import("std");
 const gguf = @import("gguf");
 const gguf_tokenizer = @import("gguf_tokenizer");
 const model_config = @import("model_config");
+const gguf_model = @import("gguf_model");
 const bpe = @import("tokenizer");
+const transformer = @import("transformer");
+const Tensor = @import("core").Tensor;
+const fa = @import("fa");
+
+const TransformerLayer = transformer.TransformerLayer;
+const LayerPrecision = transformer.LayerPrecision;
+const FlashAttentionConfig = fa.fa_config.FlashAttentionConfig;
 
 test "load real gguf and verify config + tensor shapes" {
     const gpa = std.testing.allocator;
@@ -170,4 +178,89 @@ test "load real gguf tokenizer and build bpe (D1/D2/D4)" {
     // Special tokens
     try std.testing.expectEqual(gt.bos_id, tok.bos_token);
     try std.testing.expectEqual(gt.eos_id, tok.eos_token);
+}
+
+test "load real gguf model: embedding, layer 0 weights, forward pass (E1/E2)" {
+    const gpa = std.testing.allocator;
+
+    const env_path = std.c.getenv("GGUF_MODEL_PATH") orelse {
+        std.debug.print("SKIP: GGUF_MODEL_PATH no está definida\n", .{});
+        return error.SkipZigTest;
+    };
+    const path = std.mem.span(env_path);
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var model = try gguf_model.GgufModel.load(io, gpa, path);
+    defer model.deinit();
+    const cfg = model.config;
+
+    std.debug.print("\n=== E: forward capa 0 (CPU) ===\n", .{});
+    std.debug.print("arch={s} emb={d} layers={d} heads={d} kv={d} ffn={d} head_dim={d} rope={d:.1}\n", .{
+        cfg.architecture, cfg.embedding_length, cfg.block_count, cfg.head_count,
+        cfg.head_count_kv, cfg.feed_forward_length,
+        cfg.rope_dimension_count, cfg.rope_freq_base,
+    });
+
+    // Embedding table dequantizada a f16
+    var emb = try model.loadEmbedding();
+    defer emb.deinit();
+    try std.testing.expectEqual(@as(usize, cfg.vocab_size), emb.shape[0]);
+    try std.testing.expectEqual(@as(usize, cfg.embedding_length), emb.shape[1]);
+    std.debug.print("token_embd dequant -> [{d}, {d}] f16\n", .{ emb.shape[0], emb.shape[1] });
+
+    // Config de atención: N = tamaño de secuencia del test
+    const head_dim = cfg.rope_dimension_count;
+    const seq_n: usize = 6;
+    const fa_config = FlashAttentionConfig{
+        .N = seq_n, .d = head_dim, .num_heads = cfg.head_count, .batch_size = 1,
+        .dtype = .f16, .causal = true,
+    };
+    const precision = LayerPrecision{ .compute = .f16, .weights_on_gpu = false, .use_quantized = false };
+
+    var layer = try TransformerLayer.init(
+        gpa, 0, fa_config, "cuda/flash_attention.ptx",
+        cfg.embedding_length, precision, cfg.head_count_kv, cfg.feed_forward_length,
+    );
+    defer layer.deinit();
+    layer.rms_eps = cfg.layer_norm_rms_epsilon;
+    layer.rope_freq_base = cfg.rope_freq_base;
+
+    try layer.loadWeightsFromGguf(&model.file);
+    std.debug.print("layer 0: wq=[{d},{d}] wk=[{d},{d}] wo=[{d},{d}] gate=[{d},{d}] down=[{d},{d}]\n", .{
+        layer.w_q_t.?.shape[0], layer.w_q_t.?.shape[1],
+        layer.w_k_t.?.shape[0], layer.w_k_t.?.shape[1],
+        layer.w_o_t.?.shape[0], layer.w_o_t.?.shape[1],
+        layer.w_gate_t.?.shape[0], layer.w_gate_t.?.shape[1],
+        layer.w_down_t.?.shape[0], layer.w_down_t.?.shape[1],
+    });
+    try std.testing.expectEqual(@as(usize, cfg.head_count * head_dim), layer.w_q_t.?.shape[0]);
+    try std.testing.expectEqual(@as(usize, cfg.embedding_length), layer.w_q_t.?.shape[1]);
+    try std.testing.expectEqual(@as(usize, cfg.head_count_kv * head_dim), layer.w_k_t.?.shape[0]);
+    try std.testing.expectEqual(@as(usize, cfg.feed_forward_length), layer.w_gate_t.?.shape[0]);
+
+    // Embedding lookup de tokens de prueba
+    const test_tokens = [_]u32{ 9707, 11, 30, 1484, 13, 905 }; // "Hello, world!..."
+    const tokens = test_tokens[0..seq_n];
+    var hidden = try Tensor(f16).alloc(gpa, &.{ 1, seq_n, cfg.embedding_length });
+    defer hidden.deinit();
+    const embedding_mod = @import("embedding");
+    embedding_mod.embeddingLookup(emb, tokens, 1, seq_n, &hidden);
+
+    var output = try Tensor(f16).alloc(gpa, hidden.shape);
+    defer output.deinit();
+
+    try layer.forward(hidden, &output, 0, true);
+
+    // Salida finita y con magnitud razonable
+    var max_abs: f32 = 0;
+    var any_nan = false;
+    for (output.data) |v| {
+        const f = @as(f32, @floatCast(v));
+        if (std.math.isNan(f) or std.math.isInf(f)) any_nan = true;
+        max_abs = @max(max_abs, @abs(f));
+    }
+    try std.testing.expect(!any_nan);
+    try std.testing.expect(max_abs > 0);
+    std.debug.print("forward layer 0 OK: max_abs={d:.3}\n", .{max_abs});
 }

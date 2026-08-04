@@ -7,13 +7,45 @@ const norm = @import("norm.zig");
 const ffn = @import("ffn.zig");
 const rope_mod = @import("rope.zig");
 const gqa_mod = @import("gqa.zig");
+const gguf = @import("gguf");
+const cudaz = @import("cudaz");
 
 const FlashAttention = fa.FlashAttention;
+const FlashAttentionCpu = fa.FlashAttentionCpu;
 const FlashAttentionConfig = fa.fa_config.FlashAttentionConfig;
 const MatmulEngine = matmul.MatmulEngine;
 const PrecisionMode = matmul.PrecisionMode;
 const KVCacheManager = kvcache.KVCacheManager;
 const KVCacheConfig = kvcache.KVCacheConfig;
+
+/// Motor de atención: GPU (CUDA) si está disponible, CPU en caso contrario
+pub const AttentionEngine = union(enum) {
+    gpu: FlashAttention,
+    cpu: FlashAttentionCpu,
+
+    pub fn init(allocator: std.mem.Allocator, config: FlashAttentionConfig, ptx_path: []const u8) AttentionEngine {
+        if (cudaz.isCudaAvailable()) {
+            return .{ .gpu = FlashAttention.init(allocator, config, ptx_path) catch {
+                return .{ .cpu = FlashAttentionCpu.init(allocator, config) };
+            } };
+        }
+        return .{ .cpu = FlashAttentionCpu.init(allocator, config) };
+    }
+
+    pub fn deinit(self: *AttentionEngine) void {
+        switch (self.*) {
+            .gpu => |*eng| eng.deinit(),
+            .cpu => {},
+        }
+    }
+
+    pub fn forward(self: *AttentionEngine, Q: Tensor(f16), K: Tensor(f16), V: Tensor(f16), O: *Tensor(f16)) !void {
+        switch (self.*) {
+            .gpu => |*eng| try eng.forward(Q, K, V, O),
+            .cpu => |eng| try eng.forward(Q, K, V, O),
+        }
+    }
+};
 
 pub const TransformerError = error{
     WeightFileNotFound, MatmulNotImplemented, CacheOverflow,
@@ -61,7 +93,7 @@ pub const TransformerLayer = struct {
 
     // Motores
     matmul_engine: MatmulEngine,
-    fa_engine: FlashAttention,
+    fa_engine: AttentionEngine,
 
     // Configuración
     hidden_dim: usize,
@@ -71,6 +103,7 @@ pub const TransformerLayer = struct {
     intermediate_dim: usize,
     precision: LayerPrecision,
     rms_eps: f32 = 1e-5,
+    rope_freq_base: f32 = 10000.0,
 
     // Buffers intermedios
     q_proj: Tensor(f16),
@@ -102,8 +135,7 @@ pub const TransformerLayer = struct {
         var engine = try MatmulEngine.init(allocator, backend, precision.compute);
         errdefer engine.deinit();
 
-        var fa_eng = try FlashAttention.init(allocator, fa_config_val, ptx_path);
-        errdefer fa_eng.deinit();
+        const fa_eng = AttentionEngine.init(allocator, fa_config_val, ptx_path);
         const N = fa_config_val.N;
         const num_heads = fa_config_val.num_heads;
         const d = fa_config_val.d;
@@ -197,6 +229,36 @@ pub const TransformerLayer = struct {
         }
     }
 
+    /// Carga los pesos de esta capa desde un GGUF (dequant a f16).
+    /// Los pesos GGUF son matrices [out, in] row-major (dims[0]=in, dims[1]=out),
+    /// que coincide con el layout que espera linearProjection (trans_b=true).
+    /// Soporta los alias comunes: attn_output/attn_o, ffn_gate/mlp.gate_proj, etc.
+    pub fn loadWeightsFromGguf(self: *Self, g: *const gguf.GgufFile) !void {
+        const prefix = try std.fmt.allocPrint(self.allocator, "blk.{d}.", .{self.layer_idx});
+        defer self.allocator.free(prefix);
+
+        const q_names = [_][]const u8{ "attn_q.weight", "wq.weight" };
+        const k_names = [_][]const u8{ "attn_k.weight", "wk.weight" };
+        const v_names = [_][]const u8{ "attn_v.weight", "wv.weight" };
+        const o_names = [_][]const u8{ "attn_output.weight", "attn_o.weight", "wo.weight" };
+        const gate_names = [_][]const u8{ "ffn_gate.weight", "mlp.gate_proj.weight", "feed_forward.w1.weight" };
+        const up_names = [_][]const u8{ "ffn_up.weight", "mlp.up_proj.weight", "feed_forward.w3.weight" };
+        const down_names = [_][]const u8{ "ffn_down.weight", "mlp.down_proj.weight", "feed_forward.w2.weight" };
+        const attn_norm_names = [_][]const u8{ "attn_norm.weight", "input_layernorm.weight" };
+        const ffn_norm_names = [_][]const u8{ "ffn_norm.weight", "post_attention_layernorm.weight" };
+
+        self.w_q_t = try loadGgufWeightF16(self.allocator, g, prefix, &q_names);
+        self.w_k_t = try loadGgufWeightF16(self.allocator, g, prefix, &k_names);
+        self.w_v_t = try loadGgufWeightF16(self.allocator, g, prefix, &v_names);
+        self.w_o_t = try loadGgufWeightF16(self.allocator, g, prefix, &o_names);
+        self.w_gate_t = try loadGgufWeightF16(self.allocator, g, prefix, &gate_names);
+        self.w_up_t = try loadGgufWeightF16(self.allocator, g, prefix, &up_names);
+        self.w_down_t = try loadGgufWeightF16(self.allocator, g, prefix, &down_names);
+
+        self.attn_norm = try loadGgufNormF32(self.allocator, g, prefix, &attn_norm_names);
+        self.ffn_norm = try loadGgufNormF32(self.allocator, g, prefix, &ffn_norm_names);
+    }
+
     /// Forward completo: PreNorm -> Attn -> Residual -> PostNorm -> FFN -> Residual
     pub fn forward(
         self: *Self,
@@ -233,7 +295,7 @@ pub const TransformerLayer = struct {
         }
 
         // === 3. RoPE ===
-        rope_mod.applyRoPE(&self.q_proj, &self.k_proj, position, self.head_dim, 10000.0);
+        rope_mod.applyRoPE(&self.q_proj, &self.k_proj, position, self.head_dim, self.rope_freq_base);
 
         // === 4. KV-Cache ===
         if (self.kv_manager) |mgr| {
@@ -469,6 +531,66 @@ fn loadWeightFileF32(io: std.Io, allocator: std.mem.Allocator, base: []const u8,
     const num_elements = bytes.len / 4;
     const tensor = try Tensor(f32).initUninitialized(allocator, &.{num_elements});
     @memcpy(std.mem.sliceAsBytes(tensor.data), bytes);
+    return tensor;
+}
+
+/// Carga un peso 2D del GGUF y lo dequantiza a f16 en layout [out, in] row-major.
+fn loadGgufWeightF16(
+    allocator: std.mem.Allocator,
+    g: *const gguf.GgufFile,
+    prefix: []const u8,
+    names: []const []const u8,
+) !Tensor(f16) {
+    var found: ?*const gguf.TensorInfo = null;
+    for (names) |n| {
+        const full = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, n });
+        defer allocator.free(full);
+        if (g.getTensor(full)) |info| {
+            found = info;
+            break;
+        }
+    }
+    const info = found orelse return TransformerError.WeightFileNotFound;
+
+    if (info.n_dims != 2) return TransformerError.WeightFileNotFound;
+    const in_dim: usize = @intCast(info.dims[0]);
+    const out_dim: usize = @intCast(info.dims[1]);
+    const numel = in_dim * out_dim;
+
+    const f32buf = try allocator.alloc(f32, numel);
+    defer allocator.free(f32buf);
+    try gguf.dequantTensor(info, g.tensorData(info), f32buf);
+
+    const tensor = try Tensor(f16).initUninitialized(allocator, &.{ out_dim, in_dim });
+    for (tensor.data, f32buf) |*d, s| d.* = @floatCast(s);
+    return tensor;
+}
+
+/// Carga un peso 1D de norma (RMSNorm gamma) en f32.
+fn loadGgufNormF32(
+    allocator: std.mem.Allocator,
+    g: *const gguf.GgufFile,
+    prefix: []const u8,
+    names: []const []const u8,
+) !Tensor(f32) {
+    var found: ?*const gguf.TensorInfo = null;
+    for (names) |n| {
+        const full = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, n });
+        defer allocator.free(full);
+        if (g.getTensor(full)) |info| {
+            found = info;
+            break;
+        }
+    }
+    const info = found orelse return TransformerError.WeightFileNotFound;
+    const numel: usize = @intCast(info.numel());
+
+    const f32buf = try allocator.alloc(f32, numel);
+    defer allocator.free(f32buf);
+    try gguf.dequantTensor(info, g.tensorData(info), f32buf);
+
+    const tensor = try Tensor(f32).initUninitialized(allocator, &.{numel});
+    @memcpy(tensor.data, f32buf);
     return tensor;
 }
 
