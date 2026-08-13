@@ -128,10 +128,12 @@ pub const FlashAttentionCpu = struct {
     pub fn init(allocator: std.mem.Allocator, config: FlashAttentionConfig) Self {
         return .{ .allocator = allocator, .config = config };
     }
-
     pub fn forward(self: Self, Q: Tensor(f16), K: Tensor(f16), V: Tensor(f16), O: *Tensor(f16)) !void {
         const cfg = self.config;
-        const N = cfg.N; const d = cfg.d; const scale = cfg.scale(); const causal = cfg.causal;
+        const N = Q.shape[2];
+        const d = Q.shape[3];
+        const scale = cfg.scale();
+        const causal = cfg.causal;
         if (N > 4096) {
             const mem_mb = N * N * 4 / 1024 / 1024;
             std.log.warn("FlashAttentionCpu usa O(N^2) memoria. N={d} requiere {d}MB scores.", .{ N, mem_mb });

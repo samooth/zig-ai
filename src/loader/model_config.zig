@@ -11,7 +11,7 @@ pub const ModelConfigError = error{
 };
 
 pub const ModelConfig = struct {
-    architecture: []const u8, // "llama", "gemma", "mistral", ...
+    architecture: []const u8, // "llama", "gemma", "mistral", "qwen35", ...
     context_length: usize,
     embedding_length: usize,
     block_count: usize,
@@ -22,6 +22,17 @@ pub const ModelConfig = struct {
     rope_dimension_count: usize,
     rope_freq_base: f32,
     vocab_size: usize,
+
+    // Qwen3.5 / qwen35 hybrid (SSM + attention)
+    is_hybrid: bool = false,
+    head_dim: usize = 0, // dimensión de cabeza de atención (key_length)
+    full_attention_interval: usize = 0, // capa i es atención si (i+1)%interval==0
+    ssm_conv_kernel: usize = 0,
+    ssm_inner_size: usize = 0,
+    ssm_state_size: usize = 0,
+    ssm_time_step_rank: usize = 0,
+    ssm_group_count: usize = 0,
+    rope_sections: [4]usize = [_]usize{ 0, 0, 0, 0 }, // IMROPE sections
 
     pub const Self = @This();
 
@@ -59,7 +70,34 @@ pub const ModelConfig = struct {
                 cfg.vocab_size = v.array.items.len;
             }
         }
+
+        // ── Qwen3.5 hybrid (qwen35 / qwen35moe) ──
+        if (std.mem.eql(u8, arch, "qwen35") or std.mem.eql(u8, arch, "qwen35moe")) {
+            cfg.is_hybrid = true;
+            cfg.head_dim = try u64Meta(g, arch, "attention.key_length", cfg.embedding_length / cfg.head_count);
+            cfg.full_attention_interval = try u64Meta(g, arch, "attention.full_attention_interval", 4);
+            cfg.ssm_conv_kernel = try u64Meta(g, arch, "ssm.conv_kernel", 0);
+            cfg.ssm_inner_size = try u64Meta(g, arch, "ssm.inner_size", 0);
+            cfg.ssm_state_size = try u64Meta(g, arch, "ssm.state_size", 0);
+            cfg.ssm_time_step_rank = try u64Meta(g, arch, "ssm.time_step_rank", 0);
+            cfg.ssm_group_count = try u64Meta(g, arch, "ssm.group_count", 0);
+
+            // rope.dimension_sections (array de 4 enteros, IMROPE)
+            var sections_buf: [4]u64 = undefined;
+            const n_sections = try arrU64Meta(g, arch, "rope.dimension_sections", &sections_buf) orelse 0;
+            for (0..@min(4, n_sections)) |i| cfg.rope_sections[i] = sections_buf[i];
+        }
+
         return cfg;
+    }
+
+    /// True si la capa `il` usa atención densa (Qwen3.5 hybrid).
+    /// Las capas recurrentes (SSM linear attention) se intercalan cada
+    /// `full_attention_interval` capas: capa i es atención si (i+1)%interval == 0.
+    pub fn isFullAttentionLayer(self: Self, il: usize) bool {
+        if (!self.is_hybrid) return true;
+        if (self.full_attention_interval == 0) return true;
+        return (il + 1) % self.full_attention_interval == 0;
     }
 
     /// True si la arquitectura es compatible con el pipeline actual (LLaMA-like)
@@ -69,6 +107,7 @@ pub const ModelConfig = struct {
             "gemma2",   "falcon",   "gpt2",    "gptj",
             "phi2",     "phi3",     "qwen2",   "qwen2moe",
             "starcoder2", "deepseek2", "granite",
+            "qwen35",   "qwen35moe",
         };
         for (llama_like) |a| {
             if (std.mem.eql(u8, arch, a)) return true;
@@ -76,6 +115,24 @@ pub const ModelConfig = struct {
         return false;
     }
 };
+
+/// Lee un array de u64 con prefijo de arquitectura en el buffer `out`,
+/// devolviendo el número de elementos leídos (0 si la clave no existe).
+fn arrU64Meta(
+    g: *const gguf.GgufFile,
+    arch: []const u8,
+    key: []const u8,
+    out: []u64,
+) ModelConfigError!?usize {
+    var buf: [128]u8 = undefined;
+    const full = std.fmt.bufPrint(&buf, "{s}.{s}", .{ arch, key }) catch unreachable;
+    const v = g.getMeta(full) orelse return null;
+    const n = @min(out.len, v.array.items.len);
+    for (v.array.items[0..n], 0..) |it, i| {
+        out[i] = it.asU64() orelse return ModelConfigError.InvalidMetadata;
+    }
+    return n;
+}
 
 /// Lee un u64 opcional con prefijo de arquitectura
 fn u64Meta(g: *const gguf.GgufFile, arch: []const u8, key: []const u8, default: ?u64) ModelConfigError!u64 {

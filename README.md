@@ -38,6 +38,7 @@ zig-ai-engine/
 │   │   └── fa_kernels.zig       # Launchers CUDA
 │   ├── transformer/
 │   │   ├── layer.zig       # Capa Transformer completa
+│   │   ├── ssm.zig         # Gated DeltaNet / SSM (Qwen3.5 hybrid)
 │   │   ├── pipeline.zig    # Pipeline de capas
 │   │   ├── norm.zig        # RMSNorm / LayerNorm
 │   │   ├── ffn.zig         # FFN SwiGLU
@@ -49,7 +50,13 @@ zig-ai-engine/
 │   │   ├── quant_types.zig       # Formatos de cuantización
 │   │   └── gpu_dequant.zig       # Dequant en GPU
 │   ├── tokenizer/bpe.zig   # Tokenizer BPE
-│   ├── loader/safetensors.zig    # Carga de pesos
+│   ├── loader/
+│   │   ├── gguf.zig             # Parser GGUF + dequant (IQ2_XS/IQ2_S/IQ3_S/IQ4_XS/Q4_K/Q6_K…)
+│   │   ├── quant_weight.zig     # QuantWeight: referencia zero-copy + dequant a f16/f32
+│   │   ├── gguf_tokenizer.zig   # Tokenizer GGUF → BPE
+│   │   ├── gguf_model.zig       # Ensamblado del modelo desde GGUF
+│   │   ├── model_config.zig     # Config desde metadata (qwen35 hybrid incluido)
+│   │   └── safetensors.zig      # Carga de pesos
 │   ├── paged_attention/
 │   │   ├── root.zig              # PagedAttention: exports y configuración
 │   │   ├── block.zig             # Bloque físico con refcount
@@ -125,8 +132,15 @@ defer layer.deinit();
 try layer.forward(hidden_state, &output);
 ```
 
-## Backends Matmul
+## Documentación
 
+- [`docs/qwen35-hybrid-deltanet.md`](docs/qwen35-hybrid-deltanet.md) — arquitectura
+  híbrida Qwen3.5 (Gated DeltaNet + atención), estrategia `QuantWeight`, bugs de
+  la recurrencia corregidos y plan de la Fase H.
+- [`docs/zig-ai-engine-plan.md`](docs/zig-ai-engine-plan.md) — plan de desarrollo.
+- [`docs/zig-ai-engine-todo.md`](docs/zig-ai-engine-todo.md) — checklist por fases.
+
+## Backends Matmul
 | Backend   | f32 | f64 | f16 | bf16 | INT8 | Async | Batch |
 |-----------|-----|-----|-----|------|------|-------|-------|
 | naive     | ✓   | ✓   | —   | —    | —    | —     | —     |

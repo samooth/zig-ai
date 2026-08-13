@@ -199,6 +199,14 @@ pub fn build(b: *std.Build) void {
     gguf_model_mod.addImport("model_config", model_config_mod);
     gguf_model_mod.addImport("core", core_mod);
 
+    // === Módulo quant_weight ===
+    const quant_weight_mod = b.createModule(.{
+        .root_source_file = b.path("src/loader/quant_weight.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    quant_weight_mod.addImport("gguf", gguf_mod);
+
     // === Módulo gguf_tokenizer ===
     const gguf_tokenizer_mod = b.createModule(.{
         .root_source_file = b.path("src/loader/gguf_tokenizer.zig"),
@@ -332,9 +340,11 @@ pub fn build(b: *std.Build) void {
         "src/transformer/rope.zig",
         "src/transformer/gqa.zig",
         "src/transformer/embedding.zig",
+        "src/transformer/ssm.zig",
         "src/tokenizer/bpe.zig",
         "src/loader/safetensors.zig",
         "src/loader/gguf.zig",
+        "src/loader/quant_weight.zig",
         "src/loader/model_config.zig",
         "src/loader/gguf_tokenizer.zig",
         "src/loader/gguf_model.zig",
@@ -359,6 +369,7 @@ pub fn build(b: *std.Build) void {
         tmod.addImport("embedding", embedding_mod);
         tmod.addImport("tokenizer", tokenizer_mod);
         tmod.addImport("gguf", gguf_mod);
+        tmod.addImport("quant_weight", quant_weight_mod);
         tmod.addImport("model_config", model_config_mod);
         tmod.addImport("gguf_tokenizer", gguf_tokenizer_mod);
         tmod.addImport("gguf_model", gguf_model_mod);

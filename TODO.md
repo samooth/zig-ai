@@ -92,6 +92,30 @@ paths solo-0.14. Instalado en `~/.local/bin/zig-0.16`.
 | F1 | Verificar `loadF16` byte-order en decode CPU ref | `src/paged_attention/attention.zig` | 🟡 |
 | F2 | Conectar scheduler + paged kv al pipeline (opcional) | — | 🟢 |
 
+## Fase G — QuantWeight + SSM (Gated DeltaNet) ✅
+
+| # | Tarea | Archivo | Prioridad | Estado |
+|---|-------|---------|-----------|--------|
+| G1 | Dequant IQ3_S/IQ4_XS (byte-exact vs C, test permanente) | `src/loader/gguf.zig` | 🔴 | ✅ |
+| G2 | `QuantWeight {info, bytes}` + `dequantToF16/F32` por bloques | `src/loader/quant_weight.zig` | 🔴 | ✅ |
+| G3 | `SsmLayer` (Gated DeltaNet) sobre `QuantWeight`, scratch f16 persistente | `src/transformer/ssm.zig` | 🔴 | ✅ |
+| G4 | Corregir recurrencia vs kernel FLA: decay `exp(-exp(A_log)·softplus)` y pairing `hk=hv//(n_v/n_k)` | `src/transformer/ssm.zig` | 🔴 | ✅ |
+| G5 | Tests: hand-computed, persistencia, brute-force, recurrencia vs FLA naive | `src/transformer/ssm.zig` | 🔴 | ✅ |
+> **Estado Fase G**: `zig build test` → 57/61 (4 skips); los 3 fallos son tests
+> reales de `test_gguf.zig` escritos para el 4B full-attention. Detalles en
+> `docs/qwen35-hybrid-deltanet.md`.
+
+## Fase H — Bloque híbrido Qwen3.5 (atención + rutado)
+
+| # | Tarea | Archivo | Prioridad |
+|---|-------|---------|-----------|
+| H1 | Capa de atención completa: `attn_q` fused Q+G, `attn_q_norm`/`attn_k_norm`, GQA 16→4, KV cache | `src/transformer/layer.zig` | 🔴 |
+| H2 | IMROPE: NEOX, rotar 64 de 256 dims, secciones [11,11,10,0] | `src/transformer/rope.zig` | 🔴 |
+| H3 | Rutado híbrido SSM vs atención por `isFullAttentionLayer` | `src/transformer/layer.zig`, `pipeline.zig` | 🔴 |
+| H4 | Rework `gguf_model.zig` a `QuantWeight` + `dequantTensor` | `src/loader/gguf_model.zig` | 🔴 |
+| H5 | CLI de inferencia + validación modelo real | `src/main.zig`, `tests/test_gguf.zig` | 🟡 |
+| H6 | Commit final + docs | — | 🟢 |
+
 ---
 
 ## Notas de migración rápida 0.16
