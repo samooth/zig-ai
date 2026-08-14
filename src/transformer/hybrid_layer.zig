@@ -347,7 +347,7 @@ fn loadGgufF32(
         tensor = try Tensor(f32).initUninitialized(allocator, &.{ out_dim, in_dim });
         for (0..in_dim) |r| {
             for (0..out_dim) |c| {
-                tensor.data[c * in_dim + r] = f32buf[r * out_dim + c];
+                tensor.data[c * in_dim + r] = f32buf[r + c * in_dim];
             }
         }
     } else {

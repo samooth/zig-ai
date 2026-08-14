@@ -19,7 +19,6 @@ const bpe = @import("tokenizer");
 const embedding = @import("embedding");
 const hybrid_layer = @import("transformer");
 const norm = @import("norm");
-const gguf = @import("gguf");
 
 /// Parámetros de runtime parseados de la línea de comandos.
 const CliParams = struct {
@@ -352,32 +351,11 @@ fn runHybridInference(
     var cur = &buf_a;
     var nxt = &buf_b;
 
-    for (layers, 0..) |*layer, li| {
+    for (layers) |*layer| {
         try layer.forward(cur.*, nxt, 0, seq_len);
         const t = cur;
         cur = nxt;
         nxt = t;
-        if (li == 0 or li == 1 or li == 2 or li == 3 or li == 23) {
-            var shp = [_]usize{ 1, n_embd };
-            var strd = [_]usize{ n_embd, 1 };
-            const lastrow = Tensor(f16){ .data = cur.data[(seq_len - 1) * n_embd ..][0..n_embd], .shape = &shp, .strides = &strd, .offset = 0, .allocator = null, .owns_data = false };
-            var nr = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
-            defer nr.deinit();
-            norm.rmsNorm(f16, f32, lastrow, out_norm, rms_eps, &nr);
-            var lg = try Tensor(f16).alloc(allocator, &.{ 1, vocab });
-            defer lg.deinit();
-            try embedding.lmHeadForward(&engine, nr, lm_head, &lg);
-            var best: u32 = 0;
-            var bv: f32 = -std.math.inf(f32);
-            for (lg.data, 0..) |v, i| {
-                const f = @as(f32, @floatCast(v));
-                if (f > bv) {
-                    bv = f;
-                    best = @intCast(i);
-                }
-            }
-            try stdout.print("[dbg-l{d}] top1 id={d} ({d:.2})\n", .{ li, best, bv });
-        }
     }
 
     // LM head sobre el último token del prefill (con output_norm final)
@@ -403,10 +381,6 @@ fn runHybridInference(
     var logits_f32 = try allocator.alloc(f32, vocab);
     defer allocator.free(logits_f32);
     for (logits.data, 0..) |v, i| logits_f32[i] = @as(f32, @floatCast(v));
-
-    if (std.c.getenv("DUMP_LOGITS") != null) {
-        for (logits_f32, 0..) |v, i| std.debug.print("LG {d} {d}\n", .{ i, v });
-    }
 
     var gen_tokens: std.ArrayList(u32) = .empty;
     defer gen_tokens.deinit(allocator);

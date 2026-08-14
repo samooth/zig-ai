@@ -473,7 +473,7 @@ fn loadGgufF32(
         if (transpose) {
             for (0..in_dim) |r| {
                 for (0..out_dim) |c| {
-                    tensor.data[c * in_dim + r] = f32buf[r * out_dim + c];
+                    tensor.data[c * in_dim + r] = f32buf[r + c * in_dim];
                 }
             }
         } else {
@@ -549,9 +549,10 @@ fn makeF32Weight(
     };
     bytes.* = try allocator.alloc(u8, values.len * 4);
     const fbytes = std.mem.bytesAsSlice(f32, bytes.*);
+    // GGUF: dim0 (in_dim) contiguo → elemento (i, j) en i + j*in_dim.
     for (0..in_dim) |i| {
         for (0..out_dim) |j| {
-            fbytes[i * out_dim + j] = values[j * in_dim + i];
+            fbytes[i + j * in_dim] = values[j * in_dim + i];
         }
     }
     return QuantWeight.init(info, bytes.*);
@@ -791,13 +792,13 @@ test "ssm forward matches brute-force reference" {
     for (0..N) |t| {
         for (0..qkv_dim) |j| {
             var acc: f32 = 0;
-            for (0..p.n_embd) |i| acc += @as(f32, @floatCast(x.data[t * p.n_embd + i])) * qkv_w[i * qkv_dim + j];
+            for (0..p.n_embd) |i| acc += @as(f32, @floatCast(x.data[t * p.n_embd + i])) * qkv_w[i + j * p.n_embd];
             const v = acc;
             conv_saved[t][j] = v / (1.0 + @exp(-v)); // conv kernel=1 + silu
         }
         for (0..p.d_inner) |j| {
             var acc: f32 = 0;
-            for (0..p.n_embd) |i| acc += @as(f32, @floatCast(x.data[t * p.n_embd + i])) * z_w[i * p.d_inner + j];
+            for (0..p.n_embd) |i| acc += @as(f32, @floatCast(x.data[t * p.n_embd + i])) * z_w[i + j * p.n_embd];
             z_saved[t][j] = acc;
         }
         for (0..p.dt_rank) |j| {
@@ -885,7 +886,7 @@ test "ssm forward matches brute-force reference" {
         var ref_out: [test_dims.n_embd]f32 = undefined;
         for (0..p.n_embd) |j| {
             var acc: f32 = 0;
-            for (0..p.d_inner) |i| acc += ref_attn[t][i] * out_w[i * p.n_embd + j];
+            for (0..p.d_inner) |i| acc += ref_attn[t][i] * out_w[i + j * p.d_inner];
             ref_out[j] = acc;
         }
         for (0..p.n_embd) |d| {

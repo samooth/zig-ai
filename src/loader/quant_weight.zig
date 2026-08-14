@@ -62,8 +62,8 @@ pub const QuantWeight = struct {
             self.dequantToF16(out);
             return;
         }
+        // GGUF guarda dims[0] como dim contiguo: elemento (r, c) en r + c*d0.
         const d0: usize = @intCast(info.dims[0]);
-        const d1: usize = @intCast(info.dims[1]);
         const bs = info.dtype.blockSize();
         const bb = info.dtype.blockBytes();
         const num_blocks = (info.numel() + bs - 1) / bs;
@@ -75,8 +75,8 @@ pub const QuantWeight = struct {
             gguf.dequantBlock(info.dtype, self.bytes[src .. src + bb], &tmp, n);
             for (0..n) |j| {
                 const s = dst + j;
-                const r = s / d1;
-                const c = s % d1;
+                const r = s % d0; // dim0 contiguo
+                const c = s / d0;
                 out[c * d0 + r] = @floatCast(tmp[j]);
             }
             src += bb;
