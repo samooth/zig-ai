@@ -66,8 +66,9 @@ pub const AttentionLayer = struct {
         allocator: std.mem.Allocator,
         layer_idx: usize,
         params: HybridAttnParams,
+        backend: matmul.Backend,
     ) !Self {
-        var engine = try matmul.MatmulEngine.init(allocator, .auto, .f32);
+        var engine = try matmul.MatmulEngine.init(allocator, backend, .f32);
         errdefer engine.deinit();
 
         const qg_dim = params.qg_dim();
@@ -535,7 +536,7 @@ fn makeF32Weight(
 }
 
 fn buildTestLayer(allocator: std.mem.Allocator) !TestFixture {
-    var layer = try AttentionLayer.init(allocator, 0, test_params);
+    var layer = try AttentionLayer.init(allocator, 0, test_params, .auto);
     errdefer layer.deinit();
 
     const q_info = try allocator.create(gguf.TensorInfo);

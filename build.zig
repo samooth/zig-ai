@@ -55,10 +55,12 @@ pub fn build(b: *std.Build) void {
         cubin_output = compile_cubin.addOutputFileArg("flash_attention_sm80.cubin");
         compile_cubin.addFileArg(b.path("cuda/flash_attention.cu"));
 
+        // Cubin nativo para la GPU detectada (JIT de PTX compute_80 resulta
+        // inestable para lanzamientos repetidos en sm_86). Ajustar si otra GPU.
         const compile_dequant = b.addSystemCommand(&.{
             nvcc_path,
-            "-arch=compute_80", "-code=compute_80",
-            "-ptx", "-o",
+            "-arch=compute_86", "-code=sm_86",
+            "-cubin", "-o",
         });
         dequant_ptx = compile_dequant.addOutputFileArg("dequantize_kernels.ptx");
         compile_dequant.addFileArg(b.path("cuda/dequantize_kernels.cu"));
@@ -78,6 +80,17 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // === Options: ruta al PTX de dequantización ===
+    // El PTX generado se instala en zig-out/lib/ (ruta estable en runtime).
+    const dequant_options = b.addOptions();
+    var ptx_install: ?*std.Build.Step.InstallFile = null;
+    if (dequant_ptx) |ptx| {
+        ptx_install = b.addInstallFileWithDir(ptx, .{ .custom = "lib" }, "dequantize_kernels.ptx");
+        dequant_options.addOption([]const u8, "dequant_ptx", b.getInstallPath(.{ .custom = "lib" }, "dequantize_kernels.ptx"));
+    } else {
+        dequant_options.addOption([]const u8, "dequant_ptx", "");
+    }
 
     // === Módulo time ===
     const time_mod = b.createModule(.{
@@ -103,6 +116,15 @@ pub fn build(b: *std.Build) void {
     const cudaz_mod = b.createModule(.{
         .root_source_file = b.path("src/cuda/cudaz_stub.zig"),
     });
+
+    // === Módulo dequant GPU de tensores GGUF ===
+    const gguf_dequant_mod = b.createModule(.{
+        .root_source_file = b.path("src/loader/gguf_dequant_gpu.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gguf_dequant_mod.addImport("cudaz", cudaz_mod);
+    gguf_dequant_mod.addOptions("build_options", dequant_options);
 
     // === Módulo fa ===
     const fa_mod = b.createModule(.{
@@ -288,6 +310,7 @@ pub fn build(b: *std.Build) void {
     transformer_mod.addImport("gqa", gqa_mod);
     transformer_mod.addImport("embedding", embedding_mod);
     transformer_mod.addImport("cudaz", cudaz_mod);
+    transformer_mod.addImport("hybrid_layer", hybrid_layer_mod);
     transformer_mod.addImport("gguf", gguf_mod);
 
     // === Módulo pipeline ===
@@ -328,6 +351,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("gguf", gguf_mod);
     exe_mod.addImport("model_config", model_config_mod);
     exe_mod.addImport("gguf_model", gguf_model_mod);
+    exe_mod.addImport("gguf_tokenizer", gguf_tokenizer_mod);
     exe_mod.addImport("pipeline", pipeline_mod);
     exe_mod.addImport("paged_attention", paged_attention_mod);
     exe_mod.addImport("time", time_mod);
@@ -392,6 +416,7 @@ pub fn build(b: *std.Build) void {
         "src/loader/model_config.zig",
         "src/loader/gguf_tokenizer.zig",
         "src/loader/gguf_model.zig",
+        "tests/test_dequant_gpu.zig",
     };
 
     inline for (test_files) |tf| {
@@ -419,6 +444,7 @@ pub fn build(b: *std.Build) void {
         tmod.addImport("model_config", model_config_mod);
         tmod.addImport("gguf_tokenizer", gguf_tokenizer_mod);
         tmod.addImport("gguf_model", gguf_model_mod);
+        tmod.addImport("gguf_dequant", gguf_dequant_mod);
         tmod.addImport("pipeline", pipeline_mod);
         tmod.addImport("paged_attention", paged_attention_mod);
         tmod.addImport("time", time_mod);
@@ -432,6 +458,9 @@ pub fn build(b: *std.Build) void {
             tmod.linkSystemLibrary("cublas", .{});
         }
         const run_t = b.addRunArtifact(t);
+        if (ptx_install) |inst| {
+            run_t.step.dependOn(&inst.step);
+        }
         test_step.dependOn(&run_t.step);
     }
 

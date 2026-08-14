@@ -1,16 +1,19 @@
 # Zig AI Engine — TODO
 
 > Fecha: 2026-08-04
-> Stack objetivo: **Zig 0.16.0** (único toolchain soportado, se abandona 0.14)
+> Stack objetivo: **Zig 0.16.0** (único toolchain soportado; migración desde 0.13/0.14 en curso)
 > Formato de modelo: GGUF (primario) + safetensors (secundario)
+> Tests: `zig build test` → 57/61 (3 fallos reales en `tests/test_gguf.zig`, 4 skips); NO está 100% verde.
 
 ---
 
 ## Decisión de toolchain
 
-El código NO es compatible entre 0.14 / 0.15 / 0.16 (writergate + std.Io + ArrayList
-unmanaged + build system). Se migra el monorepo a **Zig 0.16.0** y se eliminan los
-paths solo-0.14. Instalado en `~/.local/bin/zig-0.16`.
+El **único toolchain soportado es Zig 0.16.0**. El código NO compila en 0.13/0.14/0.15
+(usa `std.Io`, `ArrayList` unmanaged, `b.createModule`). La migración a 0.16 está en
+curso: `build.zig` aún usa `.root_source_file` en los `addModule` (API de 0.13/0.14,
+eliminada en 0.16; ver Fase A1), por lo que **todavía no compila en 0.16 tal cual**.
+Instalado en `~/.local/bin/zig-0.16`.
 
 ## Referencias útiles
 
@@ -26,7 +29,7 @@ paths solo-0.14. Instalado en `~/.local/bin/zig-0.16`.
 
 | # | Tarea | Archivo | Prioridad | Estado |
 |---|-------|---------|-----------|--------|
-| A1 | Reemplazar `.root_source_file` por `root_module` en addExecutable/addTest/addModule | `build.zig` | 🔴 | ✅ |
+| A1 | Reemplazar `.root_source_file` por `root_module` en addExecutable/addTest/addModule | `build.zig` | 🔴 | ⬜ (build.zig aún usa `.root_source_file`, ~30 refs; sólo algunos módulos migrados) |
 | A2 | Ajustar `b.addModule` / imports a la API 0.16 (`b.path`, lazy paths) | `build.zig` | 🔴 | ✅ |
 | A3 | nvcc/cubin/ptx pasos siguen igual (addSystemCommand) | `build.zig` | 🟡 | ✅ |
 | A4 | `zig build test` verde en 0.16 | — | 🔴 | ✅ |
@@ -36,7 +39,7 @@ paths solo-0.14. Instalado en `~/.local/bin/zig-0.16`.
 | # | Tarea | Archivo | Prioridad | Estado |
 |---|-------|---------|-----------|--------|
 | B1 | `std.ArrayList(T)` → unmanaged: `append(a, x)`, `deinit(a)` | todos | 🔴 | ✅ |
-| B2 | I/O: pasar `io` por call stack (`file.read(io, buf)`) | loader, safetensors, main | 🔴 | ⬜ (main/bench sí; loader pendiente) |
+| B2 | I/O: pasar `io` por call stack (`file.read(io, buf)`) | loader, safetensors, main | 🔴 | ✅ (loaders ya usan `std.Io`/`MemoryMap`: gguf.zig, safetensors.zig, gguf_model.zig) |
 | B3 | `std.time.Timer`/`Instant` → `std.Io.Timestamp` | main, bench, fa_utils | 🔴 | ✅ (vía `src/utils/time.zig`, posix clock_gettime) |
 | B4 | `std.Thread.Pool` eliminado → `Io.Group` (o fallback single-thread) | `src/matmul/root.zig` | 🔴 | ✅ (`std.Thread.spawn`/`join` por llamada) |
 | B5 | `@Type(...)` → `@Int/@Struct/@Union/@Fn/@Pointer/@Tuple` | `tensor.zig`, `matmul/root.zig` | 🔴 | ⬜ |
@@ -107,14 +110,14 @@ paths solo-0.14. Instalado en `~/.local/bin/zig-0.16`.
 
 ## Fase H — Bloque híbrido Qwen3.5 (atención + rutado)
 
-| # | Tarea | Archivo | Prioridad |
-|---|-------|---------|-----------|
-| H1 | Capa de atención completa: `attn_q` fused Q+G, `attn_q_norm`/`attn_k_norm`, GQA 16→4, KV cache | `src/transformer/layer.zig` | 🔴 |
-| H2 | IMROPE: NEOX, rotar 64 de 256 dims, secciones [11,11,10,0] | `src/transformer/rope.zig` | 🔴 |
-| H3 | Rutado híbrido SSM vs atención por `isFullAttentionLayer` | `src/transformer/layer.zig`, `pipeline.zig` | 🔴 |
-| H4 | Rework `gguf_model.zig` a `QuantWeight` + `dequantTensor` | `src/loader/gguf_model.zig` | 🔴 |
-| H5 | CLI de inferencia + validación modelo real | `src/main.zig`, `tests/test_gguf.zig` | 🟡 |
-| H6 | Commit final + docs | — | 🟢 |
+| # | Tarea | Archivo | Prioridad | Estado |
+|---|-------|---------|-----------|--------|
+| H1 | Capa de atención completa: `attn_q` fused Q+G, `attn_q_norm`/`attn_k_norm`, GQA 16→4, KV cache | `src/transformer/layer.zig`, `hybrid_attn.zig` | 🔴 | ✅ (`hybrid_attn.zig`/`hybrid_layer.zig` ya compilan y se testean) |
+| H2 | IMROPE: NEOX, rotar 64 de 256 dims, secciones [11,11,10,0] | `src/transformer/rope.zig` | 🔴 | ✅ |
+| H3 | Rutado híbrido SSM vs atención por `isFullAttentionLayer` | `src/transformer/layer.zig`, `pipeline.zig` | 🔴 | ✅ (`ModelConfig.isFullAttentionLayer` + `hybrid_layer.zig`) |
+| H4 | Rework `gguf_model.zig` a `QuantWeight` + `dequantTensor` | `src/loader/gguf_model.zig` | 🔴 | ✅ |
+| H5 | CLI de inferencia + validación modelo real | `src/main.zig`, `tests/test_gguf.zig` | 🟡 | ✅ (CLI con flags de sampling en runtime implementada; falta validar con modelo real: no hay GGUF disponible en este entorno) |
+| H6 | Commit final + docs | — | 🟢 | ⬜ |
 
 ---
 

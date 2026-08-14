@@ -71,7 +71,7 @@ pub fn cuModuleGetFunction(module: CUmodule, name: []const u8) !CUfunction {
 }
 
 pub fn cuMemAlloc(bytes: usize) !CUdeviceptr {
-    var dptr: CUdeviceptr = undefined;
+    var dptr: CUdeviceptr = 0;
     const res = cudalib.cuMemAlloc(&dptr, bytes);
     if (res != .SUCCESS) return error.CudaError;
     return dptr;
@@ -80,10 +80,10 @@ pub fn cuMemAlloc(bytes: usize) !CUdeviceptr {
 pub fn cuMemFree(dptr: CUdeviceptr) void { _ = cudalib.cuMemFree(dptr); }
 
 pub fn cuMemAllocHost(bytes: usize) !*anyopaque {
-    var ptr: *anyopaque = undefined;
+    var ptr: ?*anyopaque = null;
     const res = cudalib.cuMemAllocHost(&ptr, bytes);
     if (res != .SUCCESS) return error.CudaError;
-    return ptr;
+    return ptr orelse return error.CudaError;
 }
 
 pub fn cuMemFreeHost(ptr: *anyopaque) void { _ = cudalib.cuMemFreeHost(ptr); }
@@ -95,6 +95,23 @@ pub fn cuMemcpyHtoDAsync(dst: CUdeviceptr, src: usize, bytes: usize, stream: CUs
 
 pub fn cuMemcpyDtoHAsync(dst: usize, src: CUdeviceptr, bytes: usize, stream: CUstream) !void {
     const res = cudalib.cuMemcpyDtoHAsync(@ptrFromInt(dst), src, bytes, stream);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+/// Copias síncronas (sin stream) para evitar carreras async.
+pub fn cuMemcpyHtoD(dst: CUdeviceptr, src: usize, bytes: usize) !void {
+    const res = cudalib.cuMemcpyHtoD(dst, @ptrFromInt(src), bytes);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuMemcpyDtoH(dst: usize, src: CUdeviceptr, bytes: usize) !void {
+    const res = cudalib.cuMemcpyDtoH(@ptrFromInt(dst), src, bytes);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+/// Sincroniza el device (contexto actual).
+pub fn cuCtxSynchronize() !void {
+    const res = cudalib.cuCtxSynchronize();
     if (res != .SUCCESS) return error.CudaError;
 }
 
@@ -122,27 +139,66 @@ pub fn cuLaunchKernel(
     if (res != .SUCCESS) return error.CudaError;
 }
 
+/// Bindings reales a la CUDA Driver API (enlazados vía -lcuda).
+/// Las funciones son los símbolos estándar exportados por libcuda.so.1
+/// (los nombres sin sufijo `_v2` siguen exportados por el driver).
 const cudalib = struct {
-    fn cuInit(flags: c_uint) CUresult { _ = flags; return .ERROR_NOT_INITIALIZED; }
-    fn cuDeviceGet(device: *CUdevice, ordinal: c_int) CUresult { _ = device; _ = ordinal; return .ERROR_NO_DEVICE; }
-    fn cuCtxCreate(ctx: *CUcontext, flags: c_uint, dev: CUdevice) CUresult { _ = ctx; _ = flags; _ = dev; return .ERROR_NOT_INITIALIZED; }
-    fn cuCtxDestroy(ctx: CUcontext) CUresult { _ = ctx; return .SUCCESS; }
-    fn cuModuleLoad(module: *CUmodule, fname: [*:0]const u8) CUresult { _ = module; _ = fname; return .ERROR_NOT_INITIALIZED; }
-    fn cuModuleUnload(module: CUmodule) CUresult { _ = module; return .SUCCESS; }
-    fn cuModuleGetFunction(hfunc: *CUfunction, hmod: CUmodule, name: [*:0]const u8) CUresult { _ = hfunc; _ = hmod; _ = name; return .ERROR_NOT_INITIALIZED; }
-    fn cuMemAlloc(dptr: *CUdeviceptr, bytesize: usize) CUresult { _ = dptr; _ = bytesize; return .ERROR_NOT_INITIALIZED; }
-    fn cuMemFree(dptr: CUdeviceptr) CUresult { _ = dptr; return .SUCCESS; }
-    fn cuMemAllocHost(pp: **anyopaque, bytesize: usize) CUresult { _ = pp; _ = bytesize; return .ERROR_NOT_INITIALIZED; }
-    fn cuMemFreeHost(p: *anyopaque) CUresult { _ = p; return .SUCCESS; }
-    fn cuMemcpyHtoDAsync(dst: CUdeviceptr, src: *const anyopaque, bytes: usize, stream: CUstream) CUresult { _ = dst; _ = src; _ = bytes; _ = stream; return .ERROR_NOT_INITIALIZED; }
-    fn cuMemcpyDtoHAsync(dst: *anyopaque, src: CUdeviceptr, bytes: usize, stream: CUstream) CUresult { _ = dst; _ = src; _ = bytes; _ = stream; return .ERROR_NOT_INITIALIZED; }
-    fn cuStreamCreate(phStream: *CUstream, flags: c_uint) CUresult { _ = phStream; _ = flags; return .ERROR_NOT_INITIALIZED; }
-    fn cuStreamDestroy(hStream: CUstream) CUresult { _ = hStream; return .SUCCESS; }
-    fn cuStreamSynchronize(hStream: CUstream) CUresult { _ = hStream; return .ERROR_NOT_INITIALIZED; }
-    fn cuLaunchKernel(f: CUfunction, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, by: c_uint, bz: c_uint, sm: c_uint, stream: CUstream, params: ?*anyopaque, extra: ?*anyopaque) CUresult { _ = f; _ = gx; _ = gy; _ = gz; _ = bx; _ = by; _ = bz; _ = sm; _ = stream; _ = params; _ = extra; return .ERROR_NOT_INITIALIZED; }
-    fn cuDeviceGetName(name: [*]u8, len: c_int, dev: CUdevice) CUresult { _ = name; _ = len; _ = dev; return .ERROR_NO_DEVICE; }
-    fn cuDeviceTotalMem(mem: *usize, dev: CUdevice) CUresult { _ = mem; _ = dev; return .ERROR_NO_DEVICE; }
+    extern "c" fn cuInit(flags: c_uint) CUresult;
+    extern "c" fn cuDeviceGet(device: *CUdevice, ordinal: c_int) CUresult;
+    extern "c" fn cuCtxCreate(ctx: *CUcontext, flags: c_uint, dev: CUdevice) CUresult;
+    extern "c" fn cuCtxDestroy(ctx: CUcontext) CUresult;
+    extern "c" fn cuDevicePrimaryCtxRetain(ctx: *CUcontext, dev: CUdevice) CUresult;
+    extern "c" fn cuCtxSetCurrent(ctx: CUcontext) CUresult;
+    extern "c" fn cuCtxGetCurrent(ctx: *CUcontext) CUresult;
+    extern "c" fn cuModuleLoad(module: *CUmodule, fname: [*:0]const u8) CUresult;
+    extern "c" fn cuModuleUnload(module: CUmodule) CUresult;
+    extern "c" fn cuModuleGetFunction(hfunc: *CUfunction, hmod: CUmodule, name: [*:0]const u8) CUresult;
+    extern "c" fn cuMemAlloc(dptr: *CUdeviceptr, bytesize: usize) CUresult;
+    extern "c" fn cuMemFree(dptr: CUdeviceptr) CUresult;
+    extern "c" fn cuMemAllocHost(pp: *?*anyopaque, bytesize: usize) CUresult;
+    extern "c" fn cuMemFreeHost(p: *anyopaque) CUresult;
+    extern "c" fn cuMemcpyHtoDAsync(dst: CUdeviceptr, src: *const anyopaque, bytes: usize, stream: CUstream) CUresult;
+    extern "c" fn cuMemcpyDtoHAsync(dst: *anyopaque, src: CUdeviceptr, bytes: usize, stream: CUstream) CUresult;
+    extern "c" fn cuMemcpyHtoD(dst: CUdeviceptr, src: *const anyopaque, bytes: usize) CUresult;
+    extern "c" fn cuMemcpyDtoH(dst: *anyopaque, src: CUdeviceptr, bytes: usize) CUresult;
+    extern "c" fn cuCtxSynchronize() CUresult;
+    extern "c" fn cuStreamCreate(phStream: *CUstream, flags: c_uint) CUresult;
+    extern "c" fn cuStreamDestroy(hStream: CUstream) CUresult;
+    extern "c" fn cuStreamSynchronize(hStream: CUstream) CUresult;
+    extern "c" fn cuLaunchKernel(f: CUfunction, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, by: c_uint, bz: c_uint, sm: c_uint, stream: CUstream, params: ?*anyopaque, extra: ?*anyopaque) CUresult;
+    extern "c" fn cuDeviceGetName(name: [*]u8, len: c_int, dev: CUdevice) CUresult;
+    extern "c" fn cuDeviceTotalMem(mem: *usize, dev: CUdevice) CUresult;
 };
+
+/// Contexto CUDA creado por `ensureContext()`.
+var g_cuda_ctx: ?CUcontext = null;
+
+/// Inicializa CUDA (cuInit + device 0) y asegura un contexto actual
+/// (primary context retenido y seteado como current).
+/// Necesario antes de usar cuBLAS o cualquier kernel.
+pub fn ensureContext() !void {
+    if (g_cuda_ctx != null) return;
+    try cuInit(0);
+    const device = try cuDeviceGet(0);
+    var ctx: CUcontext = undefined;
+    if (cudalib.cuCtxCreate(&ctx, 0, device) != .SUCCESS) return error.CudaError;
+    if (cudalib.cuCtxSetCurrent(ctx) != .SUCCESS) return error.CudaError;
+    g_cuda_ctx = ctx;
+}
+
+/// Re-asegura que el contexto CUDA está current en este thread.
+/// Algunas llamadas (p. ej. cuModuleLoad) pueden alterar el contexto actual.
+pub fn ensureCurrent() !void {
+    try ensureContext();
+    if (cudalib.cuCtxSetCurrent(g_cuda_ctx.?) != .SUCCESS) return error.CudaError;
+}
+
+/// Contexto CUDA actual (null si no hay).
+pub fn currentContext() ?CUcontext {
+    var ctx: CUcontext = undefined;
+    if (cudalib.cuCtxGetCurrent(&ctx) != .SUCCESS) return null;
+    return if (ctx) |c| c else null;
+}
 
 pub const Dim3 = extern struct { x: c_uint = 1, y: c_uint = 1, z: c_uint = 1 };
 

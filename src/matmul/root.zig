@@ -172,6 +172,18 @@ pub const MatmulEngine = struct {
                         } else {
                             try cublas.gemmCuBlasF32(handle, A, B, C, M, N, K, trans_a, trans_b, 1.0, 0.0);
                         }
+                    } else if (T == f16) {
+                        // Conversión a f32 + cublasSgemm (ruta bien soportada).
+                        var a_f32 = try Tensor(f32).alloc(self.allocator, &.{ A.shape[0], A.shape[1] });
+                        defer a_f32.deinit();
+                        for (A.data, a_f32.data) |s, *d| d.* = @floatCast(s);
+                        var b_f32 = try Tensor(f32).alloc(self.allocator, &.{ B.shape[0], B.shape[1] });
+                        defer b_f32.deinit();
+                        for (B.data, b_f32.data) |s, *d| d.* = @floatCast(s);
+                        var c_f32 = try Tensor(f32).alloc(self.allocator, C.shape);
+                        defer c_f32.deinit();
+                        try cublas.gemmCuBlasF32(handle, a_f32, b_f32, &c_f32, M, N, K, trans_a, trans_b, 1.0, 0.0);
+                        for (C.data, c_f32.data) |*d, s| d.* = @floatCast(s);
                     } else {
                         return error.CuBlasTypeNotSupported;
                     }

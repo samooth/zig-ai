@@ -3,12 +3,17 @@ const Tensor = @import("core").Tensor;
 const matmul = @import("matmul");
 const fa = @import("fa");
 const kvcache = @import("kv_cache");
-const norm = @import("norm.zig");
-const ffn = @import("ffn.zig");
-const rope_mod = @import("rope.zig");
-const gqa_mod = @import("gqa.zig");
+const norm = @import("norm");
+const ffn = @import("ffn");
+const rope_mod = @import("rope");
+const gqa_mod = @import("gqa");
 const gguf = @import("gguf");
 const cudaz = @import("cudaz");
+
+/// Re-export de la capa híbrida (SSM + atención) para poder usarla desde
+/// otros módulos que importan `transformer`.
+pub const HybridLayer = @import("hybrid_layer").HybridLayer;
+pub const HybridLayerParams = @import("hybrid_layer").HybridLayerParams;
 
 const FlashAttention = fa.FlashAttention;
 const FlashAttentionCpu = fa.FlashAttentionCpu;
@@ -334,14 +339,14 @@ pub const TransformerLayer = struct {
             k_shape2[0] = batch_size; k_shape2[1] = self.num_kv_heads; k_shape2[2] = seq_len; k_shape2[3] = self.head_dim;
             var k_strides2 = try self.allocator.alloc(usize, 4);
             k_strides2[0] = seq_len * self.num_kv_heads * self.head_dim; k_strides2[1] = self.head_dim; k_strides2[2] = self.num_kv_heads * self.head_dim; k_strides2[3] = 1;
-            var k_hm2 = self.k_pos.view(k_shape2, k_strides2, 0);
+            const k_hm2 = self.k_pos.view(k_shape2, k_strides2, 0);
             defer { self.allocator.free(k_shape2); self.allocator.free(k_strides2); }
 
             var v_shape2 = try self.allocator.alloc(usize, 4);
             v_shape2[0] = batch_size; v_shape2[1] = self.num_kv_heads; v_shape2[2] = seq_len; v_shape2[3] = self.head_dim;
             var v_strides2 = try self.allocator.alloc(usize, 4);
             v_strides2[0] = seq_len * self.num_kv_heads * self.head_dim; v_strides2[1] = self.head_dim; v_strides2[2] = self.num_kv_heads * self.head_dim; v_strides2[3] = 1;
-            var v_hm2 = self.v_pos.view(v_shape2, v_strides2, 0);
+            const v_hm2 = self.v_pos.view(v_shape2, v_strides2, 0);
             defer { self.allocator.free(v_shape2); self.allocator.free(v_strides2); }
 
             k_full = try Tensor(f16).alloc(self.allocator, &.{ batch_size, self.num_kv_heads, seq_len, self.head_dim });

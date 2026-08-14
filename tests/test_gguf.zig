@@ -268,7 +268,7 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     const hybrid_layer = @import("hybrid_layer");
     const hparams = hybrid_layer.HybridLayerParams.fromModelConfig(cfg, 128);
 
-    var layer = try hybrid_layer.HybridLayer.init(gpa, layer_idx, hparams, true);
+    var layer = try hybrid_layer.HybridLayer.init(gpa, layer_idx, hparams, true, .auto);
     defer layer.deinit();
 
     try layer.loadWeightsFromGguf(&model.file);
@@ -282,7 +282,7 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     const embedding_mod = @import("embedding");
     embedding_mod.embeddingLookup(emb, tokens, 1, 6, &hidden3d);
 
-    var hidden = try hidden3d.reshape(&[_]usize{ 6, cfg.embedding_length });
+    const hidden = try hidden3d.reshape(&[_]usize{ 6, cfg.embedding_length });
     defer { if (hidden.allocator) |a| { a.free(hidden.shape); a.free(hidden.strides); } }
 
     var output = try Tensor(f16).alloc(gpa, hidden.shape);

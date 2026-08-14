@@ -87,8 +87,9 @@ pub const SsmLayer = struct {
         allocator: std.mem.Allocator,
         layer_idx: usize,
         params: SsmParams,
+        backend: matmul.Backend,
     ) !Self {
-        var engine = try matmul.MatmulEngine.init(allocator, .auto, .f32);
+        var engine = try matmul.MatmulEngine.init(allocator, backend, .f32);
         errdefer engine.deinit();
 
         const qkv_dim = params.qkvDim();
@@ -546,7 +547,7 @@ fn buildTestLayer(allocator: std.mem.Allocator) !TestFixture {
         .n_group = test_dims.n_group,
         .d_conv = test_dims.d_conv,
     };
-    var layer = try SsmLayer.init(allocator, 0, p);
+    var layer = try SsmLayer.init(allocator, 0, p, .auto);
     errdefer layer.deinit();
 
     const qkv_info = try allocator.create(gguf.TensorInfo);
@@ -887,7 +888,7 @@ test "deltanet recurrence matches FLA naive reference" {
         .n_group = 2,
         .d_conv = 1,
     };
-    var layer = try SsmLayer.init(allocator, 0, p);
+    var layer = try SsmLayer.init(allocator, 0, p, .auto);
     defer layer.deinit();
     layer.resetState();
 

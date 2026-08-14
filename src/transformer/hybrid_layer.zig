@@ -99,8 +99,9 @@ pub const HybridLayer = struct {
         layer_idx: usize,
         params: HybridLayerParams,
         is_attention: bool,
+        backend: matmul.Backend,
     ) !Self {
-        var engine = try matmul.MatmulEngine.init(allocator, .auto, .f32);
+        var engine = try matmul.MatmulEngine.init(allocator, backend, .f32);
         errdefer engine.deinit();
 
         const scratch_gate = try allocator.alloc(f16, params.intermediate_dim * params.n_embd);
@@ -145,7 +146,7 @@ pub const HybridLayer = struct {
                 .rms_eps = params.rms_eps,
                 .max_seq_len = params.max_seq_len,
             };
-            self.attn_layer = try AttentionLayer.init(allocator, layer_idx, attn_params);
+            self.attn_layer = try AttentionLayer.init(allocator, layer_idx, attn_params, backend);
             errdefer if (self.attn_layer) |l| l.deinit();
         } else {
             const ssm_params = @import("ssm").SsmParams{
@@ -157,7 +158,7 @@ pub const HybridLayer = struct {
                 .d_conv = params.d_conv,
                 .rms_eps = params.rms_eps,
             };
-            self.ssm_layer = try SsmLayer.init(allocator, layer_idx, ssm_params);
+            self.ssm_layer = try SsmLayer.init(allocator, layer_idx, ssm_params, backend);
             errdefer if (self.ssm_layer) |l| l.deinit();
         }
 
@@ -296,7 +297,7 @@ pub const HybridLayer = struct {
         var ffn_out = try Tensor(f16).alloc(self.allocator, &.{ N, p.n_embd });
         defer ffn_out.deinit();
 
-        var post_norm_2d = try post_norm_buf.reshape(&[_]usize{ N, p.n_embd });
+        const post_norm_2d = try post_norm_buf.reshape(&[_]usize{ N, p.n_embd });
         defer { if (post_norm_2d.allocator) |a| { a.free(post_norm_2d.shape); a.free(post_norm_2d.strides); } }
 
         try ffn.swiGluForward(

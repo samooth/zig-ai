@@ -1,7 +1,7 @@
 .{
     .name = .zig_ai_engine,
     .version = "0.2.0",
-    .minimum_zig_version = "0.13.0",
+    .minimum_zig_version = "0.16.0",
     .fingerprint = 0x39f58c0c31c5805,
     .dependencies = .{},
     .paths = .{

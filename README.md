@@ -10,6 +10,7 @@ Motor de inferencia de transformers en Zig con FlashAttention, matmul multi-back
 - **Cuantización**: INT8/INT4 simétrico/asimétrico, per-channel
 - **Capa Transformer completa**: proyecciones Q/K/V/O + FA + residual
 - **KV-Cache**: para generación autoregresiva
+- **Bloques híbridos (Qwen3.5)**: Gated DeltaNet / SSM recurrente + atención con GQA e IMROPE
 - **Precisión configurable**: f32, f16, bf16, INT8, INT4
 
 ## Estructura
@@ -44,11 +45,20 @@ zig-ai-engine/
 │   │   ├── ffn.zig         # FFN SwiGLU
 │   │   ├── rope.zig        # Rotatory Position Embedding
 │   │   ├── gqa.zig         # Grouped Query Attention
+│   │   ├── hybrid_attn.zig # Atención híbrida (Qwen3.5)
+│   │   ├── hybrid_layer.zig# Capa híbrida (atención + SSM rutado)
 │   │   └── embedding.zig   # Embedding / lm_head
+│   ├── utils/
+│   │   ├── time.zig        # Timer (posix clock_gettime)
+│   │   └── sampling.zig    # Samplers (top-k, top-p, temp)
+│   ├── kv_cache.zig              # Re-export del módulo kv_cache
 │   ├── kv_cache/
 │   │   ├── kv_cache_manager.zig  # Gestión de KV-Cache cuantizado
 │   │   ├── quant_types.zig       # Formatos de cuantización
-│   │   └── gpu_dequant.zig       # Dequant en GPU
+│   │   ├── gpu_dequant.zig       # Dequant en GPU
+│   │   ├── allocator.zig         # Pool allocator (LRU/swap)
+│   │   ├── flash_attention.zig   # FlashAttention sobre KV-cache
+│   │   └── stream.zig            # Stream de tokens
 │   ├── tokenizer/bpe.zig   # Tokenizer BPE
 │   ├── loader/
 │   │   ├── gguf.zig             # Parser GGUF + dequant (IQ2_XS/IQ2_S/IQ3_S/IQ4_XS/Q4_K/Q6_K…)
@@ -77,20 +87,23 @@ zig-ai-engine/
 │   ├── flash_attention.cu       # Kernel FA v1
 │   ├── flash_attention_v2.cu    # Kernel FA v2
 │   └── dequantize_kernels.cu    # Kernels de dequantización
-└── tests/
-    ├── test_tensor.zig
-    ├── test_matmul.zig
-    ├── test_flash_attention.zig
-    ├── test_online_softmax.zig
-    ├── test_transformer.zig
-    ├── test_kv_cache.zig
-    ├── test_paged_attention.zig
-    └── benchmark.zig
+├── tests/
+│   ├── test_tensor.zig
+│   ├── test_matmul.zig
+│   ├── test_flash_attention.zig
+│   ├── test_online_softmax.zig
+│   ├── test_transformer.zig
+│   ├── test_kv_cache.zig
+│   ├── test_paged_attention.zig
+│   ├── test_gguf.zig
+│   └── benchmark.zig
+└── examples/
+    └── bench.zig           # Ejemplo de benchmark (CLI)
 ```
 
 ## Requisitos
 
-- Zig 0.13.0+
+- Zig 0.16.0 (toolchain objetivo; migración desde 0.13/0.14 en curso)
 - CUDA Toolkit 12.x (opcional, para GPU)
 - cuBLAS (opcional)
 - OpenBLAS (opcional)
@@ -126,19 +139,58 @@ const precision = LayerPrecision{
     .use_quantized = false,
 };
 
-var layer = try TransformerLayer.init(allocator, 0, fa_config, "cuda/flash_attention.ptx", 1024, precision);
+// ptx_path: ruta al PTX compilado desde cuda/flash_attention.cu (lo genera `zig build`)
+var layer = try TransformerLayer.init(
+    allocator, 0, fa_config, ptx_path, 1024, precision, num_kv_heads, intermediate_dim,
+);
 defer layer.deinit();
 
-try layer.forward(hidden_state, &output);
+try layer.forward(hidden_state, &output, position, is_prefill);
 ```
 
+ ## Inferencia (CLI)
+
+El ejecutable acepta parámetros de sampling en runtime. Con `--model` se activa
+la inferencia end-to-end (carga GGUF + tokenizer + generación autoregresiva); sin
+`--model` se ejecuta el benchmark de demo.
+
+```bash
+# Generación con un modelo GGUF
+./zig-out/bin/zig-ai-engine \
+  --model modelo.gguf --prompt "Hola, mundo" -n 256 \
+  --temperature 0.7 --top-k 40 --top-p 0.9 --repetition-penalty 1.1 --seed 7
+
+# Ver ayuda
+./zig-out/bin/zig-ai-engine --help
+```
+
+| Flag                    | Default | Descripción                                         |
+|-------------------------|---------|-----------------------------------------------------|
+| `--model <ruta>`        | —       | Ruta a un modelo GGUF (activa inferencia)           |
+| `--prompt <texto>`      | `"Hola"`| Prompt de entrada                                   |
+| `-n`, `--max-tokens <n>`| 128     | Máximo de tokens a generar                          |
+| `--temperature <f>`     | 1.0     | Temperatura (`≤0` = greedy/argmax)                  |
+| `--top-k <n>`           | 0       | Top-k (0 = desactivado)                             |
+| `--top-p <f>`           | 1.0     | Top-p / nucleus (1.0 = desactivado)                 |
+| `--repetition-penalty <f>`| 1.0   | Repetition penalty (1.0 = desactivado)              |
+| `--seed <n>`            | 42      | Semilla del RNG                                     |
+
+El sampler combina los parámetros en orden: repetition penalty → temperature →
+top-k → top-p → muestreo multinomial (o greedy si `temperature ≤ 0`).
+
+> **Nota de build:** en filesystems sin soporte de `renameat2(RENAME_EXCHANGE)`
+> (p. ej. ecryptfs), `zig build` falla en la etapa de opciones. Redirige la caché:
+> `zig build --cache-dir /tmp/ziglocal --global-cache-dir /tmp/zigglobal`.
+
 ## Documentación
+
 
 - [`docs/qwen35-hybrid-deltanet.md`](docs/qwen35-hybrid-deltanet.md) — arquitectura
   híbrida Qwen3.5 (Gated DeltaNet + atención), estrategia `QuantWeight`, bugs de
   la recurrencia corregidos y plan de la Fase H.
-- [`docs/zig-ai-engine-plan.md`](docs/zig-ai-engine-plan.md) — plan de desarrollo.
-- [`docs/zig-ai-engine-todo.md`](docs/zig-ai-engine-todo.md) — checklist por fases.
+- [`TODO.md`](TODO.md) — plan de desarrollo canónico por fases (A–H).
+- [`docs/zig-ai-engine-plan.md`](docs/zig-ai-engine-plan.md) — plan de desarrollo (histórico).
+- [`docs/zig-ai-engine-todo.md`](docs/zig-ai-engine-todo.md) — checklist por fases (histórico).
 
 ## Backends Matmul
 | Backend   | f32 | f64 | f16 | bf16 | INT8 | Async | Batch |
