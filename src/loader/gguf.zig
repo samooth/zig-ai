@@ -693,6 +693,26 @@ pub fn dequantQ4_0(bytes: []const u8, out: []f32) void {
     }
 }
 
+/// Q4_1: bloques de 32. Cada bloque (20 bytes):
+///   d f16 (offset 0), m f16 (offset 2), qs[16] (offset 4, nibbles).
+///   val = d*q + m   (ref: ggml dequantize_row_q4_1)
+pub fn dequantQ4_1(bytes: []const u8, out: []f32) void {
+    const block = 32;
+    const block_bytes = 20;
+    var i: usize = 0;
+    while (i < out.len) : (i += block) {
+        const base = (i / block) * block_bytes;
+        const d: f32 = @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, bytes[base..][0..2], .little))));
+        const m: f32 = @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, bytes[base + 2 ..][0..2], .little))));
+        const qs = bytes[base + 4 ..];
+        const n = @min(block, out.len - i);
+        for (0..n) |j| {
+            const q = if (j % 2 == 0) qs[j / 2] & 0x0F else qs[j / 2] >> 4;
+            out[i + j] = d * @as(f32, @floatFromInt(q)) + m;
+        }
+    }
+}
+
 /// Q4_K: super-bloques de 256. Cada bloque (144 bytes):
 ///   d f16 (offset 0), dmin f16 (offset 2), scales[12] (offset 4, escalas
 ///   de 6 bits para 8 grupos de 32), qs[128] (offset 16, nibbles).
@@ -1011,6 +1031,7 @@ pub fn dequantBlock(dtype: GgmlType, bytes: []const u8, out: []f32, elems: usize
         },
         .q8_0 => dequantQ8_0(bytes, out[0..bs]),
         .q4_0 => dequantQ4_0(bytes, out[0..bs]),
+        .q4_1 => dequantQ4_1(bytes, out[0..bs]),
         .q4_k => dequantQ4_K(bytes, out[0..bs]),
         .q5_k => dequantQ5_K(bytes, out[0..bs]),
         .q6_k => dequantQ6_K(bytes, out[0..bs]),
@@ -1029,6 +1050,7 @@ pub fn dequantTensor(info: *const TensorInfo, bytes: []const u8, out: []f32) Ggu
         .bf16 => dequantBF16(bytes, out),
         .q8_0 => dequantQ8_0(bytes, out),
         .q4_0 => dequantQ4_0(bytes, out),
+        .q4_1 => dequantQ4_1(bytes, out),
         .q4_k => dequantQ4_K(bytes, out),
         .q5_k => dequantQ5_K(bytes, out),
         .q6_k => dequantQ6_K(bytes, out),

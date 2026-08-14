@@ -42,8 +42,10 @@ pub const GgufModel = struct {
 
     /// output.weight -> Tensor(f16) [vocab, hidden].
     /// Usado como lm_head por linearProjection (trans_b=true), que espera [vocab, hidden].
+    /// Si el modelo ata embeddings (sin output.weight), usa token_embd.weight.
     pub fn loadLmHead(self: *const Self) !Tensor(f16) {
-        const info = try self.findTensor("output.weight", null);
+        const info = self.findTensor("output.weight", null) catch
+            (self.findTensor("token_embd.weight", null) catch return GgufModelError.MissingTensor);
         if (info.n_dims != 2) return GgufModelError.MissingTensor;
         const hidden: usize = @intCast(info.dims[0]);
         const vocab: usize = @intCast(info.dims[1]);
