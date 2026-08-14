@@ -74,7 +74,7 @@ Instalado en `~/.local/bin/zig-0.16`.
 | D4 | Special tokens (BOS/EOS/UNK/PAD) desde metadata GGUF | `src/tokenizer/bpe.zig` | 🟡 |
 | D5 | Decode correcto (bytes → utf8, `<0x..>` fallback) | `src/tokenizer/bpe.zig` | 🟡 |
 
-> **Estado Fase D**: D1 ✅ (`src/loader/gguf_tokenizer.zig`: modelo, pre, tokens, merges, token_types, special ids, add_bos/eos — vistas prestadas a datos mmap), D2 ✅ (`BPETokenizer.fromTokenizer` con `model` field), D4 ✅ (bos/eos/unk/pad desde metadata). Verificado contra Qwen2.5-7B real: model=gpt2, pre=qwen2, 152064 tokens, 151387 merges; encode de "Hello, world! This is a Zig test." → 11 tokens correctos. Pendiente: D3 (regex GPT-2 real), D5 (decode bytes→utf8).
+> **Estado Fase D**: D1 ✅ (`src/loader/gguf_tokenizer.zig`: modelo, pre, tokens, merges, token_types, special ids, add_bos/eos — vistas prestadas a datos mmap), D2 ✅ (`BPETokenizer.fromTokenizer` con `model` field), D3 ✅ (pre-tokenización Unicode Qwen3.5 portada de `llama.cpp/src/unicode.cpp` + `bytes_to_unicode`, módulos `unicode.zig`/`unicode_data.zig`), D4 ✅ (bos/eos/unk/pad desde metadata), D5 ✅ (decode invierte bytes_to_unicode → texto legible). Verificado contra llama.cpp en Qwen3.5-0.8B: "Hola, qué tal" → `[65717, 11, 40883, 7953]` idéntico. Pendiente: pre-tokenización de otros `pre` types (qwen2, llama3, etc.).
 
 ## Fase E — Pipeline end-to-end (Importante)
 
@@ -104,9 +104,9 @@ Instalado en `~/.local/bin/zig-0.16`.
 | G3 | `SsmLayer` (Gated DeltaNet) sobre `QuantWeight`, scratch f16 persistente | `src/transformer/ssm.zig` | 🔴 | ✅ |
 | G4 | Corregir recurrencia vs kernel FLA: decay `exp(-exp(A_log)·softplus)` y pairing `hk=hv//(n_v/n_k)` | `src/transformer/ssm.zig` | 🔴 | ✅ |
 | G5 | Tests: hand-computed, persistencia, brute-force, recurrencia vs FLA naive | `src/transformer/ssm.zig` | 🔴 | ✅ |
-> **Estado Fase G**: `zig build test` → 57/61 (4 skips); los 3 fallos son tests
-> reales de `test_gguf.zig` escritos para el 4B full-attention. Detalles en
-> `docs/qwen35-hybrid-deltanet.md`.
+> **Estado Fase G**: `zig build test` ✅ en verde (incluye SSM f32 + brute-force
+> vs referencia, tests del tokenizer Unicode y dequant Q4_0 split-layout).
+> Detalles en `docs/qwen35-hybrid-deltanet.md`.
 
 ## Fase H — Bloque híbrido Qwen3.5 (atención + rutado)
 
@@ -116,8 +116,10 @@ Instalado en `~/.local/bin/zig-0.16`.
 | H2 | IMROPE: NEOX, rotar 64 de 256 dims, secciones [11,11,10,0] | `src/transformer/rope.zig` | 🔴 | ✅ |
 | H3 | Rutado híbrido SSM vs atención por `isFullAttentionLayer` | `src/transformer/layer.zig`, `pipeline.zig` | 🔴 | ✅ (`ModelConfig.isFullAttentionLayer` + `hybrid_layer.zig`) |
 | H4 | Rework `gguf_model.zig` a `QuantWeight` + `dequantTensor` | `src/loader/gguf_model.zig` | 🔴 | ✅ |
-| H5 | CLI de inferencia + validación modelo real | `src/main.zig`, `tests/test_gguf.zig` | 🟡 | ✅ (CLI con flags de sampling en runtime implementada; falta validar con modelo real: no hay GGUF disponible en este entorno) |
-| H6 | Commit final + docs | — | 🟢 | ⬜ |
+| H5 | CLI de inferencia + validación modelo real | `src/main.zig`, `tests/test_gguf.zig` | 🟡 | ✅ (validado contra llama.cpp con Qwen3.5-0.8B-Q4_0.gguf: Pearson 0.9989 en logits del primer token, top1 idéntico, generación "¡Hola! ¿Cómo estás?" correcta) |
+| H6 | Commit final + docs | — | 🟢 | ✅ (commit e1898a4) |
+| H7 | Corregir dequant Q4_0/Q4_1: layout "split" de nibbles de ggml | `src/loader/gguf.zig` | 🔴 | ✅ (fue la causa raíz de logits descorrelacionados; test de regresión añadido) |
+| H8 | Backend GPU (cuBLAS Sgemm + contexto) | `src/cuda/` | 🟢 | ⬜ (Phase 4: reconciliar cuCtxCreate [cuMemAlloc] vs primary context [cuBLAS]) |
 
 ---
 
