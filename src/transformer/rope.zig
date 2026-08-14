@@ -104,8 +104,9 @@ pub fn applyRoPESingle(
 ///   equivalente a NEOX estándar sobre n_rot dims con base freq_base
 /// - Q/K shape: [batch, num_heads, seq_len, head_dim]
 pub fn applyRoPEMultiSection(
-    Q: *Tensor(f16),
-    K: *Tensor(f16),
+    comptime T: type,
+    Q: *Tensor(T),
+    K: *Tensor(T),
     start_pos: usize,
     head_dim: usize,
     n_rot: usize,

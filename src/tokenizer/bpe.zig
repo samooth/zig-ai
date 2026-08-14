@@ -1,12 +1,6 @@
 const std = @import("std");
 const gguf_tokenizer = @import("gguf_tokenizer");
-
-fn isPunct(c: u8) bool {
-    return (c >= 0x21 and c <= 0x2F) or
-        (c >= 0x3A and c <= 0x40) or
-        (c >= 0x5B and c <= 0x60) or
-        (c >= 0x7B and c <= 0x7E);
-}
+const unicode = @import("unicode");
 
 /// BPE Tokenizer — Implementación limpia del algoritmo Byte-Pair Encoding
 /// Compatible con formatos tipo GPT-2 / Llama tokenizer.json simplificado
@@ -152,29 +146,8 @@ pub const BPETokenizer = struct {
         }
     }
 
-    /// Pre-tokenización simple: divide por espacios y puntuación básica
-    /// Para GPT-2 real se necesita regex más complejo, esto es suficiente para demo
-    pub fn preTokenize(self: Self, text: []const u8, words: *std.ArrayList([]const u8)) !void {
-        var start: usize = 0;
-        var i: usize = 0;
-        while (i < text.len) : (i += 1) {
-            const c = text[i];
-            if (std.ascii.isWhitespace(c) or isPunct(c)) {
-                if (i > start) {
-                    try words.append(self.allocator, text[start..i]);
-                }
-                if (isPunct(c)) {
-                    try words.append(self.allocator, text[i..i+1]);
-                }
-                start = i + 1;
-            }
-        }
-        if (start < text.len) {
-            try words.append(self.allocator, text[start..]);
-        }
-    }
-
-    /// Encode: texto -> tokens
+    /// Encode: texto -> tokens (byte-level BPE estilo GPT-2/Qwen3.5).
+    /// Replica la pre-tokenización Unicode y el byte-encoding de llama.cpp.
     pub fn encode(self: *Self, text: []const u8, options: EncodeOptions) ![]u32 {
         var tokens: std.ArrayList(u32) = .empty;
         errdefer tokens.deinit(self.allocator);
@@ -183,11 +156,12 @@ pub const BPETokenizer = struct {
             if (self.bos_token) |bos| try tokens.append(self.allocator, bos);
         }
 
-        var words: std.ArrayList([]const u8) = .empty;
-        defer words.deinit(self.allocator);
-        try self.preTokenize(text, &words);
+        const cpts = try unicode.cptsFromUtf8(text, self.allocator);
+        defer self.allocator.free(cpts);
+        const words = try unicode.splitQwen35(cpts, self.allocator);
+        defer self.allocator.free(words);
 
-        for (words.items) |word| {
+        for (words) |word| {
             try self.encodeWord(word, &tokens);
         }
 
@@ -198,17 +172,34 @@ pub const BPETokenizer = struct {
         return tokens.toOwnedSlice(self.allocator);
     }
 
-    fn encodeWord(self: *Self, word: []const u8, tokens: *std.ArrayList(u32)) !void {
-        // Inicializar word como secuencia de bytes individuales
+    fn encodeWord(self: *Self, word: []const u32, tokens: *std.ArrayList(u32)) !void {
+        // 1) Byte-encoding GPT-2: el texto (codepoints) → bytes → unicode
+        //    de cada byte (bytes_to_unicode), formando la palabra codificada.
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        var raw_buf: [4]u8 = undefined;
+        var enc_buf: [4]u8 = undefined;
+        for (word) |cpt| {
+            const raw = unicode.cptToUtf8(cpt, &raw_buf);
+            for (raw) |byte| {
+                const enc = unicode.byteEncodedToken(byte, &enc_buf);
+                try encoded.appendSlice(self.allocator, enc);
+            }
+        }
+
+        // 2) Símbolos iniciales: cada char UTF-8 de la palabra codificada.
         var symbols: std.ArrayList([]const u8) = .empty;
         defer {
             for (symbols.items) |s| self.allocator.free(s);
             symbols.deinit(self.allocator);
         }
 
-        for (word) |byte| {
-            const sym = try self.allocator.dupe(u8, &[_]u8{byte});
+        var i: usize = 0;
+        while (i < encoded.items.len) {
+            const n = try std.unicode.utf8ByteSequenceLength(encoded.items[i]);
+            const sym = try self.allocator.dupe(u8, encoded.items[i .. i + n]);
             try symbols.append(self.allocator, sym);
+            i += n;
         }
 
         if (symbols.items.len == 0) return;
@@ -218,9 +209,9 @@ pub const BPETokenizer = struct {
             var best_merge: ?usize = null;
             var best_priority: u32 = std.math.maxInt(u32);
 
-            for (0..symbols.items.len - 1) |i| {
-                const left = symbols.items[i];
-                const right = symbols.items[i + 1];
+            for (0..symbols.items.len - 1) |idx| {
+                const left = symbols.items[idx];
+                const right = symbols.items[idx + 1];
 
                 for (self.merges.items, 0..) |merge, mi| {
                     if (std.mem.eql(u8, merge.left, left) and std.mem.eql(u8, merge.right, right)) {
@@ -243,18 +234,18 @@ pub const BPETokenizer = struct {
                 new_symbols.deinit(self.allocator);
             }
 
-            var i: usize = 0;
-            while (i < symbols.items.len) {
-                if (i < symbols.items.len - 1 and 
-                    std.mem.eql(u8, symbols.items[i], merge.left) and
-                    std.mem.eql(u8, symbols.items[i + 1], merge.right)) {
-                    const merged = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ symbols.items[i], symbols.items[i + 1] });
+            var ii: usize = 0;
+            while (ii < symbols.items.len) {
+                if (ii < symbols.items.len - 1 and 
+                    std.mem.eql(u8, symbols.items[ii], merge.left) and
+                    std.mem.eql(u8, symbols.items[ii + 1], merge.right)) {
+                    const merged = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ symbols.items[ii], symbols.items[ii + 1] });
                     try new_symbols.append(self.allocator, merged);
-                    i += 2;
+                    ii += 2;
                 } else {
-                    const copied = try self.allocator.dupe(u8, symbols.items[i]);
+                    const copied = try self.allocator.dupe(u8, symbols.items[ii]);
                     try new_symbols.append(self.allocator, copied);
-                    i += 1;
+                    ii += 1;
                 }
             }
 
@@ -264,21 +255,43 @@ pub const BPETokenizer = struct {
             symbols = new_symbols;
         }
 
-        // Mapear símbolos finales a IDs
+        // Mapear símbolos finales a IDs (con fallback por byte, como llama.cpp)
         for (symbols.items) |sym| {
-            const id = self.vocab.get(sym) orelse self.unk_token;
-            try tokens.append(self.allocator, id);
+            if (self.vocab.get(sym)) |id| {
+                try tokens.append(self.allocator, id);
+            } else {
+                var tmp: [4]u8 = undefined;
+                for (sym) |byte| {
+                    const tok_str = unicode.byteEncodedToken(byte, &tmp);
+                    if (self.vocab.get(tok_str)) |bid| try tokens.append(self.allocator, bid);
+                }
+            }
         }
     }
 
-    /// Decode: tokens -> texto
+    /// Decode: tokens -> texto (invierte bytes_to_unicode)
     pub fn decode(self: Self, tokens: []const u32, allocator: std.mem.Allocator) ![]u8 {
         var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(allocator);
 
         for (tokens) |token| {
             if (self.vocab_inv.get(token)) |str| {
-                try result.appendSlice(allocator, str);
+                var i: usize = 0;
+                while (i < str.len) {
+                    const n = std.unicode.utf8ByteSequenceLength(str[i]) catch {
+                        i += 1;
+                        continue;
+                    };
+                    if (i + n > str.len) break;
+                    const cpt = std.unicode.utf8Decode(str[i .. i + n]) catch {
+                        i += n;
+                        continue;
+                    };
+                    if (unicode.unicodeCptToByte(cpt)) |byte| {
+                        try result.append(allocator, byte);
+                    }
+                    i += n;
+                }
             } else {
                 try result.appendSlice(allocator, "<unk>");
             }
@@ -291,10 +304,10 @@ pub const BPETokenizer = struct {
     pub fn initDummy(allocator: std.mem.Allocator) !Self {
         var tok = Self.init(allocator);
 
-        // Vocabulario: bytes 0-255 como tokens individuales
+        // Vocabulario: bytes 0-255 como tokens individuales byte-encodificados
         for (0..256) |b| {
-            const str = try std.fmt.allocPrint(allocator, "<0x{X:0>2}>", .{b});
-            defer allocator.free(str);
+            var buf: [4]u8 = undefined;
+            const str = unicode.byteEncodedToken(@as(u8, @intCast(b)), &buf);
             try tok.addToken(str, @as(u32, @intCast(b)));
         }
 

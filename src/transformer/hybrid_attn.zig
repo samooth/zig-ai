@@ -50,10 +50,10 @@ pub const AttentionLayer = struct {
     attn_k_norm: Tensor(f32),    // [head_dim]
 
     // Scratch f16 persistente (reutilizado cada forward)
-    scratch_q: []f16,     // qg_dim * n_embd
-    scratch_k: []f16,     // kv_dim * n_embd
-    scratch_v: []f16,     // kv_dim * n_embd
-    scratch_o: []f16,     // n_embd * (n_head*head_dim)
+    scratch_q: []f32,     // qg_dim * n_embd
+    scratch_k: []f32,     // kv_dim * n_embd
+    scratch_v: []f32,     // kv_dim * n_embd
+    scratch_o: []f32,     // n_embd * (n_head*head_dim)
 
     // KV-Cache f32 (para precisión numérica en softmax)
     k_cache: []f32, // [max_seq_len, n_kv_head * head_dim]
@@ -74,13 +74,13 @@ pub const AttentionLayer = struct {
         const qg_dim = params.qg_dim();
         const kv_dim = params.kv_dim();
 
-        const scratch_q = try allocator.alloc(f16, qg_dim * params.n_embd);
+        const scratch_q = try allocator.alloc(f32, qg_dim * params.n_embd);
         errdefer allocator.free(scratch_q);
-        const scratch_k = try allocator.alloc(f16, kv_dim * params.n_embd);
+        const scratch_k = try allocator.alloc(f32, kv_dim * params.n_embd);
         errdefer allocator.free(scratch_k);
-        const scratch_v = try allocator.alloc(f16, kv_dim * params.n_embd);
+        const scratch_v = try allocator.alloc(f32, kv_dim * params.n_embd);
         errdefer allocator.free(scratch_v);
-        const scratch_o = try allocator.alloc(f16, params.n_embd * params.n_head * params.head_dim);
+        const scratch_o = try allocator.alloc(f32, params.n_embd * params.n_head * params.head_dim);
         errdefer allocator.free(scratch_o);
 
         const k_cache = try allocator.alloc(f32, params.max_seq_len * params.n_kv_head * params.head_dim);
@@ -157,7 +157,7 @@ pub const AttentionLayer = struct {
     /// `out`: [N, n_embd] (f16)
     /// `start_pos`: posición inicial en la secuencia (para RoPE y KV-cache)
     /// `n`: número de tokens a procesar (prefill en bloque o 1 token)
-    pub fn forward(self: *Self, x: Tensor(f16), out: *Tensor(f16), start_pos: usize, n: usize) !void {
+    pub fn forward(self: *Self, x: Tensor(f32), out: *Tensor(f32), start_pos: usize, n: usize) !void {
         const p = self.params;
         const qg_dim = p.qg_dim();
         const kv_dim = p.kv_dim();
@@ -166,20 +166,11 @@ pub const AttentionLayer = struct {
         const n_kv_head = p.n_kv_head;
         const N = n;
 
-        // X en f16 (matmuls cuantizados)
-        var Xf16 = try Tensor(f16).alloc(self.allocator, &.{ N, p.n_embd });
-        defer Xf16.deinit();
-        for (0..N) |t| {
-            for (0..p.n_embd) |d| {
-                Xf16.data[t * p.n_embd + d] = x.data[t * p.n_embd + d];
-            }
-        }
-
-        // === 2. Proyección Q+G fusionada (w_q: [8192, 4096]) ===
-        self.w_q.dequantToF16Transposed(self.scratch_q);
+        // === 2. Proyección Q+G fusionada (w_q) ===
+        self.w_q.dequantToF32Transposed(self.scratch_q);
         var w_q_shape = [_]usize{ qg_dim, p.n_embd };
         var w_q_strides = [_]usize{ p.n_embd, 1 };
-        const w_q16 = Tensor(f16){
+        const w_q32 = Tensor(f32){
             .data = self.scratch_q,
             .shape = &w_q_shape,
             .strides = &w_q_strides,
@@ -187,35 +178,31 @@ pub const AttentionLayer = struct {
             .allocator = null,
             .owns_data = false,
         };
-        var qg16 = try Tensor(f16).alloc(self.allocator, &.{ N, qg_dim });
-        defer qg16.deinit();
-        try self.matmul_engine.linearProjection(f16, Xf16, w_q16, &qg16);
+        var qg32 = try Tensor(f32).alloc(self.allocator, &.{ N, qg_dim });
+        defer qg32.deinit();
+        try self.matmul_engine.linearProjection(f32, x, w_q32, &qg32);
 
-        // Dividir Q y G: qg16 es [N, 8192] con layout [Q0|G0|Q1|G1|...] por head (stride 512)
-        // Q: [N, n_head, head_dim], G: [N, n_head, head_dim]
-        var Qf16 = try Tensor(f16).alloc(self.allocator, &.{ N, n_head, head_dim });
-        defer Qf16.deinit();
-        var Gf16 = try Tensor(f16).alloc(self.allocator, &.{ N, n_head, head_dim });
-        defer Gf16.deinit();
+        // Dividir Q y G interleaved [Q0|G0|Q1|G1|...]: Q = base, G = base+head_dim
+        var Qf32 = try Tensor(f32).alloc(self.allocator, &.{ N, n_head, head_dim });
+        defer Qf32.deinit();
+        var Gf32 = try Tensor(f32).alloc(self.allocator, &.{ N, n_head, head_dim });
+        defer Gf32.deinit();
 
-        // Extraer Q y G del buffer interleaved
         for (0..N) |t| {
             for (0..n_head) |h| {
-                const base = h * (2 * head_dim); // stride per head = 2 * head_dim
-                const q_off = base;
-                const g_off = base + head_dim;
+                const base = h * (2 * head_dim);
                 for (0..head_dim) |d| {
-                    Qf16.data[t * n_head * head_dim + h * head_dim + d] = qg16.data[t * qg_dim + q_off + d];
-                    Gf16.data[t * n_head * head_dim + h * head_dim + d] = qg16.data[t * qg_dim + g_off + d];
+                    Qf32.data[t * n_head * head_dim + h * head_dim + d] = qg32.data[t * qg_dim + base + d];
+                    Gf32.data[t * n_head * head_dim + h * head_dim + d] = qg32.data[t * qg_dim + base + head_dim + d];
                 }
             }
         }
 
         // === 3. Proyecciones K, V ===
-        self.w_k.dequantToF16Transposed(self.scratch_k);
+        self.w_k.dequantToF32Transposed(self.scratch_k);
         var w_k_shape = [_]usize{ kv_dim, p.n_embd };
         var w_k_strides = [_]usize{ p.n_embd, 1 };
-        const w_k16 = Tensor(f16){
+        const w_k32 = Tensor(f32){
             .data = self.scratch_k,
             .shape = &w_k_shape,
             .strides = &w_k_strides,
@@ -223,14 +210,14 @@ pub const AttentionLayer = struct {
             .allocator = null,
             .owns_data = false,
         };
-        var Kf16 = try Tensor(f16).alloc(self.allocator, &.{ N, kv_dim });
-        defer Kf16.deinit();
-        try self.matmul_engine.linearProjection(f16, Xf16, w_k16, &Kf16);
+        var Kf32 = try Tensor(f32).alloc(self.allocator, &.{ N, kv_dim });
+        defer Kf32.deinit();
+        try self.matmul_engine.linearProjection(f32, x, w_k32, &Kf32);
 
-        self.w_v.dequantToF16Transposed(self.scratch_v);
+        self.w_v.dequantToF32Transposed(self.scratch_v);
         var w_v_shape = [_]usize{ kv_dim, p.n_embd };
         var w_v_strides = [_]usize{ p.n_embd, 1 };
-        const w_v16 = Tensor(f16){
+        const w_v32 = Tensor(f32){
             .data = self.scratch_v,
             .shape = &w_v_shape,
             .strides = &w_v_strides,
@@ -238,70 +225,64 @@ pub const AttentionLayer = struct {
             .allocator = null,
             .owns_data = false,
         };
-        var Vf16 = try Tensor(f16).alloc(self.allocator, &.{ N, kv_dim });
-        defer Vf16.deinit();
-        try self.matmul_engine.linearProjection(f16, Xf16, w_v16, &Vf16);
+        var Vf32 = try Tensor(f32).alloc(self.allocator, &.{ N, kv_dim });
+        defer Vf32.deinit();
+        try self.matmul_engine.linearProjection(f32, x, w_v32, &Vf32);
 
         // Reshape K, V a [N, n_kv_head, head_dim]
-        var Kf16_hm = try Tensor(f16).alloc(self.allocator, &.{ N, n_kv_head, head_dim });
-        defer Kf16_hm.deinit();
-        var Vf16_hm = try Tensor(f16).alloc(self.allocator, &.{ N, n_kv_head, head_dim });
-        defer Vf16_hm.deinit();
+        var Kf32_hm = try Tensor(f32).alloc(self.allocator, &.{ N, n_kv_head, head_dim });
+        defer Kf32_hm.deinit();
+        var Vf32_hm = try Tensor(f32).alloc(self.allocator, &.{ N, n_kv_head, head_dim });
+        defer Vf32_hm.deinit();
 
         for (0..N) |t| {
             for (0..n_kv_head) |h| {
                 for (0..head_dim) |d| {
-                    Kf16_hm.data[t * n_kv_head * head_dim + h * head_dim + d] = Kf16.data[t * kv_dim + h * head_dim + d];
-                    Vf16_hm.data[t * n_kv_head * head_dim + h * head_dim + d] = Vf16.data[t * kv_dim + h * head_dim + d];
+                    Kf32_hm.data[t * n_kv_head * head_dim + h * head_dim + d] = Kf32.data[t * kv_dim + h * head_dim + d];
+                    Vf32_hm.data[t * n_kv_head * head_dim + h * head_dim + d] = Vf32.data[t * kv_dim + h * head_dim + d];
                 }
             }
         }
 
         // === 4. Q/K RMSNorm per-head ===
-        // Qf16: [N, n_head, head_dim] -> view [N*n_head, head_dim] para rmsNorm
-        var Qf32 = try Tensor(f32).alloc(self.allocator, &.{ N * n_head, head_dim });
-        defer Qf32.deinit();
-        for (Qf16.data, Qf32.data) |s, *d| d.* = @floatCast(s);
-        norm.rmsNorm(f32, f32, Qf32, self.attn_q_norm, p.rms_eps, &Qf32);
-        for (Qf32.data, Qf16.data) |s, *d| d.* = @floatCast(s);
+        var Q_norm = try Tensor(f32).alloc(self.allocator, &.{ N * n_head, head_dim });
+        defer Q_norm.deinit();
+        for (0..N * n_head * head_dim) |i| Q_norm.data[i] = Qf32.data[i];
+        norm.rmsNorm(f32, f32, Q_norm, self.attn_q_norm, p.rms_eps, &Q_norm);
+        for (0..N * n_head * head_dim) |i| Qf32.data[i] = Q_norm.data[i];
 
-        var Kf32 = try Tensor(f32).alloc(self.allocator, &.{ N * n_kv_head, head_dim });
-        defer Kf32.deinit();
-        for (Kf16_hm.data, Kf32.data) |s, *d| d.* = @floatCast(s);
-        norm.rmsNorm(f32, f32, Kf32, self.attn_k_norm, p.rms_eps, &Kf32);
-        for (Kf32.data, Kf16_hm.data) |s, *d| d.* = @floatCast(s);
+        var K_norm = try Tensor(f32).alloc(self.allocator, &.{ N * n_kv_head, head_dim });
+        defer K_norm.deinit();
+        for (0..N * n_kv_head * head_dim) |i| K_norm.data[i] = Kf32_hm.data[i];
+        norm.rmsNorm(f32, f32, K_norm, self.attn_k_norm, p.rms_eps, &K_norm);
+        for (0..N * n_kv_head * head_dim) |i| Kf32_hm.data[i] = K_norm.data[i];
 
         // === 5. MRoPE (IMROPE) ===
-        // Qf16: [N, n_head, head_dim] -> view [1, n_head, N, head_dim] for applyRoPEMultiSection
-        var Q_hm = try Tensor(f16).alloc(self.allocator, &.{ 1, n_head, N, head_dim });
+        var Q_hm = try Tensor(f32).alloc(self.allocator, &.{ 1, n_head, N, head_dim });
         defer Q_hm.deinit();
-        for (0..N * n_head * head_dim) |i| Q_hm.data[i] = Qf16.data[i];
-        var K_hm = try Tensor(f16).alloc(self.allocator, &.{ 1, n_kv_head, N, head_dim });
+        for (0..N * n_head * head_dim) |i| Q_hm.data[i] = Qf32.data[i];
+        var K_hm = try Tensor(f32).alloc(self.allocator, &.{ 1, n_kv_head, N, head_dim });
         defer K_hm.deinit();
-        for (0..N * n_kv_head * head_dim) |i| K_hm.data[i] = Kf16_hm.data[i];
+        for (0..N * n_kv_head * head_dim) |i| K_hm.data[i] = Kf32_hm.data[i];
 
-        rope_mod.applyRoPEMultiSection(&Q_hm, &K_hm, start_pos, head_dim, p.n_rot, p.rope_sections, p.rope_freq_base);
+        rope_mod.applyRoPEMultiSection(f32, &Q_hm, &K_hm, start_pos, head_dim, p.n_rot, p.rope_sections, p.rope_freq_base);
 
-        // Copiar de vuelta
-        for (0..N * n_head * head_dim) |i| Qf16.data[i] = Q_hm.data[i];
-        for (0..N * n_kv_head * head_dim) |i| Kf16_hm.data[i] = K_hm.data[i];
+        for (0..N * n_head * head_dim) |i| Qf32.data[i] = Q_hm.data[i];
+        for (0..N * n_kv_head * head_dim) |i| Kf32_hm.data[i] = K_hm.data[i];
 
         // === 6. KV-Cache update / retrieve ===
-        // k_cache/v_cache: [max_seq_len, n_kv_head * head_dim] f32
-        // Actualizar cache con Kf16_hm, Vf16_hm
         for (0..N) |t| {
             const cache_idx = start_pos + t;
             if (cache_idx >= p.max_seq_len) continue;
             const cache_off = cache_idx * n_kv_head * head_dim;
             for (0..n_kv_head * head_dim) |i| {
-                self.k_cache[cache_off + i] = @floatCast(Kf16_hm.data[t * n_kv_head * head_dim + i]);
-                self.v_cache[cache_off + i] = @floatCast(Vf16_hm.data[t * n_kv_head * head_dim + i]);
+                self.k_cache[cache_off + i] = Kf32_hm.data[t * n_kv_head * head_dim + i];
+                self.v_cache[cache_off + i] = Vf32_hm.data[t * n_kv_head * head_dim + i];
             }
         }
         const total_len = start_pos + N;
         if (total_len > self.cache_len) self.cache_len = total_len;
 
-        // Recuperar K/V full [total_len, n_kv_head, head_dim]
         var K_full = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_kv_head, head_dim });
         defer K_full.deinit();
         var V_full = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_kv_head, head_dim });
@@ -315,7 +296,6 @@ pub const AttentionLayer = struct {
         }
 
         // === 7. GQA: expandir K/V de n_kv_head a n_head ===
-        // K_full: [total_len, n_kv_head, head_dim] -> [total_len, n_head, head_dim]
         const repeat_factor = n_head / n_kv_head;
         var K_exp = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_head, head_dim });
         defer K_exp.deinit();
@@ -335,16 +315,6 @@ pub const AttentionLayer = struct {
         }
 
         // === 8. Softmax Attention (causal) ===
-        // Qf16: [N, n_head, head_dim] f16 -> convert to f32
-        var Qf32_attn = try Tensor(f32).alloc(self.allocator, &.{ N, n_head, head_dim });
-        defer Qf32_attn.deinit();
-        for (Qf16.data, Qf32_attn.data) |s, *d| d.* = @floatCast(s);
-
-        var Gf32 = try Tensor(f32).alloc(self.allocator, &.{ N, n_head, head_dim });
-        defer Gf32.deinit();
-        for (Gf16.data, Gf32.data) |s, *d| d.* = @floatCast(s);
-
-        // attn_out: [N, n_head, head_dim] f32
         var attn_out = try Tensor(f32).alloc(self.allocator, &.{ N, n_head, head_dim });
         defer attn_out.deinit();
 
@@ -362,7 +332,7 @@ pub const AttentionLayer = struct {
                 for (0..total_len) |s| {
                     var score: f32 = 0;
                     for (0..head_dim) |d| {
-                        const q = Qf32_attn.data[t * n_head * head_dim + h * head_dim + d];
+                        const q = Qf32.data[t * n_head * head_dim + h * head_dim + d];
                         const k = K_exp.data[s * n_head * head_dim + h * head_dim + d];
                         score += q * k;
                     }
@@ -403,20 +373,15 @@ pub const AttentionLayer = struct {
         }
 
         // === 10. Output projection ===
-        // attn_out [N, n_head*head_dim] -> wo [n_embd, n_head*head_dim] -> [N, n_embd]
         const q_dim = n_head * head_dim;
         var attn_flat = try Tensor(f32).alloc(self.allocator, &.{ N, q_dim });
         defer attn_flat.deinit();
         for (0..N * q_dim) |i| attn_flat.data[i] = attn_out.data[i];
 
-        var attn_flat_f16 = try Tensor(f16).alloc(self.allocator, &.{ N, q_dim });
-        defer attn_flat_f16.deinit();
-        for (attn_flat.data, attn_flat_f16.data) |s, *d| d.* = @floatCast(s);
-
-        self.w_o.dequantToF16Transposed(self.scratch_o);
+        self.w_o.dequantToF32Transposed(self.scratch_o);
         var w_o_shape = [_]usize{ p.n_embd, q_dim };
         var w_o_strides = [_]usize{ q_dim, 1 };
-        const w_o16 = Tensor(f16){
+        const w_o32 = Tensor(f32){
             .data = self.scratch_o,
             .shape = &w_o_shape,
             .strides = &w_o_strides,
@@ -424,9 +389,9 @@ pub const AttentionLayer = struct {
             .allocator = null,
             .owns_data = false,
         };
-        var attn_proj = try Tensor(f16).alloc(self.allocator, &.{ N, p.n_embd });
+        var attn_proj = try Tensor(f32).alloc(self.allocator, &.{ N, p.n_embd });
         defer attn_proj.deinit();
-        try self.matmul_engine.linearProjection(f16, attn_flat_f16, w_o16, &attn_proj);
+        try self.matmul_engine.linearProjection(f32, attn_flat, w_o32, &attn_proj);
 
         // === 11. Salida: mixer-only, sin residual ni post-norm ni FFN ===
         // HybridLayer se encarga de residual + post-norm + FFN.
@@ -629,11 +594,11 @@ test "hybrid attention single token hand-computed" {
     var layer = &fixture.layer;
 
     // Input x = [1, 1, 8] all ones
-    var x = try Tensor(f16).alloc(allocator, &.{ 1, 1, test_params.n_embd });
+    var x = try Tensor(f32).alloc(allocator, &.{ 1, 1, test_params.n_embd });
     defer x.deinit();
     for (x.data) |*v| v.* = 1.0;
 
-    var out = try Tensor(f16).alloc(allocator, &.{ 1, 1, test_params.n_embd });
+    var out = try Tensor(f32).alloc(allocator, &.{ 1, 1, test_params.n_embd });
     defer out.deinit();
 
     try layer.forward(x, &out, 0, 1);
@@ -659,12 +624,12 @@ test "hybrid attention preserves norm with rope" {
     defer fixture.deinit();
     var layer = &fixture.layer;
 
-    var x = try Tensor(f16).alloc(allocator, &.{ 1, 4, test_params.n_embd });
+    var x = try Tensor(f32).alloc(allocator, &.{ 1, 4, test_params.n_embd });
     defer x.deinit();
     var rng = std.Random.Xoshiro256.init(123);
     x.randUniform(&rng, -0.5, 0.5);
 
-    var out = try Tensor(f16).alloc(allocator, &.{ 1, 4, test_params.n_embd });
+    var out = try Tensor(f32).alloc(allocator, &.{ 1, 4, test_params.n_embd });
     defer out.deinit();
 
     try layer.forward(x, &out, 0, 4);

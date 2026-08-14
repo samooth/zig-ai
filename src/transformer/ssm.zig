@@ -73,9 +73,9 @@ pub const SsmLayer = struct {
     ssm_norm: Tensor(f32), // [d_state]
 
     // Scratch f16 persistente (reutilizado cada forward)
-    scratch_qkv: []f16, // qkv_dim * n_embd
-    scratch_z: []f16, // value_dim * n_embd
-    scratch_out: []f16, // n_embd * value_dim
+    scratch_qkv: []f32, // qkv_dim * n_embd
+    scratch_z: []f32, // value_dim * n_embd
+    scratch_out: []f32, // n_embd * value_dim
 
     // Estado recurrente
     conv_state: []f32, // [d_conv-1, qkv_dim] por secuencia
@@ -94,11 +94,11 @@ pub const SsmLayer = struct {
 
         const qkv_dim = params.qkvDim();
 
-        const scratch_qkv = try allocator.alloc(f16, qkv_dim * params.n_embd);
+        const scratch_qkv = try allocator.alloc(f32, qkv_dim * params.n_embd);
         errdefer allocator.free(scratch_qkv);
-        const scratch_z = try allocator.alloc(f16, params.d_inner * params.n_embd);
+        const scratch_z = try allocator.alloc(f32, params.d_inner * params.n_embd);
         errdefer allocator.free(scratch_z);
-        const scratch_out = try allocator.alloc(f16, params.n_embd * params.d_inner);
+        const scratch_out = try allocator.alloc(f32, params.n_embd * params.d_inner);
         errdefer allocator.free(scratch_out);
 
         const conv_state = try allocator.alloc(f32, (params.d_conv - 1) * qkv_dim);
@@ -194,7 +194,7 @@ pub const SsmLayer = struct {
     /// `x`: Tensor(f16) [1, N, n_embd] position-major.
     /// `out`: Tensor(f16) [1, N, n_embd].
     /// `n`: tokens a procesar (prefill en bloque o 1 token de generación).
-    pub fn forward(self: *Self, x: Tensor(f16), out: *Tensor(f16), n: usize) !void {
+    pub fn forward(self: *Self, x: Tensor(f32), out: *Tensor(f32), n: usize) !void {
         const p = self.params;
         const qkv_dim = p.qkvDim();
         const key_dim = p.keyDim();
@@ -203,24 +203,11 @@ pub const SsmLayer = struct {
         const head_v_dim = p.d_state;
         const N = n;
 
-        // X en f16 (matmuls cuantizados) y f32 (matmuls pequeños)
-        var Xf16 = try Tensor(f16).alloc(self.allocator, &.{ N, p.n_embd });
-        defer Xf16.deinit();
-        var Xf32 = try Tensor(f32).alloc(self.allocator, &.{ N, p.n_embd });
-        defer Xf32.deinit();
-        for (0..N) |t| {
-            for (0..p.n_embd) |d| {
-                const v = x.data[t * p.n_embd + d];
-                Xf16.data[t * p.n_embd + d] = v;
-                Xf32.data[t * p.n_embd + d] = @floatCast(v);
-            }
-        }
-
-        // 1. qkv = attn_qkv @ X → [N, qkv_dim] (dequant f16 on-the-fly)
-        self.w_qkv.dequantToF16Transposed(self.scratch_qkv);
+        // 1. qkv = attn_qkv @ X → [N, qkv_dim] (dequant f32 on-the-fly)
+        self.w_qkv.dequantToF32Transposed(self.scratch_qkv);
         var w_qkv_shape = [_]usize{ qkv_dim, p.n_embd };
         var w_qkv_strides = [_]usize{ p.n_embd, 1 };
-        const w_qkv16 = Tensor(f16){
+        const w_qkv32 = Tensor(f32){
             .data = self.scratch_qkv,
             .shape = &w_qkv_shape,
             .strides = &w_qkv_strides,
@@ -228,18 +215,15 @@ pub const SsmLayer = struct {
             .allocator = null,
             .owns_data = false,
         };
-        var qkv16 = try Tensor(f16).alloc(self.allocator, &.{ N, qkv_dim });
-        defer qkv16.deinit();
-        try self.matmul_engine.linearProjection(f16, Xf16, w_qkv16, &qkv16);
         var qkv = try Tensor(f32).alloc(self.allocator, &.{ N, qkv_dim });
         defer qkv.deinit();
-        for (qkv16.data, qkv.data) |s, *d| d.* = @floatCast(s);
+        try self.matmul_engine.linearProjection(f32, x, w_qkv32, &qkv);
 
         // 2. z = attn_gate @ X → [N, value_dim]
-        self.w_z.dequantToF16Transposed(self.scratch_z);
+        self.w_z.dequantToF32Transposed(self.scratch_z);
         var w_z_shape = [_]usize{ p.d_inner, p.n_embd };
         var w_z_strides = [_]usize{ p.n_embd, 1 };
-        const w_z16 = Tensor(f16){
+        const w_z32 = Tensor(f32){
             .data = self.scratch_z,
             .shape = &w_z_shape,
             .strides = &w_z_strides,
@@ -247,24 +231,21 @@ pub const SsmLayer = struct {
             .allocator = null,
             .owns_data = false,
         };
-        var z16 = try Tensor(f16).alloc(self.allocator, &.{ N, p.d_inner });
-        defer z16.deinit();
-        try self.matmul_engine.linearProjection(f16, Xf16, w_z16, &z16);
         var z = try Tensor(f32).alloc(self.allocator, &.{ N, p.d_inner });
         defer z.deinit();
-        for (z16.data, z.data) |s, *d| d.* = @floatCast(s);
+        try self.matmul_engine.linearProjection(f32, x, w_z32, &z);
 
         // 3. beta = sigmoid(ssm_beta @ X) → [N, dt_rank]
         var beta = try Tensor(f32).alloc(self.allocator, &.{ N, p.dt_rank });
         defer beta.deinit();
-        try self.matmul_engine.linearProjection(f32, Xf32, self.w_beta, &beta);
+        try self.matmul_engine.linearProjection(f32, x, self.w_beta, &beta);
         for (beta.data) |*v| v.* = 1.0 / (1.0 + @exp(-v.*));
 
         // 4. gate = softplus(ssm_alpha @ X + dt) * ssm_a → [N, dt_rank]
         //    El GGUF guarda ssm_a YA como -exp(A_log); el decay es exp(gate).
         var gate = try Tensor(f32).alloc(self.allocator, &.{ N, p.dt_rank });
         defer gate.deinit();
-        try self.matmul_engine.linearProjection(f32, Xf32, self.w_alpha, &gate);
+        try self.matmul_engine.linearProjection(f32, x, self.w_alpha, &gate);
         for (0..p.dt_rank) |h| {
             for (0..N) |t| {
                 const v = gate.data[t * p.dt_rank + h] + self.dt_bias.data[h];
@@ -329,14 +310,10 @@ pub const SsmLayer = struct {
         }
 
         // 8. out = ssm_out @ attn_out → [N, n_embd]
-        var attn16 = try Tensor(f16).alloc(self.allocator, &.{ N, p.d_inner });
-        defer attn16.deinit();
-        for (attn_out.data, attn16.data) |s, *d| d.* = @floatCast(s);
-
-        self.w_out.dequantToF16Transposed(self.scratch_out);
+        self.w_out.dequantToF32Transposed(self.scratch_out);
         var w_out_shape = [_]usize{ p.n_embd, p.d_inner };
         var w_out_strides = [_]usize{ p.d_inner, 1 };
-        const w_out16 = Tensor(f16){
+        const w_out32 = Tensor(f32){
             .data = self.scratch_out,
             .shape = &w_out_shape,
             .strides = &w_out_strides,
@@ -344,10 +321,7 @@ pub const SsmLayer = struct {
             .allocator = null,
             .owns_data = false,
         };
-        var out16 = try Tensor(f16).alloc(self.allocator, &.{ N, p.n_embd });
-        defer out16.deinit();
-        try self.matmul_engine.linearProjection(f16, attn16, w_out16, &out16);
-        for (out16.data, out.data) |s, *d| d.* = s;
+        try self.matmul_engine.linearProjection(f32, attn_out, w_out32, out);
     }
 
     /// L2-normaliza cada head de Q y K en conv_out (fiel a ggml_l2_norm).
@@ -698,13 +672,13 @@ test "ssm forward single token hand-computed" {
     defer fixture.deinit();
     var layer = &fixture.layer;
 
-    var x = try Tensor(f16).alloc(allocator, &.{ 1, 1, test_dims.n_embd });
+    var x = try Tensor(f32).alloc(allocator, &.{ 1, test_dims.n_embd });
     defer x.deinit();
     x.data[0] = 1.0;
     x.data[1] = 1.0;
     x.data[2] = 1.0;
 
-    var out = try Tensor(f16).alloc(allocator, &.{ 1, 1, test_dims.n_embd });
+    var out = try Tensor(f32).alloc(allocator, &.{ 1, test_dims.n_embd });
     defer out.deinit();
 
     try layer.forward(x, &out, 1);
@@ -729,10 +703,10 @@ test "ssm recurrence state persists across tokens" {
     for (layer.s_state) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
 
     // Tras un token, el estado recurrente se ha escrito
-    var x = try Tensor(f16).alloc(allocator, &.{ 1, 1, test_dims.n_embd });
+    var x = try Tensor(f32).alloc(allocator, &.{ 1, test_dims.n_embd });
     defer x.deinit();
     for (0..3) |d| x.data[d] = @floatCast(t1[d]);
-    var out = try Tensor(f16).alloc(allocator, &.{ 1, 1, test_dims.n_embd });
+    var out = try Tensor(f32).alloc(allocator, &.{ 1, test_dims.n_embd });
     defer out.deinit();
     try layer.forward(x, &out, 1);
     var any_nonzero = false;
@@ -743,14 +717,14 @@ test "ssm recurrence state persists across tokens" {
 
     // Determinismo: procesar el mismo token dos veces (con reset) es idéntico
     layer.resetState();
-    var x2 = try Tensor(f16).alloc(allocator, &.{ 1, 1, test_dims.n_embd });
+    var x2 = try Tensor(f32).alloc(allocator, &.{ 1, test_dims.n_embd });
     defer x2.deinit();
     for (0..3) |d| x2.data[d] = @floatCast(t2[d]);
-    var out2 = try Tensor(f16).alloc(allocator, &.{ 1, 1, test_dims.n_embd });
+    var out2 = try Tensor(f32).alloc(allocator, &.{ 1, test_dims.n_embd });
     defer out2.deinit();
     try layer.forward(x2, &out2, 1);
     layer.resetState();
-    var out3 = try Tensor(f16).alloc(allocator, &.{ 1, 1, test_dims.n_embd });
+    var out3 = try Tensor(f32).alloc(allocator, &.{ 1, test_dims.n_embd });
     defer out3.deinit();
     try layer.forward(x2, &out3, 1);
     try std.testing.expect(approx(@floatCast(out3.data[0]), @floatCast(out2.data[0]), 1e-6));
@@ -763,12 +737,12 @@ test "ssm forward matches brute-force reference" {
     var layer = &fixture.layer;
 
     const N: usize = 3;
-    var x = try Tensor(f16).alloc(allocator, &.{ 1, N, test_dims.n_embd });
+    var x = try Tensor(f32).alloc(allocator, &.{ N, test_dims.n_embd });
     defer x.deinit();
     const x_vals = [_]f32{ 0.3, -0.8, 1.1, 2.0, 0.5, -1.3, -0.4, 0.9, 1.7 };
     for (0..N * test_dims.n_embd) |i| x.data[i] = @floatCast(x_vals[i]);
 
-    var out = try Tensor(f16).alloc(allocator, &.{ 1, N, test_dims.n_embd });
+    var out = try Tensor(f32).alloc(allocator, &.{ N, test_dims.n_embd });
     defer out.deinit();
     try layer.forward(x, &out, N);
 
@@ -809,7 +783,7 @@ test "ssm forward matches brute-force reference" {
         for (0..p.dt_rank) |j| {
             var acc: f32 = 0;
             for (0..p.n_embd) |i| acc += @as(f32, @floatCast(x.data[t * p.n_embd + i])) * layer.w_alpha.data[j * p.n_embd + i];
-            g_saved[t][j] = -@exp(layer.ssm_a.data[j]) * @log(1.0 + @exp(acc + layer.dt_bias.data[j]));
+            g_saved[t][j] = layer.ssm_a.data[j] * @log(1.0 + @exp(acc + layer.dt_bias.data[j]));
         }
     }
 
@@ -890,7 +864,8 @@ test "ssm forward matches brute-force reference" {
             ref_out[j] = acc;
         }
         for (0..p.n_embd) |d| {
-            try std.testing.expect(approx(@floatCast(out.data[t * p.n_embd + d]), ref_out[d], 2e-2));
+            const got = out.data[t * p.n_embd + d];
+            try std.testing.expect(approx(got, ref_out[d], 2e-2));
         }
     }
 }

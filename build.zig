@@ -279,6 +279,21 @@ pub fn build(b: *std.Build) void {
     });
     gguf_tokenizer_mod.addImport("gguf", gguf_mod);
 
+    // === Módulo unicode_data (tablas generadas) ===
+    const unicode_data_mod = b.createModule(.{
+        .root_source_file = b.path("src/tokenizer/unicode_data.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // === Módulo unicode (clasificación/pre-tokenización) ===
+    const unicode_mod = b.createModule(.{
+        .root_source_file = b.path("src/tokenizer/unicode.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    unicode_mod.addImport("unicode_data", unicode_data_mod);
+
     // === Módulo tokenizer ===
     const tokenizer_mod = b.createModule(.{
         .root_source_file = b.path("src/tokenizer/bpe.zig"),
@@ -286,6 +301,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     tokenizer_mod.addImport("gguf_tokenizer", gguf_tokenizer_mod);
+    tokenizer_mod.addImport("unicode", unicode_mod);
 
     // === Módulo paged_attention ===
     const paged_attention_mod = b.createModule(.{
@@ -443,6 +459,8 @@ pub fn build(b: *std.Build) void {
         tmod.addImport("quant_weight", quant_weight_mod);
         tmod.addImport("model_config", model_config_mod);
         tmod.addImport("gguf_tokenizer", gguf_tokenizer_mod);
+        tmod.addImport("unicode", unicode_mod);
+        tmod.addImport("unicode_data", unicode_data_mod);
         tmod.addImport("gguf_model", gguf_model_mod);
         tmod.addImport("gguf_dequant", gguf_dequant_mod);
         tmod.addImport("pipeline", pipeline_mod);

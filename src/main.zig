@@ -271,11 +271,9 @@ fn runInference(
     defer allocator.free(result.tokens);
 
     try stdout.print("\n[+] Generación ({d} tokens, {d:.1} tok/s):\n", .{ result.num_tokens_generated, result.tokens_per_second });
-    for (result.tokens) |t| {
-        if (tok.vocab_inv.get(t)) |s| try stdout.print("{s}", .{s})
-        else try stdout.print("[{}]", .{t});
-    }
-    try stdout.print("\n", .{});
+    const decoded = try tok.decode(result.tokens, allocator);
+    defer allocator.free(decoded);
+    try stdout.print("{s}\n", .{decoded});
     try stdout.print("\n=================================================\n", .{});
     try stdout.print("              Ejecucion completada               \n", .{});
     try stdout.print("=================================================\n", .{});
@@ -341,12 +339,12 @@ fn runHybridInference(
     const hidden_2d = try hidden.reshape(&[_]usize{ seq_len, n_embd });
     defer { if (hidden_2d.allocator) |a| { a.free(hidden_2d.shape); a.free(hidden_2d.strides); } }
 
-    var buf_a = try Tensor(f16).alloc(allocator, &.{ seq_len, n_embd });
+    var buf_a = try Tensor(f32).alloc(allocator, &.{ seq_len, n_embd });
     defer buf_a.deinit();
-    var buf_b = try Tensor(f16).alloc(allocator, &.{ seq_len, n_embd });
+    var buf_b = try Tensor(f32).alloc(allocator, &.{ seq_len, n_embd });
     defer buf_b.deinit();
-    // La primera capa recibe el embedding del prompt
-    @memcpy(buf_a.data, hidden_2d.data);
+    // La primera capa recibe el embedding del prompt (f16 → f32)
+    for (buf_a.data, hidden_2d.data) |*d, s| d.* = @as(f32, @floatCast(s));
 
     var cur = &buf_a;
     var nxt = &buf_b;
@@ -361,7 +359,7 @@ fn runHybridInference(
     // LM head sobre el último token del prefill (con output_norm final)
     var last_shape = [_]usize{ 1, n_embd };
     var last_strides = [_]usize{ n_embd, 1 };
-    const last_2d = Tensor(f16){
+    const last_2d = Tensor(f32){
         .data = cur.data[(seq_len - 1) * n_embd ..][0..n_embd],
         .shape = &last_shape,
         .strides = &last_strides,
@@ -370,17 +368,25 @@ fn runHybridInference(
         .owns_data = false,
     };
 
-    var normed = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
+    var normed = try Tensor(f32).alloc(allocator, &.{ 1, n_embd });
     defer normed.deinit();
-    norm.rmsNorm(f16, f32, last_2d, out_norm, rms_eps, &normed);
+    norm.rmsNorm(f32, f32, last_2d, out_norm, rms_eps, &normed);
+
+    var normed16 = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
+    defer normed16.deinit();
+    for (normed.data, normed16.data) |s, *d| d.* = @floatCast(s);
 
     var logits = try Tensor(f16).alloc(allocator, &.{ 1, vocab });
     defer logits.deinit();
-    try embedding.lmHeadForward(&engine, normed, lm_head, &logits);
+    try embedding.lmHeadForward(&engine, normed16, lm_head, &logits);
 
     var logits_f32 = try allocator.alloc(f32, vocab);
     defer allocator.free(logits_f32);
     for (logits.data, 0..) |v, i| logits_f32[i] = @as(f32, @floatCast(v));
+
+    if (std.c.getenv("DUMP_LOGITS") != null) {
+        for (logits_f32, 0..) |v, i| std.debug.print("LG {d} {d}\n", .{ i, v });
+    }
 
     var gen_tokens: std.ArrayList(u32) = .empty;
     defer gen_tokens.deinit(allocator);
@@ -397,12 +403,12 @@ fn runHybridInference(
         const h2d = try h1.reshape(&[_]usize{ 1, n_embd });
         defer { if (h2d.allocator) |a| { a.free(h2d.shape); a.free(h2d.strides); } }
 
-        var ca = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
+        var ca = try Tensor(f32).alloc(allocator, &.{ 1, n_embd });
         defer ca.deinit();
-        var cb = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
+        var cb = try Tensor(f32).alloc(allocator, &.{ 1, n_embd });
         defer cb.deinit();
-        // La primera capa recibe el embedding del token actual
-        @memcpy(ca.data, h2d.data);
+        // La primera capa recibe el embedding del token actual (f16 → f32)
+        for (ca.data, h2d.data) |*d, s| d.* = @as(f32, @floatCast(s));
         var cur2 = &ca;
         var nxt2 = &cb;
         for (layers) |*layer| {
@@ -412,15 +418,22 @@ fn runHybridInference(
             nxt2 = t2;
         }
 
-        var normed2 = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
+        var normed2 = try Tensor(f32).alloc(allocator, &.{ 1, n_embd });
         defer normed2.deinit();
-        norm.rmsNorm(f16, f32, cur2.*, out_norm, rms_eps, &normed2);
+        norm.rmsNorm(f32, f32, cur2.*, out_norm, rms_eps, &normed2);
+
+        var normed2_16 = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
+        defer normed2_16.deinit();
+        for (normed2.data, normed2_16.data) |s, *d| d.* = @floatCast(s);
 
         var logits2 = try Tensor(f16).alloc(allocator, &.{ 1, vocab });
         defer logits2.deinit();
-        try embedding.lmHeadForward(&engine, normed2, lm_head, &logits2);
+        try embedding.lmHeadForward(&engine, normed2_16, lm_head, &logits2);
 
         for (logits2.data, 0..) |v, i| logits_f32[i] = @as(f32, @floatCast(v));
+        if (std.c.getenv("DUMP_LOGITS") != null) {
+            for (logits_f32, 0..) |v, i| std.debug.print("LG {d} {d}\n", .{ i, v });
+        }
         const next_token = params.sampler.sample(logits_f32, &rng, gen_tokens.items);
         try gen_tokens.append(allocator, next_token);
         current_pos += 1;
@@ -429,11 +442,9 @@ fn runHybridInference(
     }
 
     try stdout.print("\n[+] Generación ({d} tokens):\n", .{ gen_tokens.items.len });
-    for (gen_tokens.items) |tk| {
-        if (tok.vocab_inv.get(tk)) |s| try stdout.print("{s}", .{s})
-        else try stdout.print("[{}]", .{tk});
-    }
-    try stdout.print("\n", .{});
+    const decoded = try tok.decode(gen_tokens.items, allocator);
+    defer allocator.free(decoded);
+    try stdout.print("{s}\n", .{decoded});
     try stdout.print("\n=================================================\n", .{});
     try stdout.print("              Ejecucion completada               \n", .{});
     try stdout.print("=================================================\n", .{});

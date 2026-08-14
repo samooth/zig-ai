@@ -282,10 +282,14 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     const embedding_mod = @import("embedding");
     embedding_mod.embeddingLookup(emb, tokens, 1, 6, &hidden3d);
 
-    const hidden = try hidden3d.reshape(&[_]usize{ 6, cfg.embedding_length });
-    defer { if (hidden.allocator) |a| { a.free(hidden.shape); a.free(hidden.strides); } }
+    const hidden16 = try hidden3d.reshape(&[_]usize{ 6, cfg.embedding_length });
+    defer { if (hidden16.allocator) |a| { a.free(hidden16.shape); a.free(hidden16.strides); } }
 
-    var output = try Tensor(f16).alloc(gpa, hidden.shape);
+    var hidden = try Tensor(f32).alloc(gpa, &.{ 6, cfg.embedding_length });
+    defer hidden.deinit();
+    for (hidden.data, hidden16.data) |*d, s| d.* = @as(f32, @floatCast(s));
+
+    var output = try Tensor(f32).alloc(gpa, hidden.shape);
     defer output.deinit();
 
     try layer.forward(hidden, &output, 0, 6);

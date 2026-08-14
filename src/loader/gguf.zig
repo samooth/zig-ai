@@ -675,7 +675,9 @@ pub fn dequantQ8_0(bytes: []const u8, out: []f32) void {
     }
 }
 
-/// Q4_0: bloques de 32. Cada bloque: f16 d, uint8 qs[16] (nibbles, low first).
+/// Q4_0: bloques de 32. Cada bloque: f16 d, uint8 qs[16].
+/// Layout "split" (fiel a ggml): elemento j (0..15) = nibble bajo de qs[j],
+/// elemento j+16 (16..31) = nibble alto de qs[j].
 /// val = d * (nibble - 8)
 pub fn dequantQ4_0(bytes: []const u8, out: []f32) void {
     const block = 32;
@@ -686,15 +688,19 @@ pub fn dequantQ4_0(bytes: []const u8, out: []f32) void {
         const d: f32 = @floatCast(@as(f16, @bitCast(d_bits)));
         const qs = bytes[(i / block) * block_bytes + 2 ..];
         const n = @min(block, out.len - i);
-        for (0..n) |j| {
-            const q = if (j % 2 == 0) qs[j / 2] & 0x0F else qs[j / 2] >> 4;
-            out[i + j] = d * @as(f32, @floatFromInt(@as(i8, @intCast(q)) - 8));
+        const half = @min(block / 2, n);
+        for (0..half) |j| {
+            const lo = @as(i8, @intCast(qs[j] & 0x0F)) - 8;
+            const hi = @as(i8, @intCast(qs[j] >> 4)) - 8;
+            out[i + j] = d * @as(f32, @floatFromInt(lo));
+            if (j + 16 < n) out[i + j + 16] = d * @as(f32, @floatFromInt(hi));
         }
     }
 }
 
 /// Q4_1: bloques de 32. Cada bloque (20 bytes):
 ///   d f16 (offset 0), m f16 (offset 2), qs[16] (offset 4, nibbles).
+///   Layout "split": elemento j (0..15) = nibble bajo de qs[j], j+16 = alto.
 ///   val = d*q + m   (ref: ggml dequantize_row_q4_1)
 pub fn dequantQ4_1(bytes: []const u8, out: []f32) void {
     const block = 32;
@@ -706,9 +712,12 @@ pub fn dequantQ4_1(bytes: []const u8, out: []f32) void {
         const m: f32 = @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, bytes[base + 2 ..][0..2], .little))));
         const qs = bytes[base + 4 ..];
         const n = @min(block, out.len - i);
-        for (0..n) |j| {
-            const q = if (j % 2 == 0) qs[j / 2] & 0x0F else qs[j / 2] >> 4;
-            out[i + j] = d * @as(f32, @floatFromInt(q)) + m;
+        const half = @min(block / 2, n);
+        for (0..half) |j| {
+            const lo: i32 = @intCast(qs[j] & 0x0F);
+            const hi: i32 = @intCast(qs[j] >> 4);
+            out[i + j] = d * @as(f32, @floatFromInt(lo)) + m;
+            if (j + 16 < n) out[i + j + 16] = d * @as(f32, @floatFromInt(hi)) + m;
         }
     }
 }
@@ -1181,7 +1190,32 @@ test "gguf dequant q8_0" {
     try std.testing.expectApproxEqRel(@as(f32, -0.5), out[3], 1e-3);
 }
 
-test "gguf dequant q4_k" {
+ test "gguf dequant q4_0 split layout" {
+     const allocator = std.testing.allocator;
+     var bytes = try allocator.alloc(u8, 18);
+     defer allocator.free(bytes);
+
+     // d = 2.0 (f16). Layout "split": elemento j (0..15) = nibble bajo de
+     // qs[j], elemento j+16 = nibble alto de qs[j]. val = d*(nibble-8).
+     std.mem.writeInt(u16, bytes[0..2], @bitCast(@as(f16, 2.0)), .little);
+     bytes[2] = 0x21; // low=1 (el 0), high=2 (el 16)
+     bytes[3] = 0x43; // low=3 (el 1), high=4 (el 17)
+     bytes[4] = 0xF8; // low=8 (el 2), high=15 (el 18)
+
+     var out: [32]f32 = undefined;
+     dequantQ4_0(bytes, &out);
+
+     try std.testing.expectApproxEqRel(@as(f32, 2.0 * (1 - 8)), out[0], 1e-3);
+     try std.testing.expectApproxEqRel(@as(f32, 2.0 * (3 - 8)), out[1], 1e-3);
+     try std.testing.expectApproxEqRel(@as(f32, 2.0 * (8 - 8)), out[2], 1e-3);
+     try std.testing.expectApproxEqRel(@as(f32, 2.0 * (2 - 8)), out[16], 1e-3);
+     try std.testing.expectApproxEqRel(@as(f32, 2.0 * (4 - 8)), out[17], 1e-3);
+     try std.testing.expectApproxEqRel(@as(f32, 2.0 * (15 - 8)), out[18], 1e-3);
+     // interleaved (incorrecto) pondría el nibble alto de qs[0] en out[1]
+     try std.testing.expect(out[1] != out[16]);
+ }
+
+ test "gguf dequant q4_k" {
     const allocator = std.testing.allocator;
     // d=1.0, dmin=0.0, escalas todas 1 (d-scale), nibbles todos 15
     var block = try allocator.alloc(u8, 144);

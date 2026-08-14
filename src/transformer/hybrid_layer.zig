@@ -84,9 +84,9 @@ pub const HybridLayer = struct {
     w_down: QuantWeight,
 
     // Scratch f16 para FFN
-    scratch_gate: []f16,
-    scratch_up: []f16,
-    scratch_down: []f16,
+    scratch_gate: []f32,
+    scratch_up: []f32,
+    scratch_down: []f32,
 
     // Sub-layer específica
     attn_layer: ?AttentionLayer = null,
@@ -104,11 +104,11 @@ pub const HybridLayer = struct {
         var engine = try matmul.MatmulEngine.init(allocator, backend, .f32);
         errdefer engine.deinit();
 
-        const scratch_gate = try allocator.alloc(f16, params.intermediate_dim * params.n_embd);
+        const scratch_gate = try allocator.alloc(f32, params.intermediate_dim * params.n_embd);
         errdefer allocator.free(scratch_gate);
-        const scratch_up = try allocator.alloc(f16, params.intermediate_dim * params.n_embd);
+        const scratch_up = try allocator.alloc(f32, params.intermediate_dim * params.n_embd);
         errdefer allocator.free(scratch_up);
-        const scratch_down = try allocator.alloc(f16, params.n_embd * params.intermediate_dim);
+        const scratch_down = try allocator.alloc(f32, params.n_embd * params.intermediate_dim);
         errdefer allocator.free(scratch_down);
 
         var attn_norm = try Tensor(f32).alloc(allocator, &.{params.n_embd});
@@ -206,30 +206,17 @@ pub const HybridLayer = struct {
 
     /// Forward del bloque híbrido:
     /// x → attn_norm → (SSM | Attention) → +residual → attn_post_norm → FFN → +residual → out
-    pub fn forward(self: *Self, x: Tensor(f16), out: *Tensor(f16), start_pos: usize, n: usize) !void {
+    pub fn forward(self: *Self, x: Tensor(f32), out: *Tensor(f32), start_pos: usize, n: usize) !void {
         const p = self.params;
         const N = n;
 
-        // X en f16 y f32
-        var Xf16 = try Tensor(f16).alloc(self.allocator, &.{ N, p.n_embd });
-        defer Xf16.deinit();
-        var Xf32 = try Tensor(f32).alloc(self.allocator, &.{ N, p.n_embd });
-        defer Xf32.deinit();
-        for (0..N) |t| {
-            for (0..p.n_embd) |d| {
-                const v = x.data[t * p.n_embd + d];
-                Xf16.data[t * p.n_embd + d] = v;
-                Xf32.data[t * p.n_embd + d] = @floatCast(v);
-            }
-        }
-
         // === 1. Pre-Attention/SSM RMSNorm ===
-        var norm_buf = try Tensor(f16).alloc(self.allocator, &.{ N, p.n_embd });
+        var norm_buf = try Tensor(f32).alloc(self.allocator, &.{ N, p.n_embd });
         defer norm_buf.deinit();
-        norm.rmsNorm(f16, f32, Xf16, self.attn_norm, p.rms_eps, &norm_buf);
+        norm.rmsNorm(f32, f32, x, self.attn_norm, p.rms_eps, &norm_buf);
 
         // === 2. SSM o Attention ===
-        var mixer_out = try Tensor(f16).alloc(self.allocator, &.{ N, p.n_embd });
+        var mixer_out = try Tensor(f32).alloc(self.allocator, &.{ N, p.n_embd });
         defer mixer_out.deinit();
 
         if (self.is_attention) {
@@ -244,20 +231,19 @@ pub const HybridLayer = struct {
 
         // === 3. Residual connection (Mixer) ===
         for (out.data, mixer_out.data, x.data) |*o, m, xv| {
-            const val = @as(f32, @floatCast(m)) + @as(f32, @floatCast(xv));
-            o.* = @floatCast(val);
+            o.* = m + xv;
         }
 
         // === 4. Post-Attention/SSM RMSNorm ===
-        var post_norm_buf = try Tensor(f16).alloc(self.allocator, &.{ N, p.n_embd });
+        var post_norm_buf = try Tensor(f32).alloc(self.allocator, &.{ N, p.n_embd });
         defer post_norm_buf.deinit();
-        norm.rmsNorm(f16, f32, out.*, self.attn_post_norm, p.rms_eps, &post_norm_buf);
+        norm.rmsNorm(f32, f32, out.*, self.attn_post_norm, p.rms_eps, &post_norm_buf);
 
         // === 5. FFN SwiGLU ===
-        self.w_gate.dequantToF16Transposed(self.scratch_gate);
+        self.w_gate.dequantToF32Transposed(self.scratch_gate);
         var w_gate_shape = [_]usize{ p.intermediate_dim, p.n_embd };
         var w_gate_strides = [_]usize{ p.n_embd, 1 };
-        const w_gate16 = Tensor(f16){
+        const w_gate32 = Tensor(f32){
             .data = self.scratch_gate,
             .shape = &w_gate_shape,
             .strides = &w_gate_strides,
@@ -266,10 +252,10 @@ pub const HybridLayer = struct {
             .owns_data = false,
         };
 
-        self.w_up.dequantToF16Transposed(self.scratch_up);
+        self.w_up.dequantToF32Transposed(self.scratch_up);
         var w_up_shape = [_]usize{ p.intermediate_dim, p.n_embd };
         var w_up_strides = [_]usize{ p.n_embd, 1 };
-        const w_up16 = Tensor(f16){
+        const w_up32 = Tensor(f32){
             .data = self.scratch_up,
             .shape = &w_up_shape,
             .strides = &w_up_strides,
@@ -278,10 +264,10 @@ pub const HybridLayer = struct {
             .owns_data = false,
         };
 
-        self.w_down.dequantToF16Transposed(self.scratch_down);
+        self.w_down.dequantToF32Transposed(self.scratch_down);
         var w_down_shape = [_]usize{ p.n_embd, p.intermediate_dim };
         var w_down_strides = [_]usize{ p.intermediate_dim, 1 };
-        const w_down16 = Tensor(f16){
+        const w_down32 = Tensor(f32){
             .data = self.scratch_down,
             .shape = &w_down_shape,
             .strides = &w_down_strides,
@@ -290,27 +276,26 @@ pub const HybridLayer = struct {
             .owns_data = false,
         };
 
-        var gate_buf = try Tensor(f16).alloc(self.allocator, &.{ N, p.intermediate_dim });
+        var gate_buf = try Tensor(f32).alloc(self.allocator, &.{ N, p.intermediate_dim });
         defer gate_buf.deinit();
-        var up_buf = try Tensor(f16).alloc(self.allocator, &.{ N, p.intermediate_dim });
+        var up_buf = try Tensor(f32).alloc(self.allocator, &.{ N, p.intermediate_dim });
         defer up_buf.deinit();
-        var ffn_out = try Tensor(f16).alloc(self.allocator, &.{ N, p.n_embd });
+        var ffn_out = try Tensor(f32).alloc(self.allocator, &.{ N, p.n_embd });
         defer ffn_out.deinit();
 
         const post_norm_2d = try post_norm_buf.reshape(&[_]usize{ N, p.n_embd });
         defer { if (post_norm_2d.allocator) |a| { a.free(post_norm_2d.shape); a.free(post_norm_2d.strides); } }
 
         try ffn.swiGluForward(
-            &self.matmul_engine, f16,
+            &self.matmul_engine, f32,
             post_norm_2d,
-            w_gate16, w_up16, w_down16,
+            w_gate32, w_up32, w_down32,
             &gate_buf, &up_buf, &ffn_out,
         );
 
         // === 6. Residual connection (FFN) ===
         for (out.data, ffn_out.data) |*o, f| {
-            const val = @as(f32, @floatCast(o.*)) + @as(f32, @floatCast(f));
-            o.* = @floatCast(val);
+            o.* += f;
         }
     }
 };

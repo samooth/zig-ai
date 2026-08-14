@@ -84,6 +84,35 @@ pub const QuantWeight = struct {
         }
     }
 
+    /// Dequantiza un peso 2D [in, out] (layout GGUF) a f32 TRANSPUESTO
+    /// [out, in] en `out` (equivalente a dequantToF16Transposed pero f32).
+    pub fn dequantToF32Transposed(self: *const Self, out: []f32) void {
+        const info = self.info;
+        if (info.n_dims != 2) {
+            self.dequantToF32(out);
+            return;
+        }
+        const d0: usize = @intCast(info.dims[0]);
+        const bs = info.dtype.blockSize();
+        const bb = info.dtype.blockBytes();
+        const num_blocks = (info.numel() + bs - 1) / bs;
+        var tmp: [256]f32 = undefined;
+        var src: usize = 0;
+        var dst: usize = 0;
+        for (0..num_blocks) |_| {
+            const n = @min(bs, info.numel() - dst);
+            gguf.dequantBlock(info.dtype, self.bytes[src .. src + bb], &tmp, n);
+            for (0..n) |j| {
+                const s = dst + j;
+                const r = s % d0;
+                const c = s / d0;
+                out[c * d0 + r] = tmp[j];
+            }
+            src += bb;
+            dst += n;
+        }
+    }
+
     /// Dequantiza el peso completo a f32 en `out` (numel() elementos).
     pub fn dequantToF32(self: *const Self, out: []f32) void {
         const info = self.info;
