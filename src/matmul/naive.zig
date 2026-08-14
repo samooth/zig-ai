@@ -30,15 +30,20 @@ pub fn gemmNaive(
         while (it.next()) |p| p.* *= beta;
     }
 
+    // Acumular en f32 para T=f16 (evita pérdida de precisión en K grande);
+    // f64 acumula en f64.
+    const AccT: type = if (T == f64) f64 else f32;
+
     for (0..M) |i| {
         for (0..N) |j| {
-            var sum: T = 0;
+            var sum: AccT = 0;
             for (0..K) |k| {
                 const a_val = if (trans_a) A.at2(k, i) else A.at2(i, k);
                 const b_val = if (trans_b) B.at2(j, k) else B.at2(k, j);
-                sum += a_val * b_val;
+                sum += @as(AccT, @floatCast(a_val)) * @as(AccT, @floatCast(b_val));
             }
-            C.ptr2(i, j).* += alpha * sum;
+            const acc: T = @floatCast(sum);
+            C.ptr2(i, j).* += alpha * acc;
         }
     }
 }

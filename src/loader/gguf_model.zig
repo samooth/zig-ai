@@ -53,8 +53,10 @@ pub const GgufModel = struct {
     }
 
     /// output_norm.weight -> Tensor(f32) [hidden] (gamma de RMSNorm final).
+    /// Si no existe, usa token_embd_norm.weight (naming alternativo).
     pub fn loadOutputNorm(self: *const Self) !Tensor(f32) {
-        const info = try self.findTensor("output_norm.weight", null);
+        const info = self.findTensor("output_norm.weight", null) catch
+            (self.findTensor("token_embd_norm.weight", null) catch return GgufModelError.MissingTensor);
         const numel: usize = @intCast(info.numel());
         const f32buf = try self.allocator.alloc(f32, numel);
         defer self.allocator.free(f32buf);

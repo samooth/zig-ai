@@ -52,6 +52,38 @@ pub const QuantWeight = struct {
         }
     }
 
+    /// Dequantiza un peso 2D [in, out] (layout GGUF) escribiéndolo TRANSPUESTO
+    /// [out, in] en `out`, que es la orientación que esperan los tensores de
+    /// las capas ([out, in] con trans_b=true en linearProjection).
+    /// Para tensores no-2D se comporta igual que dequantToF16.
+    pub fn dequantToF16Transposed(self: *const Self, out: []f16) void {
+        const info = self.info;
+        if (info.n_dims != 2) {
+            self.dequantToF16(out);
+            return;
+        }
+        const d0: usize = @intCast(info.dims[0]);
+        const d1: usize = @intCast(info.dims[1]);
+        const bs = info.dtype.blockSize();
+        const bb = info.dtype.blockBytes();
+        const num_blocks = (info.numel() + bs - 1) / bs;
+        var tmp: [256]f32 = undefined;
+        var src: usize = 0;
+        var dst: usize = 0;
+        for (0..num_blocks) |_| {
+            const n = @min(bs, info.numel() - dst);
+            gguf.dequantBlock(info.dtype, self.bytes[src .. src + bb], &tmp, n);
+            for (0..n) |j| {
+                const s = dst + j;
+                const r = s / d1;
+                const c = s % d1;
+                out[c * d0 + r] = @floatCast(tmp[j]);
+            }
+            src += bb;
+            dst += n;
+        }
+    }
+
     /// Dequantiza el peso completo a f32 en `out` (numel() elementos).
     pub fn dequantToF32(self: *const Self, out: []f32) void {
         const info = self.info;

@@ -103,14 +103,15 @@ fn workerFn(comptime T: type) type {
                     }
                 }
             } else {
-                // Fallback naive por fila
+                // Fallback naive por fila (acumular en f32 para f16)
+                const AccT: type = if (T == f64) f64 else f32;
                 for (row_start..row_end) |i| {
                     for (0..N) |j| {
-                        var sum: T = 0;
+                        var sum: AccT = 0;
                         for (0..K) |k| {
-                            sum += A.at2(i, k) * B.at2(j, k);
+                            sum += @as(AccT, @floatCast(A.at2(i, k))) * @as(AccT, @floatCast(B.at2(j, k)));
                         }
-                        C.ptr2(i, j).* = sum;
+                        C.ptr2(i, j).* = @floatCast(sum);
                     }
                 }
             }

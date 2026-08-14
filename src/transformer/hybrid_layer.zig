@@ -254,7 +254,7 @@ pub const HybridLayer = struct {
         norm.rmsNorm(f16, f32, out.*, self.attn_post_norm, p.rms_eps, &post_norm_buf);
 
         // === 5. FFN SwiGLU ===
-        self.w_gate.dequantToF16(self.scratch_gate);
+        self.w_gate.dequantToF16Transposed(self.scratch_gate);
         var w_gate_shape = [_]usize{ p.intermediate_dim, p.n_embd };
         var w_gate_strides = [_]usize{ p.n_embd, 1 };
         const w_gate16 = Tensor(f16){
@@ -266,7 +266,7 @@ pub const HybridLayer = struct {
             .owns_data = false,
         };
 
-        self.w_up.dequantToF16(self.scratch_up);
+        self.w_up.dequantToF16Transposed(self.scratch_up);
         var w_up_shape = [_]usize{ p.intermediate_dim, p.n_embd };
         var w_up_strides = [_]usize{ p.n_embd, 1 };
         const w_up16 = Tensor(f16){
@@ -278,7 +278,7 @@ pub const HybridLayer = struct {
             .owns_data = false,
         };
 
-        self.w_down.dequantToF16(self.scratch_down);
+        self.w_down.dequantToF16Transposed(self.scratch_down);
         var w_down_shape = [_]usize{ p.n_embd, p.intermediate_dim };
         var w_down_strides = [_]usize{ p.intermediate_dim, 1 };
         const w_down16 = Tensor(f16){
@@ -341,12 +341,18 @@ fn loadGgufF32(
     var in_dim: usize = 1;
     var tensor: Tensor(f32) = undefined;
     if (info.n_dims >= 2) {
+        // GGUF guarda [in, out]; la capa espera [out, in] → transponer.
         in_dim = @intCast(info.dims[0]);
         out_dim = @intCast(info.dims[1]);
         tensor = try Tensor(f32).initUninitialized(allocator, &.{ out_dim, in_dim });
+        for (0..in_dim) |r| {
+            for (0..out_dim) |c| {
+                tensor.data[c * in_dim + r] = f32buf[r * out_dim + c];
+            }
+        }
     } else {
         tensor = try Tensor(f32).initUninitialized(allocator, &.{numel});
+        @memcpy(tensor.data, f32buf);
     }
-    @memcpy(tensor.data, f32buf);
     return tensor;
 }

@@ -176,7 +176,7 @@ pub const AttentionLayer = struct {
         }
 
         // === 2. Proyección Q+G fusionada (w_q: [8192, 4096]) ===
-        self.w_q.dequantToF16(self.scratch_q);
+        self.w_q.dequantToF16Transposed(self.scratch_q);
         var w_q_shape = [_]usize{ qg_dim, p.n_embd };
         var w_q_strides = [_]usize{ p.n_embd, 1 };
         const w_q16 = Tensor(f16){
@@ -212,7 +212,7 @@ pub const AttentionLayer = struct {
         }
 
         // === 3. Proyecciones K, V ===
-        self.w_k.dequantToF16(self.scratch_k);
+        self.w_k.dequantToF16Transposed(self.scratch_k);
         var w_k_shape = [_]usize{ kv_dim, p.n_embd };
         var w_k_strides = [_]usize{ p.n_embd, 1 };
         const w_k16 = Tensor(f16){
@@ -227,7 +227,7 @@ pub const AttentionLayer = struct {
         defer Kf16.deinit();
         try self.matmul_engine.linearProjection(f16, Xf16, w_k16, &Kf16);
 
-        self.w_v.dequantToF16(self.scratch_v);
+        self.w_v.dequantToF16Transposed(self.scratch_v);
         var w_v_shape = [_]usize{ kv_dim, p.n_embd };
         var w_v_strides = [_]usize{ p.n_embd, 1 };
         const w_v16 = Tensor(f16){
@@ -413,7 +413,7 @@ pub const AttentionLayer = struct {
         defer attn_flat_f16.deinit();
         for (attn_flat.data, attn_flat_f16.data) |s, *d| d.* = @floatCast(s);
 
-        self.w_o.dequantToF16(self.scratch_o);
+        self.w_o.dequantToF16Transposed(self.scratch_o);
         var w_o_shape = [_]usize{ p.n_embd, q_dim };
         var w_o_strides = [_]usize{ q_dim, 1 };
         const w_o16 = Tensor(f16){

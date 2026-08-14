@@ -18,6 +18,7 @@ const gguf_tokenizer = @import("gguf_tokenizer");
 const bpe = @import("tokenizer");
 const embedding = @import("embedding");
 const hybrid_layer = @import("transformer");
+const norm = @import("norm");
 
 /// Parámetros de runtime parseados de la línea de comandos.
 const CliParams = struct {
@@ -298,6 +299,9 @@ fn runHybridInference(
     defer emb.deinit();
     var lm_head = try model.loadLmHead();
     defer lm_head.deinit();
+    var out_norm = try model.loadOutputNorm();
+    defer out_norm.deinit();
+    const rms_eps = cfg.layer_norm_rms_epsilon;
 
     // Capas híbridas: cada una enruta SSM vs atención según isFullAttentionLayer.
     var layers = try allocator.alloc(hybrid_layer.HybridLayer, cfg.block_count);
@@ -341,6 +345,9 @@ fn runHybridInference(
     defer buf_a.deinit();
     var buf_b = try Tensor(f16).alloc(allocator, &.{ seq_len, n_embd });
     defer buf_b.deinit();
+    // La primera capa recibe el embedding del prompt
+    @memcpy(buf_a.data, hidden_2d.data);
+
     var cur = &buf_a;
     var nxt = &buf_b;
 
@@ -351,7 +358,7 @@ fn runHybridInference(
         nxt = t;
     }
 
-    // LM head sobre el último token del prefill
+    // LM head sobre el último token del prefill (con output_norm final)
     var last_shape = [_]usize{ 1, n_embd };
     var last_strides = [_]usize{ n_embd, 1 };
     const last_2d = Tensor(f16){
@@ -363,9 +370,13 @@ fn runHybridInference(
         .owns_data = false,
     };
 
+    var normed = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
+    defer normed.deinit();
+    norm.rmsNorm(f16, f32, last_2d, out_norm, rms_eps, &normed);
+
     var logits = try Tensor(f16).alloc(allocator, &.{ 1, vocab });
     defer logits.deinit();
-    try embedding.lmHeadForward(&engine, last_2d, lm_head, &logits);
+    try embedding.lmHeadForward(&engine, normed, lm_head, &logits);
 
     var logits_f32 = try allocator.alloc(f32, vocab);
     defer allocator.free(logits_f32);
@@ -390,6 +401,8 @@ fn runHybridInference(
         defer ca.deinit();
         var cb = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
         defer cb.deinit();
+        // La primera capa recibe el embedding del token actual
+        @memcpy(ca.data, h2d.data);
         var cur2 = &ca;
         var nxt2 = &cb;
         for (layers) |*layer| {
@@ -399,9 +412,13 @@ fn runHybridInference(
             nxt2 = t2;
         }
 
+        var normed2 = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
+        defer normed2.deinit();
+        norm.rmsNorm(f16, f32, cur2.*, out_norm, rms_eps, &normed2);
+
         var logits2 = try Tensor(f16).alloc(allocator, &.{ 1, vocab });
         defer logits2.deinit();
-        try embedding.lmHeadForward(&engine, cur2.*, lm_head, &logits2);
+        try embedding.lmHeadForward(&engine, normed2, lm_head, &logits2);
 
         for (logits2.data, 0..) |v, i| logits_f32[i] = @as(f32, @floatCast(v));
         const next_token = params.sampler.sample(logits_f32, &rng, gen_tokens.items);

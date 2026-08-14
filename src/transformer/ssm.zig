@@ -175,17 +175,19 @@ pub const SsmLayer = struct {
         self.w_z = try loadQuantWeight(g, prefix, "attn_gate.weight");
         self.w_out = try loadQuantWeight(g, prefix, "ssm_out.weight");
         self.w_beta.deinit();
-        self.w_beta = try loadGgufF32(self.allocator, g, prefix, "ssm_beta.weight");
+        self.w_beta = try loadGgufF32(self.allocator, g, prefix, "ssm_beta.weight", true);
         self.w_alpha.deinit();
-        self.w_alpha = try loadGgufF32(self.allocator, g, prefix, "ssm_alpha.weight");
+        self.w_alpha = try loadGgufF32(self.allocator, g, prefix, "ssm_alpha.weight", true);
         self.dt_bias.deinit();
-        self.dt_bias = try loadGgufF32(self.allocator, g, prefix, "ssm_dt.bias");
+        self.dt_bias = try loadGgufF32(self.allocator, g, prefix, "ssm_dt.bias", false);
         self.ssm_a.deinit();
-        self.ssm_a = try loadGgufF32(self.allocator, g, prefix, "ssm_a");
+        self.ssm_a = try loadGgufF32(self.allocator, g, prefix, "ssm_a", false);
         self.conv1d.deinit();
-        self.conv1d = try loadGgufF32(self.allocator, g, prefix, "ssm_conv1d.weight");
+        // conv1d GGUF es [d_conv, conv_dim]; se indexa channel-major
+        // conv1d.data[c*d_conv+k] → necesita el layout transpuesto.
+        self.conv1d = try loadGgufF32(self.allocator, g, prefix, "ssm_conv1d.weight", true);
         self.ssm_norm.deinit();
-        self.ssm_norm = try loadGgufF32(self.allocator, g, prefix, "ssm_norm.weight");
+        self.ssm_norm = try loadGgufF32(self.allocator, g, prefix, "ssm_norm.weight", false);
     }
 
     /// Forward del bloque SSM (gated delta net).
@@ -215,7 +217,7 @@ pub const SsmLayer = struct {
         }
 
         // 1. qkv = attn_qkv @ X → [N, qkv_dim] (dequant f16 on-the-fly)
-        self.w_qkv.dequantToF16(self.scratch_qkv);
+        self.w_qkv.dequantToF16Transposed(self.scratch_qkv);
         var w_qkv_shape = [_]usize{ qkv_dim, p.n_embd };
         var w_qkv_strides = [_]usize{ p.n_embd, 1 };
         const w_qkv16 = Tensor(f16){
@@ -234,7 +236,7 @@ pub const SsmLayer = struct {
         for (qkv16.data, qkv.data) |s, *d| d.* = @floatCast(s);
 
         // 2. z = attn_gate @ X → [N, value_dim]
-        self.w_z.dequantToF16(self.scratch_z);
+        self.w_z.dequantToF16Transposed(self.scratch_z);
         var w_z_shape = [_]usize{ p.d_inner, p.n_embd };
         var w_z_strides = [_]usize{ p.n_embd, 1 };
         const w_z16 = Tensor(f16){
@@ -331,7 +333,7 @@ pub const SsmLayer = struct {
         defer attn16.deinit();
         for (attn_out.data, attn16.data) |s, *d| d.* = @floatCast(s);
 
-        self.w_out.dequantToF16(self.scratch_out);
+        self.w_out.dequantToF16Transposed(self.scratch_out);
         var w_out_shape = [_]usize{ p.n_embd, p.d_inner };
         var w_out_strides = [_]usize{ p.d_inner, 1 };
         const w_out16 = Tensor(f16){
@@ -449,6 +451,7 @@ fn loadGgufF32(
     g: *const gguf.GgufFile,
     prefix: []const u8,
     name: []const u8,
+    transpose: bool,
 ) !Tensor(f32) {
     const full = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, name });
     defer allocator.free(full);
@@ -459,18 +462,27 @@ fn loadGgufF32(
     defer allocator.free(f32buf);
     try gguf.dequantTensor(info, g.tensorData(info), f32buf);
 
-    // GGUF dims[0] = in (contiguo), dims[1] = out → layout [out, in] row-major
     var out_dim: usize = 1;
     var in_dim: usize = 1;
     var tensor: Tensor(f32) = undefined;
     if (info.n_dims >= 2) {
+        // GGUF guarda [in, out]; las capas lineales esperan [out, in] → transponer.
         in_dim = @intCast(info.dims[0]);
         out_dim = @intCast(info.dims[1]);
         tensor = try Tensor(f32).initUninitialized(allocator, &.{ out_dim, in_dim });
+        if (transpose) {
+            for (0..in_dim) |r| {
+                for (0..out_dim) |c| {
+                    tensor.data[c * in_dim + r] = f32buf[r * out_dim + c];
+                }
+            }
+        } else {
+            @memcpy(tensor.data, f32buf);
+        }
     } else {
         tensor = try Tensor(f32).initUninitialized(allocator, &.{numel});
+        @memcpy(tensor.data, f32buf);
     }
-    @memcpy(tensor.data, f32buf);
     return tensor;
 }
 
@@ -526,6 +538,8 @@ fn makeF32Weight(
     info: *gguf.TensorInfo,
     bytes: *[]u8,
 ) !QuantWeight {
+    // `values` es la matriz [out, in] (W[j][i]). El GGUF la guarda transpuesta
+    // [in, out]; dequantToF16Transposed espera ese layout.
     info.* = gguf.TensorInfo{
         .name = "test",
         .n_dims = 2,
@@ -534,7 +548,12 @@ fn makeF32Weight(
         .offset = 0,
     };
     bytes.* = try allocator.alloc(u8, values.len * 4);
-    @memcpy(bytes.*, std.mem.sliceAsBytes(values));
+    const fbytes = std.mem.bytesAsSlice(f32, bytes.*);
+    for (0..in_dim) |i| {
+        for (0..out_dim) |j| {
+            fbytes[i * out_dim + j] = values[j * in_dim + i];
+        }
+    }
     return QuantWeight.init(info, bytes.*);
 }
 
@@ -772,13 +791,13 @@ test "ssm forward matches brute-force reference" {
     for (0..N) |t| {
         for (0..qkv_dim) |j| {
             var acc: f32 = 0;
-            for (0..p.n_embd) |i| acc += @as(f32, @floatCast(x.data[t * p.n_embd + i])) * qkv_w[j * p.n_embd + i];
+            for (0..p.n_embd) |i| acc += @as(f32, @floatCast(x.data[t * p.n_embd + i])) * qkv_w[i * qkv_dim + j];
             const v = acc;
             conv_saved[t][j] = v / (1.0 + @exp(-v)); // conv kernel=1 + silu
         }
         for (0..p.d_inner) |j| {
             var acc: f32 = 0;
-            for (0..p.n_embd) |i| acc += @as(f32, @floatCast(x.data[t * p.n_embd + i])) * z_w[j * p.n_embd + i];
+            for (0..p.n_embd) |i| acc += @as(f32, @floatCast(x.data[t * p.n_embd + i])) * z_w[i * p.d_inner + j];
             z_saved[t][j] = acc;
         }
         for (0..p.dt_rank) |j| {
@@ -866,7 +885,7 @@ test "ssm forward matches brute-force reference" {
         var ref_out: [test_dims.n_embd]f32 = undefined;
         for (0..p.n_embd) |j| {
             var acc: f32 = 0;
-            for (0..p.d_inner) |i| acc += ref_attn[t][i] * out_w[j * p.d_inner + i];
+            for (0..p.d_inner) |i| acc += ref_attn[t][i] * out_w[i * p.n_embd + j];
             ref_out[j] = acc;
         }
         for (0..p.n_embd) |d| {
