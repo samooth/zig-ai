@@ -260,8 +260,8 @@ pub const SsmLayer = struct {
         try self.matmul_engine.linearProjection(f32, Xf32, self.w_beta, &beta);
         for (beta.data) |*v| v.* = 1.0 / (1.0 + @exp(-v.*));
 
-        // 4. gate = -exp(ssm_a) * softplus(ssm_alpha @ X + dt) → [N, dt_rank]
-        //    (fiel al kernel de FLA: g = -exp(A_log) * softplus(a + dt_bias))
+        // 4. gate = softplus(ssm_alpha @ X + dt) * ssm_a → [N, dt_rank]
+        //    El GGUF guarda ssm_a YA como -exp(A_log); el decay es exp(gate).
         var gate = try Tensor(f32).alloc(self.allocator, &.{ N, p.dt_rank });
         defer gate.deinit();
         try self.matmul_engine.linearProjection(f32, Xf32, self.w_alpha, &gate);
@@ -269,7 +269,7 @@ pub const SsmLayer = struct {
             for (0..N) |t| {
                 const v = gate.data[t * p.dt_rank + h] + self.dt_bias.data[h];
                 const sp = @log(1.0 + @exp(v));
-                gate.data[t * p.dt_rank + h] = -@exp(self.ssm_a.data[h]) * sp;
+                gate.data[t * p.dt_rank + h] = self.ssm_a.data[h] * sp;
             }
         }
 
