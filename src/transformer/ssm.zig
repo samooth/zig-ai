@@ -173,11 +173,17 @@ pub const SsmLayer = struct {
         self.w_qkv = try loadQuantWeight(g, prefix, "attn_qkv.weight");
         self.w_z = try loadQuantWeight(g, prefix, "attn_gate.weight");
         self.w_out = try loadQuantWeight(g, prefix, "ssm_out.weight");
+        self.w_beta.deinit();
         self.w_beta = try loadGgufF32(self.allocator, g, prefix, "ssm_beta.weight");
+        self.w_alpha.deinit();
         self.w_alpha = try loadGgufF32(self.allocator, g, prefix, "ssm_alpha.weight");
+        self.dt_bias.deinit();
         self.dt_bias = try loadGgufF32(self.allocator, g, prefix, "ssm_dt.bias");
+        self.ssm_a.deinit();
         self.ssm_a = try loadGgufF32(self.allocator, g, prefix, "ssm_a");
+        self.conv1d.deinit();
         self.conv1d = try loadGgufF32(self.allocator, g, prefix, "ssm_conv1d.weight");
+        self.ssm_norm.deinit();
         self.ssm_norm = try loadGgufF32(self.allocator, g, prefix, "ssm_norm.weight");
     }
 
@@ -455,13 +461,14 @@ fn loadGgufF32(
     // GGUF dims[0] = in (contiguo), dims[1] = out → layout [out, in] row-major
     var out_dim: usize = 1;
     var in_dim: usize = 1;
+    var tensor: Tensor(f32) = undefined;
     if (info.n_dims >= 2) {
         in_dim = @intCast(info.dims[0]);
         out_dim = @intCast(info.dims[1]);
+        tensor = try Tensor(f32).initUninitialized(allocator, &.{ out_dim, in_dim });
     } else {
-        in_dim = numel;
+        tensor = try Tensor(f32).initUninitialized(allocator, &.{numel});
     }
-    const tensor = try Tensor(f32).initUninitialized(allocator, &.{ out_dim, in_dim });
     @memcpy(tensor.data, f32buf);
     return tensor;
 }

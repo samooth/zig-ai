@@ -207,6 +207,48 @@ pub fn build(b: *std.Build) void {
     });
     quant_weight_mod.addImport("gguf", gguf_mod);
 
+    // === Módulo ssm ===
+    const ssm_mod = b.createModule(.{
+        .root_source_file = b.path("src/transformer/ssm.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ssm_mod.addImport("core", core_mod);
+    ssm_mod.addImport("matmul", matmul_mod);
+    ssm_mod.addImport("quant_weight", quant_weight_mod);
+    ssm_mod.addImport("gguf", gguf_mod);
+
+    // === Módulo hybrid_attn ===
+    const hybrid_attn_mod = b.createModule(.{
+        .root_source_file = b.path("src/transformer/hybrid_attn.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hybrid_attn_mod.addImport("core", core_mod);
+    hybrid_attn_mod.addImport("matmul", matmul_mod);
+    hybrid_attn_mod.addImport("quant_weight", quant_weight_mod);
+    hybrid_attn_mod.addImport("gguf", gguf_mod);
+    hybrid_attn_mod.addImport("norm", norm_mod);
+    hybrid_attn_mod.addImport("ffn", ffn_mod);
+    hybrid_attn_mod.addImport("rope", rope_mod);
+
+    // === Módulo hybrid_layer ===
+    const hybrid_layer_mod = b.createModule(.{
+        .root_source_file = b.path("src/transformer/hybrid_layer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hybrid_layer_mod.addImport("core", core_mod);
+    hybrid_layer_mod.addImport("matmul", matmul_mod);
+    hybrid_layer_mod.addImport("quant_weight", quant_weight_mod);
+    hybrid_layer_mod.addImport("gguf", gguf_mod);
+    hybrid_layer_mod.addImport("norm", norm_mod);
+    hybrid_layer_mod.addImport("ffn", ffn_mod);
+    hybrid_layer_mod.addImport("rope", rope_mod);
+    hybrid_layer_mod.addImport("model_config", model_config_mod);
+    hybrid_layer_mod.addImport("hybrid_attn", hybrid_attn_mod);
+    hybrid_layer_mod.addImport("ssm", ssm_mod);
+
     // === Módulo gguf_tokenizer ===
     const gguf_tokenizer_mod = b.createModule(.{
         .root_source_file = b.path("src/loader/gguf_tokenizer.zig"),
@@ -341,6 +383,8 @@ pub fn build(b: *std.Build) void {
         "src/transformer/gqa.zig",
         "src/transformer/embedding.zig",
         "src/transformer/ssm.zig",
+        "src/transformer/hybrid_attn.zig",
+        "src/transformer/hybrid_layer.zig",
         "src/tokenizer/bpe.zig",
         "src/loader/safetensors.zig",
         "src/loader/gguf.zig",
@@ -367,6 +411,8 @@ pub fn build(b: *std.Build) void {
         tmod.addImport("rope", rope_mod);
         tmod.addImport("gqa", gqa_mod);
         tmod.addImport("embedding", embedding_mod);
+        tmod.addImport("hybrid_attn", hybrid_attn_mod);
+        tmod.addImport("hybrid_layer", hybrid_layer_mod);
         tmod.addImport("tokenizer", tokenizer_mod);
         tmod.addImport("gguf", gguf_mod);
         tmod.addImport("quant_weight", quant_weight_mod);
