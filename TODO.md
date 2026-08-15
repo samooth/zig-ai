@@ -86,7 +86,7 @@ Instalado en `~/.local/bin/zig-0.16`.
 | E4 | CLI: `--model model.gguf --prompt "..." -n 128` | `src/main.zig` | 🟡 |
 | E5 | Métricas: tok/s, ms/token, memoria KV | `src/main.zig` | 🟢 |
 | E6 | Modelos objetivo: Qwen2.5-1.5B Q8_0, TinyLlama-1.1B, Llama-3.2-1B | — | 🟢 |
-> **Estado Fase E**: E0 ✅ (dequant Q4_K/Q6_K añadidos a `gguf.zig` con `getScaleMinK4` para escalas de 6 bits, tests unitarios; verificado contra referencia ggml C). El modelo real usa q4_k (169 tensores), q6_k (29), f32 (141) — todos soportados ahora. Pendiente: E1 (main.zig pipeline), E2 (embedding/lm_head), E3 (RoPE), E4 (CLI), E5 (métricas), E6 (modelos objetivo).
+> **Estado Fase E**: E0 ✅ (dequant Q4_K/Q6_K añadidos a `gguf.zig` con `getScaleMinK4` para escalas de 6 bits, tests unitarios; verificado contra referencia ggml C). E1 ✅ (pipeline end-to-end en `main.zig`: `runInference` carga GGUF → ModelConfig → init layers → prefill → generate → decode; el path híbrido Qwen3.5 está validado contra llama.cpp — generación correcta). E2 ✅ (embedding + lm_head desde tensores GGUF via `embedding.zig`/`loadEmbedding`/`loadLmHead`). E3 ✅ (RoPE configurable desde `ModelConfig` en ambos paths: híbrido vía `HybridLayerParams.fromModelConfig` [rope_freq_base/rope_sections/rope_dimension_count], no-híbrido vía `TransformerLayer.rope_freq_base = cfg.rope_freq_base`). E4 ✅ (CLI `--model/--prompt/-n/--backend/--seed/--temperature/--top-k/--top-p/--repetition-penalty`). E5 ✅ (métricas tok/s en `runHybridInference`: prefill ms + generación tok/s). Pendiente: E6 (modelos objetivo), path no-híbrido `TransformerLayer` legacy (solo F16, sin validar), CPU offload / PagedAttention.
 
 ## Fase F — PagedAttention (post-integrado, verificar)
 
@@ -119,7 +119,7 @@ Instalado en `~/.local/bin/zig-0.16`.
 | H5 | CLI de inferencia + validación modelo real | `src/main.zig`, `tests/test_gguf.zig` | 🟡 | ✅ (validado contra llama.cpp con Qwen3.5-0.8B-Q4_0.gguf: Pearson 0.9989 en logits del primer token, top1 idéntico, generación "¡Hola! ¿Cómo estás?" correcta) |
 | H6 | Commit final + docs | — | 🟢 | ✅ (commit e1898a4) |
 | H7 | Corregir dequant Q4_0/Q4_1: layout "split" de nibbles de ggml | `src/loader/gguf.zig` | 🔴 | ✅ (fue la causa raíz de logits descorrelacionados; test de regresión añadido) |
-| H8 | Backend GPU (cuBLAS Sgemm + contexto) | `src/cuda/` | 🟢 | ⬜ (Phase 4: reconciliar cuCtxCreate [cuMemAlloc] vs primary context [cuBLAS]) |
+| H8 | Backend GPU (cuBLAS Sgemm + contexto) | `src/cuda/` | 🟢 | ✅ (commit f1ad33b: `cuDevicePrimaryCtxRetain` + símbolos `_v2`, `cublasSgemm_v2`, layout col-major → `colMajorToRowMajor`; GPU vs CPU Pearson 1.0) |
 
 ---
 

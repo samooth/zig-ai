@@ -223,6 +223,7 @@ fn runInference(
             LayerPrecision{ .compute = .f32, .weights_on_gpu = false, .use_quantized = false },
             cfg.head_count_kv, cfg.feed_forward_length,
         );
+        layers[i].rope_freq_base = cfg.rope_freq_base;
         try layers[i].loadWeightsFromGguf(&model.file);
     }
     defer for (layers) |*l| l.deinit();
@@ -349,12 +350,14 @@ fn runHybridInference(
     var cur = &buf_a;
     var nxt = &buf_b;
 
+    const t_prefill = @import("time").Timer.start();
     for (layers) |*layer| {
         try layer.forward(cur.*, nxt, 0, seq_len);
         const t = cur;
         cur = nxt;
         nxt = t;
     }
+    const prefill_ns = t_prefill.read();
 
     // LM head sobre el último token del prefill (con output_norm final)
     var last_shape = [_]usize{ 1, n_embd };
@@ -394,6 +397,7 @@ fn runHybridInference(
     try gen_tokens.append(allocator, first_token);
 
     var current_pos: usize = seq_len;
+    const t_gen = @import("time").Timer.start();
     for (0..params.max_new_tokens) |_| {
         const last = gen_tokens.items[gen_tokens.items.len - 1];
 
@@ -441,10 +445,16 @@ fn runHybridInference(
         if (gt.eos_id != null and next_token == gt.eos_id.?) break;
     }
 
+    const gen_ns = t_gen.read();
+    const gen_ms = @as(f64, @floatFromInt(@divTrunc(gen_ns, std.time.ns_per_ms)));
+    const prefill_ms = @as(f64, @floatFromInt(@divTrunc(prefill_ns, std.time.ns_per_ms)));
+    const tok_s: f64 = if (gen_ms > 0) @as(f64, @floatFromInt(gen_tokens.items.len)) / (gen_ms / 1000.0) else 0;
+
     try stdout.print("\n[+] Generación ({d} tokens):\n", .{ gen_tokens.items.len });
     const decoded = try tok.decode(gen_tokens.items, allocator);
     defer allocator.free(decoded);
     try stdout.print("{s}\n", .{decoded});
+    try stdout.print("[+] Métricas: prefill {d:.1} ms ({d} tok), generación {d:.1} ms ({d:.2} tok/s)\n", .{ prefill_ms, seq_len, gen_ms, tok_s });
     try stdout.print("\n=================================================\n", .{});
     try stdout.print("              Ejecucion completada               \n", .{});
     try stdout.print("=================================================\n", .{});

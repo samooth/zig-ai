@@ -81,7 +81,7 @@ pub const GgufDequantEngine = struct {
         const blocks: c_uint = @intCast((num_elements + 255) / 256);
         var nel: c_int = @intCast(num_elements);
         var kp = [_]?*anyopaque{ &d_raw, &d_out, &nel };
-        try cudaz.cuLaunchKernel(func, blocks, 1, 1, 256, 1, 1, 0, self.stream, &kp, null);
+        try cudaz.cuLaunchKernel(func, blocks, 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
         try cudaz.cuStreamSynchronize(self.stream);
 
         try cudaz.cuMemcpyDtoH(@intFromPtr(out.ptr), d_out, num_elements * @sizeOf(f32));
