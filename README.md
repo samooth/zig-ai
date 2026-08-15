@@ -76,7 +76,7 @@ zig-ai-engine/
 │   │   ├── attention.zig         # Kernel CPU reference (online softmax)
 │   │   ├── scheduler.zig         # Batch scheduler con preemption
 │   │   ├── prefix_cache.zig      # Deduplicación por hash de bloques
-│   │   └── gpu_kernels.zig       # Stubs CUDA
+│   │   └── gpu_kernels.zig       # Motor GPU PagedAttention (decode/prefill/copy)
 │   ├── cuda/
 │   │   ├── cudaz_stub.zig       # Bindings CUDA Driver API (stub sin GPU)
 │   │   └── paged_attention.cu   # Kernels CUDA paginados (decode, reshape, copy)
@@ -173,7 +173,8 @@ la inferencia end-to-end (carga GGUF + tokenizer + generación autoregresiva); s
 | `--top-k <n>`           | 0       | Top-k (0 = desactivado)                             |
 | `--top-p <f>`           | 1.0     | Top-p / nucleus (1.0 = desactivado)                 |
 | `--repetition-penalty <f>`| 1.0   | Repetition penalty (1.0 = desactivado)              |
-| `--seed <n>`            | 42      | Semilla del RNG                                     |
+| `--backend <auto|cpu|gpu>`  | auto | Backend matmul (GPU si disponible)              |
+| `--seed <n>`                | 42      | Semilla del RNG                                     |
 
 El sampler combina los parámetros en orden: repetition penalty → temperature →
 top-k → top-p → muestreo multinomial (o greedy si `temperature ≤ 0`).
@@ -188,7 +189,8 @@ top-k → top-p → muestreo multinomial (o greedy si `temperature ≤ 0`).
 - [`docs/qwen35-hybrid-deltanet.md`](docs/qwen35-hybrid-deltanet.md) — arquitectura
   híbrida Qwen3.5 (Gated DeltaNet + atención), estrategia `QuantWeight`, bugs de
   la recurrencia corregidos y plan de la Fase H.
-- [`TODO.md`](TODO.md) — plan de desarrollo canónico por fases (A–H).
+ - [`docs/PAGED_ATTENTION_TODO.md`](docs/PAGED_ATTENTION_TODO.md) — plan de desarrollo PagedAttention (Fases 1–3).
+ - [`TODO.md`](TODO.md) — plan de desarrollo canónico por fases (A–H).
 - [`docs/zig-ai-engine-plan.md`](docs/zig-ai-engine-plan.md) — plan de desarrollo (histórico).
 - [`docs/zig-ai-engine-todo.md`](docs/zig-ai-engine-todo.md) — checklist por fases (histórico).
 
