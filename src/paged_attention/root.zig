@@ -9,6 +9,7 @@ pub const Scheduler = @import("scheduler.zig").Scheduler;
 pub const PrefixCache = @import("prefix_cache.zig").PrefixCache;
 pub const Sequence = @import("scheduler.zig").Sequence;
 pub const Request = @import("scheduler.zig").Request;
+pub const PagedAttentionGpu = @import("gpu_kernels.zig").PagedAttentionGpu;
 
 pub const DType = enum { f32, f16, bf16 };
 

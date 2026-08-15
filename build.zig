@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
     var ptx_output: ?std.Build.LazyPath = null;
     var cubin_output: ?std.Build.LazyPath = null;
     var dequant_ptx: ?std.Build.LazyPath = null;
+    var paged_cubin: ?std.Build.LazyPath = null;
 
     if (has_cuda) {
         const nvcc_path = b.findProgram(&.{"nvcc"}, &.{cuda_bin_path}) catch unreachable;
@@ -67,10 +68,10 @@ pub fn build(b: *std.Build) void {
 
         const compile_pa = b.addSystemCommand(&.{
             nvcc_path,
-            "-arch=compute_80", "-code=sm_80",
+            "-arch=compute_86", "-code=sm_86",
             "-cubin", "-o",
         });
-        _ = compile_pa.addOutputFileArg("paged_attention_sm80.cubin");
+        paged_cubin = compile_pa.addOutputFileArg("paged_attention_sm86.cubin");
         compile_pa.addFileArg(b.path("src/cuda/paged_attention.cu"));
     }
 
@@ -90,6 +91,16 @@ pub fn build(b: *std.Build) void {
         dequant_options.addOption([]const u8, "dequant_ptx", b.getInstallPath(.{ .custom = "lib" }, "dequantize_kernels.ptx"));
     } else {
         dequant_options.addOption([]const u8, "dequant_ptx", "");
+    }
+
+    // === Options: ruta al cubin de PagedAttention ===
+    const paged_options = b.addOptions();
+    var paged_cubin_install: ?*std.Build.Step.InstallFile = null;
+    if (paged_cubin) |cb| {
+        paged_cubin_install = b.addInstallFileWithDir(cb, .{ .custom = "lib" }, "paged_attention_sm86.cubin");
+        paged_options.addOption([]const u8, "paged_cubin", b.getInstallPath(.{ .custom = "lib" }, "paged_attention_sm86.cubin"));
+    } else {
+        paged_options.addOption([]const u8, "paged_cubin", "");
     }
 
     // === Módulo time ===
@@ -309,6 +320,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    paged_attention_mod.addImport("cudaz", cudaz_mod);
+    paged_attention_mod.addOptions("build_options", paged_options);
 
     // hybrid_attn usa PagedKVCache para el KV-cache de atención
     hybrid_attn_mod.addImport("paged_attention", paged_attention_mod);
@@ -421,6 +434,7 @@ pub fn build(b: *std.Build) void {
         "tests/test_kv_cache.zig",
         "tests/test_paged_attention.zig",
         "tests/test_gguf.zig",
+        "tests/test_paged_attention_gpu.zig",
         "src/transformer/norm.zig",
         "src/transformer/ffn.zig",
         "src/transformer/rope.zig",
@@ -481,6 +495,9 @@ pub fn build(b: *std.Build) void {
         }
         const run_t = b.addRunArtifact(t);
         if (ptx_install) |inst| {
+            run_t.step.dependOn(&inst.step);
+        }
+        if (paged_cubin_install) |inst| {
             run_t.step.dependOn(&inst.step);
         }
         test_step.dependOn(&run_t.step);
