@@ -19,6 +19,7 @@ const bpe = @import("tokenizer");
 const embedding = @import("embedding");
 const hybrid_layer = @import("transformer");
 const norm = @import("norm");
+const paged_attn = @import("paged_attention");
 
 /// Parámetros de runtime parseados de la línea de comandos.
 const CliParams = struct {
@@ -303,17 +304,54 @@ fn runHybridInference(
     const rms_eps = cfg.layer_norm_rms_epsilon;
 
     // Capas híbridas: cada una enruta SSM vs atención según isFullAttentionLayer.
-    var layers = try allocator.alloc(hybrid_layer.HybridLayer, cfg.block_count);
+    // KV-cache paginado compartido: cada capa de atención obtiene su propio block_table.
+    const head_dim = if (cfg.head_dim > 0) cfg.head_dim else n_embd / cfg.head_count;
+    const block_size: usize = 16;
+    var num_attn_layers: usize = 0;
     for (0..cfg.block_count) |i| {
+        if (cfg.isFullAttentionLayer(i)) num_attn_layers += 1;
+    }
+    const blocks_per_seq: usize = (max_seq_len + block_size - 1) / block_size;
+    const num_blocks = @max(64, num_attn_layers * blocks_per_seq);
+
+    var paged_kv = try paged_attn.PagedKVCache.init(allocator, .{
+        .block_size = block_size,
+        .num_blocks = num_blocks,
+        .head_dim = head_dim,
+        .num_kv_heads = cfg.head_count_kv,
+        .num_q_heads = cfg.head_count,
+        .dtype = .f32,
+        .enable_prefix_cache = false,
+        .enable_cpu_offload = false,
+        .max_seq_len = max_seq_len,
+        .max_batch_size = 1,
+    });
+    defer paged_kv.deinit();
+
+    var layers = try allocator.alloc(hybrid_layer.HybridLayer, cfg.block_count);
+    var layer_block_tables = try allocator.alloc(?paged_attn.BlockTable, cfg.block_count);
+    defer allocator.free(layer_block_tables);
+    @memset(layer_block_tables, null);
+    for (0..cfg.block_count) |i| {
+        if (cfg.isFullAttentionLayer(i)) {
+            layer_block_tables[i] = paged_attn.BlockTable.init(allocator, block_size);
+        }
         layers[i] = try hybrid_layer.HybridLayer.init(
             allocator, i,
             hybrid_layer.HybridLayerParams.fromModelConfig(cfg, max_seq_len),
             cfg.isFullAttentionLayer(i),
             backend,
+            &paged_kv,
+            if (layer_block_tables[i]) |*bt| bt else null,
         );
         try layers[i].loadWeightsFromGguf(&model.file);
     }
     defer for (layers) |*l| l.deinit();
+    defer {
+        for (layer_block_tables) |*bt| {
+            if (bt.*) |*b| b.deinit(&paged_kv.block_alloc);
+        }
+    }
 
     // Tokenizer
     var gt = try gguf_tokenizer.GgufTokenizer.fromGguf(allocator, &model.file);

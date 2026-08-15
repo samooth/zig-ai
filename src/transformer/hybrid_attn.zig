@@ -8,10 +8,13 @@ const QuantWeight = @import("quant_weight").QuantWeight;
 const gguf = @import("gguf");
 const norm = @import("norm");
 const rope_mod = @import("rope");
+const paged = @import("paged_attention");
 
 pub const HybridAttnError = error{
     WeightFileNotFound,
     ShapeMismatch,
+    KvCacheNotSet,
+    SequenceNotFound,
 };
 
 pub const HybridAttnParams = struct {
@@ -55,10 +58,10 @@ pub const AttentionLayer = struct {
     scratch_v: []f32,     // kv_dim * n_embd
     scratch_o: []f32,     // n_embd * (n_head*head_dim)
 
-    // KV-Cache f32 (para precisión numérica en softmax)
-    k_cache: []f32, // [max_seq_len, n_kv_head * head_dim]
-    v_cache: []f32, // [max_seq_len, n_kv_head * head_dim]
-    cache_len: usize = 0,
+    // KV-Cache paginado (PagedKVCache compartido entre capas de atención)
+    paged_kv: *paged.PagedKVCache,
+    block_table: *paged.BlockTable,
+    sequence_id: u64 = 0,
 
     const Self = @This();
 
@@ -67,6 +70,8 @@ pub const AttentionLayer = struct {
         layer_idx: usize,
         params: HybridAttnParams,
         backend: matmul.Backend,
+        paged_kv: *paged.PagedKVCache,
+        block_table: *paged.BlockTable,
     ) !Self {
         var engine = try matmul.MatmulEngine.init(allocator, backend, .f32);
         errdefer engine.deinit();
@@ -82,13 +87,6 @@ pub const AttentionLayer = struct {
         errdefer allocator.free(scratch_v);
         const scratch_o = try allocator.alloc(f32, params.n_embd * params.n_head * params.head_dim);
         errdefer allocator.free(scratch_o);
-
-        const k_cache = try allocator.alloc(f32, params.max_seq_len * params.n_kv_head * params.head_dim);
-        errdefer allocator.free(k_cache);
-        const v_cache = try allocator.alloc(f32, params.max_seq_len * params.n_kv_head * params.head_dim);
-        errdefer allocator.free(v_cache);
-        @memset(k_cache, 0);
-        @memset(v_cache, 0);
 
         var attn_q_norm = try Tensor(f32).alloc(allocator, &.{params.head_dim});
         errdefer attn_q_norm.deinit();
@@ -110,8 +108,8 @@ pub const AttentionLayer = struct {
             .scratch_k = scratch_k,
             .scratch_v = scratch_v,
             .scratch_o = scratch_o,
-            .k_cache = k_cache,
-            .v_cache = v_cache,
+            .paged_kv = paged_kv,
+            .block_table = block_table,
         };
     }
 
@@ -121,16 +119,12 @@ pub const AttentionLayer = struct {
         self.allocator.free(self.scratch_k);
         self.allocator.free(self.scratch_v);
         self.allocator.free(self.scratch_o);
-        self.allocator.free(self.k_cache);
-        self.allocator.free(self.v_cache);
         self.attn_q_norm.deinit();
         self.attn_k_norm.deinit();
     }
 
     pub fn resetState(self: *Self) void {
-        @memset(self.k_cache, 0);
-        @memset(self.v_cache, 0);
-        self.cache_len = 0;
+        self.sequence_id = 0;
     }
 
     /// Carga pesos desde GGUF (nombres qwen35).
@@ -270,28 +264,60 @@ pub const AttentionLayer = struct {
         for (0..N * n_head * head_dim) |i| Qf32.data[i] = Q_hm.data[i];
         for (0..N * n_kv_head * head_dim) |i| Kf32_hm.data[i] = K_hm.data[i];
 
-        // === 6. KV-Cache update / retrieve ===
+        // === 6. KV-Cache paginado: escribir K/V al bloque y recuperar K/V full ===
+        // El KV cache vive en PagedKVCache. El block_table mapea posiciones
+        // lógicas → bloques físicos. Cada capa de atención comparte el mismo
+        // PagedKVCache pero tiene su propio block_table (bloques distintos).
+        const block_size = self.paged_kv.config.block_size;
+        const total_len = start_pos + N;
+
+        // Asegurar bloques para todos los tokens (prefill o decode)
+        if (self.block_table.num_tokens < total_len) {
+            try self.block_table.appendTokens(&self.paged_kv.block_alloc, total_len - self.block_table.num_tokens);
+        }
+
+        const bytes_per_elem = self.paged_kv.block_alloc.bytes_per_elem;
+        const kv_stride_block = block_size * kv_dim * bytes_per_elem;
+
         for (0..N) |t| {
-            const cache_idx = start_pos + t;
-            if (cache_idx >= p.max_seq_len) continue;
-            const cache_off = cache_idx * n_kv_head * head_dim;
-            for (0..n_kv_head * head_dim) |i| {
-                self.k_cache[cache_off + i] = Kf32_hm.data[t * n_kv_head * head_dim + i];
-                self.v_cache[cache_off + i] = Vf32_hm.data[t * n_kv_head * head_dim + i];
+            const global_pos = start_pos + t;
+            const block_idx = global_pos / block_size;
+            const offset_in_block = global_pos % block_size;
+            const phys_id = self.block_table.getPhysical(block_idx) orelse return HybridAttnError.KvCacheNotSet;
+            const block_data = self.paged_kv.block_alloc.memory_pool[phys_id * self.paged_kv.block_alloc.block_bytes ..];
+            const kv_offset = offset_in_block * kv_dim * bytes_per_elem;
+
+            for (0..n_kv_head) |h| {
+                for (0..head_dim) |d| {
+                    const k_idx = kv_offset + (h * head_dim + d) * bytes_per_elem;
+                    const v_idx = k_idx + kv_stride_block;
+                    const kv_val_k = Kf32_hm.data[t * kv_dim + h * head_dim + d];
+                    const kv_val_v = Vf32_hm.data[t * kv_dim + h * head_dim + d];
+                    storeF32(block_data, k_idx, kv_val_k);
+                    storeF32(block_data, v_idx, kv_val_v);
+                }
             }
         }
-        const total_len = start_pos + N;
-        if (total_len > self.cache_len) self.cache_len = total_len;
 
         var K_full = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_kv_head, head_dim });
         defer K_full.deinit();
         var V_full = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_kv_head, head_dim });
         defer V_full.deinit();
+
         for (0..total_len) |t| {
-            const cache_off = t * n_kv_head * head_dim;
-            for (0..n_kv_head * head_dim) |i| {
-                K_full.data[t * n_kv_head * head_dim + i] = self.k_cache[cache_off + i];
-                V_full.data[t * n_kv_head * head_dim + i] = self.v_cache[cache_off + i];
+            const block_idx = t / block_size;
+            const offset_in_block = t % block_size;
+            const phys_id = self.block_table.getPhysical(block_idx) orelse return HybridAttnError.KvCacheNotSet;
+            const block_data = self.paged_kv.block_alloc.memory_pool[phys_id * self.paged_kv.block_alloc.block_bytes ..];
+            const kv_offset = offset_in_block * kv_dim * bytes_per_elem;
+
+            for (0..n_kv_head) |h| {
+                for (0..head_dim) |d| {
+                    const k_idx = kv_offset + (h * head_dim + d) * bytes_per_elem;
+                    const v_idx = k_idx + kv_stride_block;
+                    K_full.data[t * kv_dim + h * head_dim + d] = loadF32(block_data, k_idx);
+                    V_full.data[t * kv_dim + h * head_dim + d] = loadF32(block_data, v_idx);
+                }
             }
         }
 
@@ -399,6 +425,23 @@ pub const AttentionLayer = struct {
     }
 };
 
+fn loadF32(data: []const u8, offset: usize) f32 {
+    const b0: u32 = data[offset];
+    const b1: u32 = data[offset + 1];
+    const b2: u32 = data[offset + 2];
+    const b3: u32 = data[offset + 3];
+    const bits = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    return @bitCast(bits);
+}
+
+fn storeF32(data: []u8, offset: usize, val: f32) void {
+    const bits: u32 = @bitCast(val);
+    data[offset] = @truncate(bits);
+    data[offset + 1] = @truncate(bits >> 8);
+    data[offset + 2] = @truncate(bits >> 16);
+    data[offset + 3] = @truncate(bits >> 24);
+}
+
 fn loadQuantWeight(g: *const gguf.GgufFile, prefix: []const u8, name: []const u8) !QuantWeight {
     const full = try std.fmt.allocPrint(std.heap.page_allocator, "{s}{s}", .{ prefix, name });
     defer std.heap.page_allocator.free(full);
@@ -458,6 +501,8 @@ const test_params = TestParams;
 const TestFixture = struct {
     allocator: std.mem.Allocator,
     layer: AttentionLayer,
+    paged_kv: *paged.PagedKVCache,
+    block_table: *paged.BlockTable,
     q_bytes: []u8,
     k_bytes: []u8,
     v_bytes: []u8,
@@ -469,6 +514,10 @@ const TestFixture = struct {
 
     fn deinit(self: *TestFixture) void {
         self.layer.deinit();
+        self.block_table.deinit(&self.paged_kv.block_alloc);
+        self.allocator.destroy(self.block_table);
+        self.paged_kv.deinit();
+        self.allocator.destroy(self.paged_kv);
         self.allocator.free(self.q_bytes);
         self.allocator.free(self.k_bytes);
         self.allocator.free(self.v_bytes);
@@ -501,7 +550,30 @@ fn makeF32Weight(
 }
 
 fn buildTestLayer(allocator: std.mem.Allocator) !TestFixture {
-    var layer = try AttentionLayer.init(allocator, 0, test_params, .auto);
+    const paged_kv = try allocator.create(paged.PagedKVCache);
+    paged_kv.* = try paged.PagedKVCache.init(allocator, .{
+        .block_size = 8,
+        .num_blocks = 16,
+        .head_dim = test_params.head_dim,
+        .num_kv_heads = test_params.n_kv_head,
+        .num_q_heads = test_params.n_head,
+        .dtype = .f32,
+        .enable_prefix_cache = false,
+        .enable_cpu_offload = false,
+        .max_seq_len = test_params.max_seq_len,
+    });
+    errdefer {
+        paged_kv.deinit();
+        allocator.destroy(paged_kv);
+    }
+    const block_table = try allocator.create(paged.BlockTable);
+    block_table.* = paged.BlockTable.init(allocator, 8);
+    errdefer {
+        block_table.deinit(&paged_kv.block_alloc);
+        allocator.destroy(block_table);
+    }
+
+    var layer = try AttentionLayer.init(allocator, 0, test_params, .auto, paged_kv, block_table);
     errdefer layer.deinit();
 
     const q_info = try allocator.create(gguf.TensorInfo);
@@ -576,6 +648,8 @@ fn buildTestLayer(allocator: std.mem.Allocator) !TestFixture {
     return .{
         .allocator = allocator,
         .layer = layer,
+        .paged_kv = paged_kv,
+        .block_table = block_table,
         .q_bytes = q_bytes,
         .k_bytes = k_bytes,
         .v_bytes = v_bytes,

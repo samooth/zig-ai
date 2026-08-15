@@ -12,10 +12,12 @@ const gqa_mod = @import("gqa");
 const model_config = @import("model_config");
 const AttentionLayer = @import("hybrid_attn").AttentionLayer;
 const SsmLayer = @import("ssm").SsmLayer;
+const paged = @import("paged_attention");
 
 pub const HybridLayerError = error{
     WeightFileNotFound,
     ShapeMismatch,
+    KvCacheNotSet,
 };
 
 /// Parámetros derivados de ModelConfig para una capa híbrida
@@ -92,6 +94,10 @@ pub const HybridLayer = struct {
     attn_layer: ?AttentionLayer = null,
     ssm_layer: ?SsmLayer = null,
 
+    // KV-Cache paginado compartido (solo usado por capas de atención)
+    paged_kv: ?*paged.PagedKVCache = null,
+    block_table: ?*paged.BlockTable = null,
+
     const Self = @This();
 
     pub fn init(
@@ -100,6 +106,8 @@ pub const HybridLayer = struct {
         params: HybridLayerParams,
         is_attention: bool,
         backend: matmul.Backend,
+        paged_kv: ?*paged.PagedKVCache,
+        block_table: ?*paged.BlockTable,
     ) !Self {
         var engine = try matmul.MatmulEngine.init(allocator, backend, .f32);
         errdefer engine.deinit();
@@ -132,6 +140,8 @@ pub const HybridLayer = struct {
             .scratch_down = scratch_down,
             .attn_layer = null,
             .ssm_layer = null,
+            .paged_kv = paged_kv,
+            .block_table = block_table,
         };
 
         if (is_attention) {
@@ -146,7 +156,14 @@ pub const HybridLayer = struct {
                 .rms_eps = params.rms_eps,
                 .max_seq_len = params.max_seq_len,
             };
-            self.attn_layer = try AttentionLayer.init(allocator, layer_idx, attn_params, backend);
+            self.attn_layer = try AttentionLayer.init(
+                allocator,
+                layer_idx,
+                attn_params,
+                backend,
+                paged_kv orelse return HybridLayerError.KvCacheNotSet,
+                block_table orelse return HybridLayerError.KvCacheNotSet,
+            );
             errdefer if (self.attn_layer) |l| l.deinit();
         } else {
             const ssm_params = @import("ssm").SsmParams{

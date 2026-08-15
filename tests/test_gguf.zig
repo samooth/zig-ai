@@ -267,8 +267,26 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
 
     const hybrid_layer = @import("hybrid_layer");
     const hparams = hybrid_layer.HybridLayerParams.fromModelConfig(cfg, 128);
+    const paged_attn = @import("paged_attention");
 
-    var layer = try hybrid_layer.HybridLayer.init(gpa, layer_idx, hparams, true, .auto);
+    const head_dim = if (cfg.head_dim > 0) cfg.head_dim else cfg.embedding_length / cfg.head_count;
+    var paged_kv = try paged_attn.PagedKVCache.init(gpa, .{
+        .block_size = 16,
+        .num_blocks = 64,
+        .head_dim = head_dim,
+        .num_kv_heads = cfg.head_count_kv,
+        .num_q_heads = cfg.head_count,
+        .dtype = .f32,
+        .enable_prefix_cache = false,
+        .enable_cpu_offload = false,
+        .max_seq_len = 128,
+        .max_batch_size = 1,
+    });
+    defer paged_kv.deinit();
+    var block_table = paged_attn.BlockTable.init(gpa, 16);
+    defer block_table.deinit(&paged_kv.block_alloc);
+
+    var layer = try hybrid_layer.HybridLayer.init(gpa, layer_idx, hparams, true, .auto, &paged_kv, &block_table);
     defer layer.deinit();
 
     try layer.loadWeightsFromGguf(&model.file);

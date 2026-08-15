@@ -310,6 +310,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // hybrid_attn usa PagedKVCache para el KV-cache de atención
+    hybrid_attn_mod.addImport("paged_attention", paged_attention_mod);
+    hybrid_layer_mod.addImport("paged_attention", paged_attention_mod);
+
     // === Módulo transformer ===
     const transformer_mod = b.createModule(.{
         .root_source_file = b.path("src/transformer/layer.zig"),

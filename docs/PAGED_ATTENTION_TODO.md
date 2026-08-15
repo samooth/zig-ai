@@ -66,9 +66,11 @@ defer paged_kv.deinit();
 ```
 
 **Tareas:**
-- [ ] Crear `PagedKVCache` en `runHybridInference`
-- [ ] Pasar `paged_kv` a `HybridLayer.init` (nuevo parámetro)
-- [ ] Eliminar `KVCacheManager` legacy
+- [x] Crear `PagedKVCache` en `runHybridInference`
+- [x] Pasar `paged_kv` a `HybridLayer.init` (nuevo parámetro)
+- [x] Eliminar `KVCacheManager` legacy del path híbrido (contiguous `k_cache`/`v_cache` de `AttentionLayer` reemplazados por bloques paginados)
+- [x] Block table por capa de atención (cada capa escribe en sus propios bloques físicos)
+- [ ] Scheduler: batching continuo (prefill + decode interleaved) — no aplica a single-seq aún
 
 ---
 
@@ -81,13 +83,13 @@ Cambios en `AttentionLayer`:
 // ANTES: k_cache / v_cache contiguos
 k_cache: []f32, v_cache: []f32, cache_len: usize
 
-// DESPUÉS: PagedKVCache + block_table
+// DESPUÉS: PagedKVCache + block_table (implementado)
 paged_kv: *PagedKVCache,
 block_table: *BlockTable,
 sequence_id: u64,
 ```
 
-**Cambios en `AttentionLayer.init`:**
+**Cambios en `AttentionLayer.init` (implementado):**
 ```zig
 pub fn init(
     allocator: std.mem.Allocator,
@@ -95,20 +97,22 @@ pub fn init(
     params: HybridAttnParams,
     backend: matmul.Backend,
     paged_kv: *PagedKVCache,     // NUEVO
-    sequence_id: u64,            // NUEVO
+    block_table: *BlockTable,    // NUEVO
 ) !Self
 ```
 
-**Cambios en `AttentionLayer.forward`:**
+**Cambios en `AttentionLayer.forward` (parcial: KV se escribe/lee en bloques paginados;**
+**el cálculo de atención sigue siendo el softmax CPU reference):**
 ```zig
 pub fn forward(
     self: *Self,
     x: Tensor(f16),           // [N, seq_len, n_embd]
     out: *Tensor(f16),        // [N, seq_len, n_embd]
-    block_table: *BlockTable, // NUEVO: tabla de bloques
     start_pos: usize,
     n: usize,
 ) !void
+// 6. Escribe K/V en self.block_table→bloques físicos de PagedKVCache
+// 6b. Recupera K/V full iterando el block table
 ```
 
 ---
@@ -354,8 +358,8 @@ pub fn bench_paged_attention() !void {
 
 | Tarea | Estado | Responsable |
 |---|---|---|
-| Integrar `PagedKVCache` en `runHybridInference` | ⬜ | |
-| Actualizar `HybridLayer` + `AttentionLayer` para PagedKVCache | ⬜ | |
+| Integrar `PagedKVCache` en `runHybridInference` | ✅ | |
+| Actualizar `HybridLayer` + `AttentionLayer` para PagedKVCache | ✅ | |
 | Implementar `reshape_and_cache` kernel | ⬜ | |
 | Implementar `paged_attention_decode` kernel | ⬜ | |
 | Implementar `paged_attention_prefill` kernel | ⬜ | |
@@ -401,7 +405,7 @@ qkv_input: [batch, seq_len, num_kv_heads * head_dim * 2]  // K + V concatenados
 
 ## 📋 Próximos Pasos Inmediatos
 
-1. **Esta semana**: Integrar `PagedKVCache` en `runHybridInference` + compilar
+1. **Hecho**: Fase 1 — `PagedKVCache` integrado en `runHybridInference`; `AttentionLayer` escribe/lee KV en bloques paginados (bloques f32 por capa). Validado en Qwen3.5-0.8B: generación idéntica, CPU vs GPU Pearson 0.99997, tests verdes. (commit `###COMMIT###`)
 2. **Próxima semana**: `reshape_and_cache` + `decode` kernels + test unitario
 3. **Siguiente semana**: `Scheduler` + `prefill`/`decode` + test E2E
 4. **Luego**: Prefix cache + CPU offload
