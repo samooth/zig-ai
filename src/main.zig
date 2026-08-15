@@ -320,7 +320,7 @@ fn runHybridInference(
         .head_dim = head_dim,
         .num_kv_heads = cfg.head_count_kv,
         .num_q_heads = cfg.head_count,
-        .dtype = .f32,
+        .dtype = .f16,
         .enable_prefix_cache = false,
         .enable_cpu_offload = false,
         .max_seq_len = max_seq_len,

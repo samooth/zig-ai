@@ -63,6 +63,9 @@ pub const AttentionLayer = struct {
     block_table: *paged.BlockTable,
     sequence_id: u64 = 0,
 
+    // Motor GPU de PagedAttention (null si CUDA no disponible)
+    paged_gpu: ?paged.PagedAttentionGpu = null,
+
     const Self = @This();
 
     pub fn init(
@@ -93,6 +96,17 @@ pub const AttentionLayer = struct {
         var attn_k_norm = try Tensor(f32).alloc(allocator, &.{params.head_dim});
         errdefer attn_k_norm.deinit();
 
+        var paged_gpu: ?paged.PagedAttentionGpu = null;
+        const gpu_config = paged.PagedConfig{
+            .block_size = paged_kv.config.block_size,
+            .num_blocks = 0,
+            .head_dim = params.head_dim,
+            .num_kv_heads = params.n_kv_head,
+            .num_q_heads = params.n_head,
+            .dtype = paged_kv.config.dtype,
+        };
+        paged_gpu = paged.PagedAttentionGpu.init(allocator, gpu_config) catch null;
+
         return Self{
             .allocator = allocator,
             .layer_idx = layer_idx,
@@ -110,6 +124,7 @@ pub const AttentionLayer = struct {
             .scratch_o = scratch_o,
             .paged_kv = paged_kv,
             .block_table = block_table,
+            .paged_gpu = paged_gpu,
         };
     }
 
@@ -121,6 +136,7 @@ pub const AttentionLayer = struct {
         self.allocator.free(self.scratch_o);
         self.attn_q_norm.deinit();
         self.attn_k_norm.deinit();
+        if (self.paged_gpu) |*pg| pg.deinit();
     }
 
     pub fn resetState(self: *Self) void {
@@ -287,106 +303,116 @@ pub const AttentionLayer = struct {
             const block_data = self.paged_kv.block_alloc.memory_pool[phys_id * self.paged_kv.block_alloc.block_bytes ..];
             const kv_offset = offset_in_block * kv_dim * bytes_per_elem;
 
-            for (0..n_kv_head) |h| {
-                for (0..head_dim) |d| {
-                    const k_idx = kv_offset + (h * head_dim + d) * bytes_per_elem;
-                    const v_idx = k_idx + kv_stride_block;
-                    const kv_val_k = Kf32_hm.data[t * kv_dim + h * head_dim + d];
-                    const kv_val_v = Vf32_hm.data[t * kv_dim + h * head_dim + d];
-                    storeF32(block_data, k_idx, kv_val_k);
-                    storeF32(block_data, v_idx, kv_val_v);
-                }
-            }
+             for (0..n_kv_head) |h| {
+                 for (0..head_dim) |d| {
+                     const k_idx = kv_offset + (h * head_dim + d) * bytes_per_elem;
+                     const v_idx = k_idx + kv_stride_block;
+                     const kv_val_k = Kf32_hm.data[t * kv_dim + h * head_dim + d];
+                     const kv_val_v = Vf32_hm.data[t * kv_dim + h * head_dim + d];
+                     storeF16(block_data, k_idx, kv_val_k);
+                     storeF16(block_data, v_idx, kv_val_v);
+                 }
+             }
         }
 
-        var K_full = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_kv_head, head_dim });
-        defer K_full.deinit();
-        var V_full = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_kv_head, head_dim });
-        defer V_full.deinit();
-
-        for (0..total_len) |t| {
-            const block_idx = t / block_size;
-            const offset_in_block = t % block_size;
-            const phys_id = self.block_table.getPhysical(block_idx) orelse return HybridAttnError.KvCacheNotSet;
-            const block_data = self.paged_kv.block_alloc.memory_pool[phys_id * self.paged_kv.block_alloc.block_bytes ..];
-            const kv_offset = offset_in_block * kv_dim * bytes_per_elem;
-
-            for (0..n_kv_head) |h| {
-                for (0..head_dim) |d| {
-                    const k_idx = kv_offset + (h * head_dim + d) * bytes_per_elem;
-                    const v_idx = k_idx + kv_stride_block;
-                    K_full.data[t * kv_dim + h * head_dim + d] = loadF32(block_data, k_idx);
-                    V_full.data[t * kv_dim + h * head_dim + d] = loadF32(block_data, v_idx);
-                }
-            }
-        }
-
-        // === 7. GQA: expandir K/V de n_kv_head a n_head ===
-        const repeat_factor = n_head / n_kv_head;
-        var K_exp = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_head, head_dim });
-        defer K_exp.deinit();
-        var V_exp = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_head, head_dim });
-        defer V_exp.deinit();
-
-        for (0..total_len) |t| {
-            for (0..n_kv_head) |kv_h| {
-                for (0..repeat_factor) |r| {
-                    const h = kv_h * repeat_factor + r;
-                    for (0..head_dim) |d| {
-                        K_exp.data[t * n_head * head_dim + h * head_dim + d] = K_full.data[t * n_kv_head * head_dim + kv_h * head_dim + d];
-                        V_exp.data[t * n_head * head_dim + h * head_dim + d] = V_full.data[t * n_kv_head * head_dim + kv_h * head_dim + d];
-                    }
-                }
-            }
-        }
-
-        // === 8. Softmax Attention (causal) ===
+        // === 7-8. Softmax Attention (causal) ===
+        // GPU: PagedAttentionGpu.decode sobre el memory-pool (bloques f16).
+        // CPU: softmáx clásico con GQA expansion (ruta de referencia).
         var attn_out = try Tensor(f32).alloc(self.allocator, &.{ N, n_head, head_dim });
         defer attn_out.deinit();
 
-        const kq_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
+        if (self.paged_gpu) |*gpu| {
+            const q_stride = n_head * head_dim;
+            for (0..N) |t| {
+                const q_off = t * q_stride;
+                const o_off = t * q_stride;
+                try gpu.decode(
+                    Qf32.data[q_off..][0..q_stride],
+                    attn_out.data[o_off..][0..q_stride],
+                    self.block_table,
+                    &self.paged_kv.block_alloc,
+                );
+            }
+        } else {
+            // Read K/V back as f16 and expand GQA (CPU fallback).
+            var K_full = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_kv_head, head_dim });
+            defer K_full.deinit();
+            var V_full = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_kv_head, head_dim });
+            defer V_full.deinit();
 
-        // Para cada token t en [0,N) y cada head h en [0,n_head):
-        for (0..N) |t| {
-            for (0..n_head) |h| {
-                // scores[total_len]
-                var scores = std.heap.page_allocator.alloc(f32, total_len) catch unreachable;
-                defer std.heap.page_allocator.free(scores);
+            for (0..total_len) |t| {
+                const block_idx = t / block_size;
+                const offset_in_block = t % block_size;
+                const phys_id = self.block_table.getPhysical(block_idx) orelse return HybridAttnError.KvCacheNotSet;
+                const block_data = self.paged_kv.block_alloc.memory_pool[phys_id * self.paged_kv.block_alloc.block_bytes ..];
+                const kv_offset = offset_in_block * kv_dim * bytes_per_elem;
 
-                // Calcular scores q_t · k_s * scale para s=0..total_len-1
-                var max_score: f32 = -std.math.inf(f32);
-                for (0..total_len) |s| {
-                    var score: f32 = 0;
+                for (0..n_kv_head) |h| {
                     for (0..head_dim) |d| {
-                        const q = Qf32.data[t * n_head * head_dim + h * head_dim + d];
-                        const k = K_exp.data[s * n_head * head_dim + h * head_dim + d];
-                        score += q * k;
+                        const k_idx = kv_offset + (h * head_dim + d) * bytes_per_elem;
+                        const v_idx = k_idx + kv_stride_block;
+                        K_full.data[t * kv_dim + h * head_dim + d] = loadF16(block_data, k_idx);
+                        V_full.data[t * kv_dim + h * head_dim + d] = loadF16(block_data, v_idx);
                     }
-                    score *= kq_scale;
-                    // Causal mask: s > start_pos + t -> -inf
-                    if (s > start_pos + t) score = -std.math.inf(f32);
-                    scores[s] = score;
-                    if (score > max_score) max_score = score;
                 }
+            }
 
-                // Softmax
-                var sum_exp: f32 = 0;
-                for (0..total_len) |s| {
-                    const exp_val = @exp(scores[s] - max_score);
-                    scores[s] = exp_val;
-                    sum_exp += exp_val;
-                }
-                for (0..total_len) |s| {
-                    scores[s] /= sum_exp;
-                }
+            const repeat_factor = n_head / n_kv_head;
+            var K_exp = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_head, head_dim });
+            defer K_exp.deinit();
+            var V_exp = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_head, head_dim });
+            defer V_exp.deinit();
 
-                // Weighted sum de V
-                for (0..head_dim) |d| {
-                    var out_val: f32 = 0;
+            for (0..total_len) |t| {
+                for (0..n_kv_head) |kv_h| {
+                    for (0..repeat_factor) |r| {
+                        const h = kv_h * repeat_factor + r;
+                        for (0..head_dim) |d| {
+                            K_exp.data[t * n_head * head_dim + h * head_dim + d] = K_full.data[t * n_kv_head * head_dim + kv_h * head_dim + d];
+                            V_exp.data[t * n_head * head_dim + h * head_dim + d] = V_full.data[t * n_kv_head * head_dim + kv_h * head_dim + d];
+                        }
+                    }
+                }
+            }
+
+            const kq_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
+
+            for (0..N) |t| {
+                for (0..n_head) |h| {
+                    var scores = std.heap.page_allocator.alloc(f32, total_len) catch unreachable;
+                    defer std.heap.page_allocator.free(scores);
+
+                    var max_score: f32 = -std.math.inf(f32);
                     for (0..total_len) |s| {
-                        out_val += scores[s] * V_exp.data[s * n_head * head_dim + h * head_dim + d];
+                        var score: f32 = 0;
+                        for (0..head_dim) |d| {
+                            const q = Qf32.data[t * n_head * head_dim + h * head_dim + d];
+                            const k = K_exp.data[s * n_head * head_dim + h * head_dim + d];
+                            score += q * k;
+                        }
+                        score *= kq_scale;
+                        if (s > start_pos + t) score = -std.math.inf(f32);
+                        scores[s] = score;
+                        if (score > max_score) max_score = score;
                     }
-                    attn_out.data[t * n_head * head_dim + h * head_dim + d] = out_val;
+
+                    var sum_exp: f32 = 0;
+                    for (0..total_len) |s| {
+                        const exp_val = @exp(scores[s] - max_score);
+                        scores[s] = exp_val;
+                        sum_exp += exp_val;
+                    }
+                    for (0..total_len) |s| {
+                        scores[s] /= sum_exp;
+                    }
+
+                    for (0..head_dim) |d| {
+                        var out_val: f32 = 0;
+                        for (0..total_len) |s| {
+                            out_val += scores[s] * V_exp.data[s * n_head * head_dim + h * head_dim + d];
+                        }
+                        attn_out.data[t * n_head * head_dim + h * head_dim + d] = out_val;
+                    }
                 }
             }
         }
@@ -425,6 +451,12 @@ pub const AttentionLayer = struct {
     }
 };
 
+fn loadF16(data: []const u8, offset: usize) f32 {
+    const bits: u16 = @as(u16, data[offset]) | (@as(u16, data[offset + 1]) << 8);
+    const f16_val: f16 = @bitCast(bits);
+    return @floatCast(f16_val);
+}
+
 fn loadF32(data: []const u8, offset: usize) f32 {
     const b0: u32 = data[offset];
     const b1: u32 = data[offset + 1];
@@ -440,6 +472,13 @@ fn storeF32(data: []u8, offset: usize, val: f32) void {
     data[offset + 1] = @truncate(bits >> 8);
     data[offset + 2] = @truncate(bits >> 16);
     data[offset + 3] = @truncate(bits >> 24);
+}
+
+fn storeF16(data: []u8, offset: usize, val: f32) void {
+    const f16_val: f16 = @floatCast(val);
+    const bits: u16 = @bitCast(f16_val);
+    data[offset] = @truncate(bits);
+    data[offset + 1] = @truncate(bits >> 8);
 }
 
 fn loadQuantWeight(g: *const gguf.GgufFile, prefix: []const u8, name: []const u8) !QuantWeight {
@@ -557,7 +596,7 @@ fn buildTestLayer(allocator: std.mem.Allocator) !TestFixture {
         .head_dim = test_params.head_dim,
         .num_kv_heads = test_params.n_kv_head,
         .num_q_heads = test_params.n_head,
-        .dtype = .f32,
+        .dtype = .f16,
         .enable_prefix_cache = false,
         .enable_cpu_offload = false,
         .max_seq_len = test_params.max_seq_len,
