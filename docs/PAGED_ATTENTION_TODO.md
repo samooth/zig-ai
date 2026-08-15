@@ -17,7 +17,7 @@
 | `src/paged_attention/prefix_cache.zig` | ✅ Prefix cache por hash |
 | `src/paged_attention/*.cu` | ✅ Kernels CUDA (flash_attention_v2 + paged kernels) |
 | `src/kv_cache/` | ⚠️ Implementación legacy (contigua) - **reemplazar** |
-| `src/transformer/hybrid_attn.zig` | ✅ AttentionLayer con KV-cache contiguo |
+| `src/transformer/hybrid_attn.zig` | ✅ AttentionLayer con KV-cache paginado (f16 blocks) + GPU decode |
 | `src/main.zig` | ⚠️ Usa `KVCacheManager` legacy + `TransformerLayer` |
 
 ---
@@ -407,8 +407,9 @@ qkv_input: [batch, seq_len, num_kv_heads * head_dim * 2]  // K + V concatenados
 
 1. **Hecho**: Fase 1 — `PagedKVCache` integrado en `runHybridInference`; `AttentionLayer` escribe/lee KV en bloques paginados. Validado en Qwen3.5-0.8B: generación idéntica, CPU vs GPU Pearson 0.99997, tests verdes. (commit `96a50a1`)
 2. **Hecho**: Fase 2 — Kernels CUDA de PagedAttention (`paged_attention.cu` con `extern "C"`): decode (online softmax, warp-reduction, layout BlockAllocator), reshape_and_block_write, block_copy. Motor `PagedAttentionGpu` (patrón cuModuleLoad, como `GgufDequantEngine`) en `gpu_kernels.zig` + build_options con ruta al cubin instalado (`paged_attention_sm86.cubin`, sm_86). Test `test_paged_attention_gpu.zig`: GPU decode/prefill vs CPU reference, max_diff ≈ 2.5e-4. (commit `9045d02`)
-3. **Hecho**: Fase 3 — `PagedAttentionGpu.decode` integrado en `AttentionLayer.forward` (reemplaza CPU softmax). KV cache dtype f32→f16 para match con kernels GPU. Forward hace branch: GPU path lanza decode kernel por token sobre el memory-pool f16; CPU path preserva softmax de referencia para validación. Test hybrid_attn pasa (max_abs=0.290). (commit `b1644f0`)
-4. **Luego**: Prefix cache + CPU offload
+3. **Hecho**: Fase 3 — `PagedAttentionGpu.decode` integrado en `AttentionLayer.forward` (reemplaza CPU softmax). KV cache dtype f32→f16 para match con kernels GPU. Forward hace branch: GPU path lanza decode kernel por token sobre el memory-pool f16; CPU path preserva softmax de referencia para validación. Test hybrid_attn pasa (max_abs=0.290). (commit `895d41f`)
+4. **Hecho**: Fase 3 — `PagedAttentionGpu.decode` integrado en `AttentionLayer.forward` (reemplaza CPU softmax). KV cache dtype f32→f16 para match con kernels GPU. Forward hace branch: GPU path lanza decode kernel por token sobre el memory-pool f16; CPU path preserva softmax de referencia para validación. Test hybrid_attn pasa (max_abs=0.290). (commit `895d41f`)
+5. **Luego**: Scheduler prefill/decode en `runHybridInference` + prefix cache + CPU offload
 
 ---
 
