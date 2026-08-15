@@ -284,13 +284,9 @@ pub const AttentionLayer = struct {
         // El KV cache vive en PagedKVCache. El block_table mapea posiciones
         // lógicas → bloques físicos. Cada capa de atención comparte el mismo
         // PagedKVCache pero tiene su propio block_table (bloques distintos).
+        // Bloques deben estar pre-asignados por el Scheduler antes de forward.
         const block_size = self.paged_kv.config.block_size;
         const total_len = start_pos + N;
-
-        // Asegurar bloques para todos los tokens (prefill o decode)
-        if (self.block_table.num_tokens < total_len) {
-            try self.block_table.appendTokens(&self.paged_kv.block_alloc, total_len - self.block_table.num_tokens);
-        }
 
         const bytes_per_elem = self.paged_kv.block_alloc.bytes_per_elem;
         const kv_stride_block = block_size * kv_dim * bytes_per_elem;
@@ -706,6 +702,9 @@ test "hybrid attention single token hand-computed" {
     defer fixture.deinit();
     var layer = &fixture.layer;
 
+    // Pre-allocate blocks (scheduler normally does this)
+    try fixture.block_table.appendTokens(&fixture.paged_kv.block_alloc, 1);
+
     // Input x = [1, 1, 8] all ones
     var x = try Tensor(f32).alloc(allocator, &.{ 1, 1, test_params.n_embd });
     defer x.deinit();
@@ -736,6 +735,9 @@ test "hybrid attention preserves norm with rope" {
     var fixture = try buildTestLayer(allocator);
     defer fixture.deinit();
     var layer = &fixture.layer;
+
+    // Pre-allocate blocks for 4 tokens
+    try fixture.block_table.appendTokens(&fixture.paged_kv.block_alloc, 4);
 
     var x = try Tensor(f32).alloc(allocator, &.{ 1, 4, test_params.n_embd });
     defer x.deinit();

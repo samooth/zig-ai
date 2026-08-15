@@ -270,13 +270,13 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     const paged_attn = @import("paged_attention");
 
     const head_dim = if (cfg.head_dim > 0) cfg.head_dim else cfg.embedding_length / cfg.head_count;
-    var paged_kv = try paged_attn.PagedKVCache.init(gpa, .{
-        .block_size = 16,
-        .num_blocks = 64,
-        .head_dim = head_dim,
-        .num_kv_heads = cfg.head_count_kv,
-        .num_q_heads = cfg.head_count,
-        .dtype = .f32,
+     var paged_kv = try paged_attn.PagedKVCache.init(gpa, .{
+         .block_size = 16,
+         .num_blocks = 64,
+         .head_dim = head_dim,
+         .num_kv_heads = cfg.head_count_kv,
+         .num_q_heads = cfg.head_count,
+         .dtype = .f16,
         .enable_prefix_cache = false,
         .enable_cpu_offload = false,
         .max_seq_len = 128,
@@ -309,6 +309,9 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
 
     var output = try Tensor(f32).alloc(gpa, hidden.shape);
     defer output.deinit();
+
+    // Pre-allocate blocks for the 6 prompt tokens (scheduler normally does this)
+    try block_table.appendTokens(&paged_kv.block_alloc, 6);
 
     try layer.forward(hidden, &output, 0, 6);
 

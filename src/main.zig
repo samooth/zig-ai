@@ -314,27 +314,33 @@ fn runHybridInference(
     const blocks_per_seq: usize = (max_seq_len + block_size - 1) / block_size;
     const num_blocks = @max(64, num_attn_layers * blocks_per_seq);
 
-    var paged_kv = try paged_attn.PagedKVCache.init(allocator, .{
-        .block_size = block_size,
-        .num_blocks = num_blocks,
-        .head_dim = head_dim,
-        .num_kv_heads = cfg.head_count_kv,
-        .num_q_heads = cfg.head_count,
-        .dtype = .f16,
-        .enable_prefix_cache = false,
-        .enable_cpu_offload = false,
-        .max_seq_len = max_seq_len,
-        .max_batch_size = 1,
-    });
+     var paged_kv = try paged_attn.PagedKVCache.init(allocator, .{
+         .block_size = block_size,
+         .num_blocks = num_blocks,
+         .head_dim = head_dim,
+         .num_kv_heads = cfg.head_count_kv,
+         .num_q_heads = cfg.head_count,
+         .dtype = .f16,
+         .enable_prefix_cache = false,
+         .enable_cpu_offload = false,
+         .max_seq_len = max_seq_len,
+         .max_batch_size = 1,
+     });
     defer paged_kv.deinit();
 
+    // Scheduler for request admission + sequence lifecycle management
+    var scheduler = paged_attn.Scheduler.init(allocator, paged_kv.config, &paged_kv);
+    defer scheduler.deinit();
+
     var layers = try allocator.alloc(hybrid_layer.HybridLayer, cfg.block_count);
-    var layer_block_tables = try allocator.alloc(?paged_attn.BlockTable, cfg.block_count);
+    var layer_block_tables = try allocator.alloc(?*paged_attn.BlockTable, cfg.block_count);
     defer allocator.free(layer_block_tables);
     @memset(layer_block_tables, null);
     for (0..cfg.block_count) |i| {
         if (cfg.isFullAttentionLayer(i)) {
-            layer_block_tables[i] = paged_attn.BlockTable.init(allocator, block_size);
+            const bt = try allocator.create(paged_attn.BlockTable);
+            bt.* = paged_attn.BlockTable.init(allocator, block_size);
+            layer_block_tables[i] = bt;
         }
         layers[i] = try hybrid_layer.HybridLayer.init(
             allocator, i,
@@ -342,14 +348,17 @@ fn runHybridInference(
             cfg.isFullAttentionLayer(i),
             backend,
             &paged_kv,
-            if (layer_block_tables[i]) |*bt| bt else null,
+            if (layer_block_tables[i]) |bt| bt else null,
         );
         try layers[i].loadWeightsFromGguf(&model.file);
     }
     defer for (layers) |*l| l.deinit();
     defer {
-        for (layer_block_tables) |*bt| {
-            if (bt.*) |*b| b.deinit(&paged_kv.block_alloc);
+        for (layer_block_tables) |bt_opt| {
+            if (bt_opt) |bt| {
+                bt.deinit(&paged_kv.block_alloc);
+                allocator.destroy(bt);
+            }
         }
     }
 
@@ -369,6 +378,16 @@ fn runHybridInference(
 
     var rng = std.Random.Xoshiro256.init(params.seed);
 
+    // === Submit request to scheduler (admission + block allocation) ===
+    const seq_id: u64 = try scheduler.submit(.{
+        .req_id = 0,
+        .prompt_tokens = prompt_ids,
+        .max_new_tokens = params.max_new_tokens,
+        .num_samples = 1,
+        .priority = 0,
+    });
+    _ = try scheduler.schedule();
+
     // === Prefill ===
     const seq_len = prompt_ids.len;
     var hidden = try Tensor(f16).alloc(allocator, &.{ 1, seq_len, n_embd });
@@ -387,6 +406,16 @@ fn runHybridInference(
 
     var cur = &buf_a;
     var nxt = &buf_b;
+
+    // Ensure all attention layers have blocks for the prefill sequence
+    for (layer_block_tables, 0..) |bt_opt, i| {
+        if (bt_opt) |bt| {
+            if (bt.num_tokens < seq_len) {
+                try bt.appendTokens(&paged_kv.block_alloc, seq_len - bt.num_tokens);
+            }
+        }
+        _ = i;
+    }
 
     const t_prefill = @import("time").Timer.start();
     for (layers) |*layer| {
@@ -434,12 +463,21 @@ fn runHybridInference(
     const first_token = params.sampler.sample(logits_f32, &rng, &[_]u32{});
     try gen_tokens.append(allocator, first_token);
 
-    var current_pos: usize = seq_len;
-    const t_gen = @import("time").Timer.start();
-    for (0..params.max_new_tokens) |_| {
-        const last = gen_tokens.items[gen_tokens.items.len - 1];
+     var current_pos: usize = seq_len;
+     const t_gen = @import("time").Timer.start();
+     for (0..params.max_new_tokens) |_| {
+         const last = gen_tokens.items[gen_tokens.items.len - 1];
 
-        var h1 = try Tensor(f16).alloc(allocator, &.{ 1, 1, n_embd });
+         // Ensure blocks for the new decode token before forward
+         for (layer_block_tables) |bt_opt| {
+             if (bt_opt) |bt| {
+                 if (bt.num_tokens < current_pos + 1) {
+                     try bt.appendToken(&paged_kv.block_alloc);
+                 }
+             }
+         }
+
+         var h1 = try Tensor(f16).alloc(allocator, &.{ 1, 1, n_embd });
         defer h1.deinit();
         embedding.embeddingLookup(emb, &[_]u32{last}, 1, 1, &h1);
         const h2d = try h1.reshape(&[_]usize{ 1, n_embd });
@@ -476,12 +514,16 @@ fn runHybridInference(
         if (std.c.getenv("DUMP_LOGITS") != null) {
             for (logits_f32, 0..) |v, i| std.debug.print("LG {d} {d}\n", .{ i, v });
         }
-        const next_token = params.sampler.sample(logits_f32, &rng, gen_tokens.items);
-        try gen_tokens.append(allocator, next_token);
-        current_pos += 1;
+         const next_token = params.sampler.sample(logits_f32, &rng, gen_tokens.items);
+         try gen_tokens.append(allocator, next_token);
+         try scheduler.appendToken(seq_id, next_token);
+         current_pos += 1;
 
-        if (gt.eos_id != null and next_token == gt.eos_id.?) break;
-    }
+         if (gt.eos_id != null and next_token == gt.eos_id.?) break;
+     }
+
+     // Finish sequence: release blocks
+     scheduler.finishSequence(seq_id);
 
     const gen_ns = t_gen.read();
     const gen_ms = @as(f64, @floatFromInt(@divTrunc(gen_ns, std.time.ns_per_ms)));

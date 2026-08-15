@@ -164,7 +164,8 @@ pub const Scheduler = struct {
 
     pub fn finishSequence(self: *Self, seq_id: u64) void {
         if (self.sequences.fetchRemove(seq_id)) |entry| {
-            entry.value.tokens.deinit(self.allocator);
+            var seq = entry.value;
+            seq.tokens.deinit(self.allocator);
         }
         for (self.running.items, 0..) |id, i| {
             if (id == seq_id) { _ = self.running.orderedRemove(i); break; }
