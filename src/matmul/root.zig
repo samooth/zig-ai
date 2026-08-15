@@ -166,12 +166,10 @@ pub const MatmulEngine = struct {
                 if (!build_options.has_cuda) return error.CuBlasNotLinked;
                 if (self.cublas_handle) |handle| {
                     if (T == f32) {
-                        if (self.cuda_stream != null and self.gpu_pool != null) {
-                            try cublas.gemmCuBlasF32Async(handle, self.cuda_stream.?, &self.gpu_pool.?, A, B, C, M, N, K, trans_a, trans_b, 1.0, 0.0);
-                            self.cuda_stream.?.synchronize();
-                        } else {
-                            try cublas.gemmCuBlasF32(handle, A, B, C, M, N, K, trans_a, trans_b, 1.0, 0.0);
-                        }
+                        // Ruta síncrona simple (cudaMalloc + cudaMemcpy + cublasSgemm),
+                        // validada contra CPU. El path async (cudaMallocAsync) aún no
+                        // es fiable en este entorno.
+                        try cublas.gemmCuBlasF32(handle, A, B, C, M, N, K, trans_a, trans_b, 1.0, 0.0);
                     } else if (T == f16) {
                         // Conversión a f32 + cublasSgemm (ruta bien soportada).
                         var a_f32 = try Tensor(f32).alloc(self.allocator, &.{ A.shape[0], A.shape[1] });

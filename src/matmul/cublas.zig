@@ -16,7 +16,7 @@ extern "c" fn cublasDestroy_v2(handle: *anyopaque) void;
 extern "c" fn cublasSetStream_v2(handle: *anyopaque, stream: *anyopaque) i32;
 extern "c" fn cublasGetStream_v2(handle: *anyopaque, stream: **anyopaque) i32;
 
-extern "c" fn cublasSgemm(
+extern "c" fn cublasSgemm_v2(
     handle: *anyopaque, transa: i32, transb: i32,
     m: i32, n: i32, k: i32,
     alpha: *const f32, A: *const anyopaque, lda: i32,
@@ -108,6 +108,20 @@ const CUBLAS_COMPUTE_32F_FAST_16BF = 75;
 const CUBLAS_COMPUTE_32F_FAST_TF32 = 77;
 
 const CUBLAS_GEMM_DEFAULT = -1;
+
+/// Convierte en host la salida de cuBLAS (column-major, ldc=M) a row-major
+/// [rows, cols]: cuBLAS escribe `buf[i + rows*j] = C[i][j]`; aquí lo movemos
+/// a `C[i*cols + j]`. (No es un transpose: el shape [rows, cols] se conserva.)
+fn colMajorToRowMajor(data: []f32, rows: usize, cols: usize) !void {
+    const tmp = try std.heap.c_allocator.alloc(f32, data.len);
+    defer std.heap.c_allocator.free(tmp);
+    for (0..rows) |i| {
+        for (0..cols) |j| {
+            tmp[i * cols + j] = data[i + rows * j];
+        }
+    }
+    @memcpy(data, tmp);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CuBlasHandle — con soporte de streams
@@ -363,13 +377,15 @@ pub fn gemmCuBlasF32(
     defer d_C.free();
     try d_C.upload(C.data);
 
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    // Tensores ROW-MAJOR; cuBLAS es COLUMN-MAJOR. Un tensor row-major [R, C]
+    // se pasa como su transpuesto column-major con op='T' y leading dim = C.
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
-    const status = cublasSgemm(
+    const status = cublasSgemm_v2(
         handle.raw,
         op_a, op_b,
         @intCast(M), @intCast(N), @intCast(K),
@@ -386,6 +402,8 @@ pub fn gemmCuBlasF32(
     }
 
     try d_C.download(C.data);
+    // cuBLAS escribe C column-major → transponer a row-major
+    try colMajorToRowMajor(C.data, M, N);
     handle.sync();
 }
 
@@ -432,14 +450,14 @@ pub fn gemmCuBlasF32Async(
     const status_h2d_b = cudaMemcpyAsync(d_B_ptr, B.data.ptr, size_B, cudaMemcpyHostToDevice, stream.raw);
     if (status_h2d_b != 0) return error.CudaMemcpyAsyncFailed;
 
-    // GEMM async en stream
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    // GEMM async en stream (tensores row-major → op='T', leading dim = cols)
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
-    const status = cublasSgemm(
+    const status = cublasSgemm_v2(
         h.raw,
         op_a, op_b,
         @intCast(M), @intCast(N), @intCast(K),
@@ -457,6 +475,9 @@ pub fn gemmCuBlasF32Async(
     // Download async
     const status_d2h = cudaMemcpyAsync(C.data.ptr, d_C_ptr, size_C, cudaMemcpyDeviceToHost, stream.raw);
     if (status_d2h != 0) return error.CudaMemcpyAsyncFailed;
+    stream.synchronize();
+    // cuBLAS escribe C column-major → transponer a row-major
+    try colMajorToRowMajor(C.data, M, N);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -521,11 +542,11 @@ pub fn gemmBatchF32(
         if (status != 0) return error.CudaMemcpyFailed;
     }
 
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
     const strideA: i64 = @intCast(M * K);
     const strideB: i64 = @intCast(K * N);
@@ -604,11 +625,11 @@ pub fn gemmStridedF32(
     defer d_C.free();
     try d_C.upload(C_flat[0..total_C]);
 
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
     const status = cublasSgemmStridedBatched(
         handle.raw,
@@ -664,11 +685,11 @@ pub fn gemmExF16F32(
     defer d_C.free();
     try d_C.upload(C.data);
 
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
     const status = cublasGemmEx(
         handle.raw,
@@ -721,11 +742,11 @@ pub fn gemmExBF16F32(
     defer d_C.free();
     try d_C.upload(C.data);
 
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
     const status = cublasGemmEx(
         handle.raw,
@@ -806,11 +827,11 @@ pub fn gemmBatchExF16F32(
         if (status != 0) return error.CudaMemcpyFailed;
     }
 
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
     const strideA: i64 = @intCast(M * K);
     const strideB: i64 = @intCast(K * N);
