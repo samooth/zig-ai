@@ -18,7 +18,7 @@
 | `src/paged_attention/*.cu` | ✅ Kernels CUDA (flash_attention_v2 + paged kernels) |
 | `src/kv_cache/` | ⚠️ Implementación legacy (contigua) - **reemplazar** |
 | `src/transformer/hybrid_attn.zig` | ✅ AttentionLayer con KV-cache paginado (f16 blocks) + GPU decode |
-| `src/main.zig` | ⚠️ Usa `KVCacheManager` legacy + `TransformerLayer` |
+| `src/main.zig` | ✅ Path híbrido con `PagedKVCache` + `Scheduler` (legacy `runInference` + `KVCacheManager` aún presente) |
 
 ---
 
@@ -70,7 +70,7 @@ defer paged_kv.deinit();
 - [x] Pasar `paged_kv` a `HybridLayer.init` (nuevo parámetro)
 - [x] Eliminar `KVCacheManager` legacy del path híbrido (contiguous `k_cache`/`v_cache` de `AttentionLayer` reemplazados por bloques paginados)
 - [x] Block table por capa de atención (cada capa escribe en sus propios bloques físicos)
-- [ ] Scheduler: batching continuo (prefill + decode interleaved) — no aplica a single-seq aún
+- [x] Scheduler: batching continuo (prefill + decode interleaved) — no aplica a single-seq aún (commit `980d9f2`)
 
 ---
 
@@ -101,8 +101,8 @@ pub fn init(
 ) !Self
 ```
 
-**Cambios en `AttentionLayer.forward` (parcial: KV se escribe/lee en bloques paginados;**
-**el cálculo de atención sigue siendo el softmax CPU reference):**
+**Cambios en `AttentionLayer.forward` (KV se escribe/lee en bloques paginados; el cálculo de atención**
+**hace branch GPU/CPU: decode kernel por token si hay `paged_gpu`, softmax de referencia en CPU si no):**
 ```zig
 pub fn forward(
     self: *Self,
@@ -363,7 +363,7 @@ pub fn bench_paged_attention() !void {
 | Implementar `reshape_and_cache` kernel | ✅ (decode + reshape_and_block_write + block_copy en `paged_attention.cu`) | |
 | Implementar `paged_attention_decode` kernel | ✅ (online softmax, warp-reduce, layout BlockAllocator) | |
 | Implementar `paged_attention_prefill` kernel | ✅ (engine prefill = loop decode, vs CPU ref) | |
-| Integrar `Scheduler` en `runHybridInference` | ⬜ | |
+| Integrar `Scheduler` en `runHybridInference` | ✅ (commit `980d9f2`) | |
 | Prefix Cache + `matchPrefix` en `admitRequests` | ⬜ | |
 | CPU Offload (`swapToCpu` / `swapFromCpu`) | ⬜ | |
 | Preemption + restore | ⬜ | |
@@ -406,10 +406,10 @@ qkv_input: [batch, seq_len, num_kv_heads * head_dim * 2]  // K + V concatenados
 ## 📋 Próximos Pasos Inmediatos
 
 1. **Hecho**: Fase 1 — `PagedKVCache` integrado en `runHybridInference`; `AttentionLayer` escribe/lee KV en bloques paginados. Validado en Qwen3.5-0.8B: generación idéntica, CPU vs GPU Pearson 0.99997, tests verdes. (commit `96a50a1`)
-2. **Hecho**: Fase 2 — Kernels CUDA de PagedAttention (`paged_attention.cu` con `extern "C"`): decode (online softmax, warp-reduction, layout BlockAllocator), reshape_and_block_write, block_copy. Motor `PagedAttentionGpu` (patrón cuModuleLoad, como `GgufDequantEngine`) en `gpu_kernels.zig` + build_options con ruta al cubin instalado (`paged_attention_sm86.cubin`, sm_86). Test `test_paged_attention_gpu.zig`: GPU decode/prefill vs CPU reference, max_diff ≈ 2.5e-4. (commit `9045d02`)
-3. **Hecho**: Fase 3 — `PagedAttentionGpu.decode` integrado en `AttentionLayer.forward` (reemplaza CPU softmax). KV cache dtype f32→f16 para match con kernels GPU. Forward hace branch: GPU path lanza decode kernel por token sobre el memory-pool f16; CPU path preserva softmax de referencia para validación. Test hybrid_attn pasa (max_abs=0.290). (commit `895d41f`)
-4. **Hecho**: Fase 3 — `PagedAttentionGpu.decode` integrado en `AttentionLayer.forward` (reemplaza CPU softmax). KV cache dtype f32→f16 para match con kernels GPU. Forward hace branch: GPU path lanza decode kernel por token sobre el memory-pool f16; CPU path preserva softmax de referencia para validación. Test hybrid_attn pasa (max_abs=0.290). (commit `895d41f`)
-5. **Luego**: Scheduler prefill/decode en `runHybridInference` + prefix cache + CPU offload
+2. **Hecho**: Fase 2 — Kernels CUDA de PagedAttention (`paged_attention.cu` con `extern "C"`): decode (online softmax, warp-reduction, layout BlockAllocator), reshape_and_block_write, block_copy. Motor `PagedAttentionGpu` (patrón cuModuleLoad, como `GgufDequantEngine`) en `gpu_kernels.zig` + build_options con ruta al cubin instalado (`paged_attention_sm86.cubin`, sm_86). Test `test_paged_attention_gpu.zig`: GPU decode/prefill vs CPU reference, max_diff ≈ 2.5e-4. (commit `9c98ffb`)
+3. **Hecho**: Fase 3 — `PagedAttentionGpu.decode` integrado en `AttentionLayer.forward` (reemplaza CPU softmax). KV cache dtype f32→f16 para match con kernels GPU. Forward hace branch: GPU path lanza decode kernel por token sobre el memory-pool f16; CPU path preserva softmax de referencia para validación. Test `test_gguf` E1/E2 pasa (max_abs=0.832) + hybrid_attn unit tests verdes. (commit `895d41f`)
+4. **Hecho**: Fase 4 — `Scheduler` integrado en `runHybridInference`: `submit` del prompt, `schedule` para admisión + gestión de secuencia, pre-asignación de bloques por capa de atención (reemplaza el `appendTokens` interno de `forward`), `appendToken` tras cada token de decode, `finishSequence` al terminar. BlockTables por capa ahora heap-allocated (`?*BlockTable`). (commit `980d9f2`)
+5. **Luego**: Prefix cache (`matchPrefix`/`cachePrefix` en `admitRequests`) + CPU offload (`swapToCpu`/`swapFromCpu` en `BlockAllocator` + `preemptIfNeeded`)
 
 ---
 
