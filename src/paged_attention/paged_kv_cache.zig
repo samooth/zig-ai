@@ -171,6 +171,7 @@ pub const PagedKVCache = struct {
         stats.prefix_hits = self.prefix_cache.hits;
         stats.prefix_misses = self.prefix_cache.misses;
         stats.prefix_evictions = self.prefix_cache.evictions;
+        stats.prefix_proactive_evictions = self.prefix_cache.proactive_evictions;
         stats.prefix_hit_rate = self.prefix_cache.hitRate();
         return stats;
     }

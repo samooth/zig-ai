@@ -80,11 +80,18 @@ pub const Scheduler = struct {
 
     pub fn schedule(self: *Self) ![]const u64 {
         self.step_count += 1;
+        self.proactiveEvict();
         try self.admitRequests();
         try self.allocateBlocks();
         try self.preemptIfNeeded();
         try self.restorePreempted();
         return self.running.items;
+    }
+
+    fn proactiveEvict(self: *Self) void {
+        if (!self.config.enable_proactive_evict) return;
+        if (self.kv_cache.freeBlocks() > self.config.proactive_evict_min_free) return;
+        _ = self.kv_cache.prefix_cache.evictStale(self.config.proactive_evict_stale_age);
     }
 
     fn admitRequests(self: *Self) !void {

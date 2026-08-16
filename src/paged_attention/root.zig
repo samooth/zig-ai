@@ -23,6 +23,9 @@ pub const PagedConfig = struct {
     dtype: DType = .f16,
     enable_prefix_cache: bool = true,
     enable_cpu_offload: bool = false,
+    enable_proactive_evict: bool = false,
+    proactive_evict_min_free: usize = 4,
+    proactive_evict_stale_age: u64 = 32,
     max_seq_len: usize = 8192,
     max_batch_size: usize = 64,
 };
@@ -35,5 +38,6 @@ pub const Stats = struct {
     prefix_hits: usize = 0,
     prefix_misses: usize = 0,
     prefix_evictions: usize = 0,
+    prefix_proactive_evictions: usize = 0,
     prefix_hit_rate: f64 = 0.0,
 };

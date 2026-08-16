@@ -84,6 +84,65 @@ test "PrefixCache hit rate metrics" {
     try std.testing.expectApproxEqAbs(@as(f64, 2.0 / 3.0), pc.hitRate(), 1e-9);
 }
 
+test "PrefixCache evictStale only removes cold entries" {
+    const gpa = std.testing.allocator;
+    var alloc = try pa.BlockAllocator.init(gpa, 16, 4, 2, 8, .f32, false);
+    defer alloc.deinit();
+    var pc = try pa.PrefixCache.init(gpa, &alloc, 100);
+    defer pc.deinit();
+    try pc.insert(0x0001, 1, 16);
+    try pc.insert(0x0002, 2, 16);
+    try pc.insert(0x0003, 3, 16);
+
+    // touch 0x0003 recently (bumps last_access); 0x0001/0x0002 stay cold
+    _ = pc.lookup(0x0003);
+
+    const n = pc.evictStale(2);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqual(@as(?usize, null), pc.lookup(0x0001));
+    try std.testing.expectEqual(@as(?usize, null), pc.lookup(0x0002));
+    try std.testing.expectEqual(@as(?usize, 3), pc.lookup(0x0003));
+    try std.testing.expectEqual(@as(usize, 2), pc.proactive_evictions);
+}
+
+test "Scheduler proactive eviction frees stale prefix blocks under pressure" {
+    const gpa = std.testing.allocator;
+    var kv = try pa.PagedKVCache.init(gpa, .{
+        .block_size = 4,
+        .num_blocks = 4,
+        .head_dim = 8,
+        .num_kv_heads = 2,
+        .num_q_heads = 8,
+        .dtype = .f32,
+        .enable_prefix_cache = true,
+        .enable_proactive_evict = true,
+        .proactive_evict_min_free = 2,
+        .proactive_evict_stale_age = 2,
+        .max_seq_len = 64,
+        .max_batch_size = 4,
+    });
+    defer kv.deinit();
+    var sched = pa.Scheduler.init(gpa, kv.config, &kv);
+    defer sched.deinit();
+
+    // seed cache with an old, stale prefix (never touched again)
+    const stale = &[_]u32{ 1, 2, 3, 4 };
+    _ = try sched.submit(.{ .prompt_tokens = stale, .max_new_tokens = 0 });
+    _ = try sched.schedule();
+    sched.finishSequence(1);
+    try std.testing.expectEqual(@as(usize, 1), kv.prefix_cache.size());
+
+    // fill the pool with a busy sequence so free blocks drop below threshold
+    const busy = &[_]u32{ 5, 6, 7, 8 };
+    _ = try sched.submit(.{ .prompt_tokens = busy, .max_new_tokens = 16, .priority = 10 });
+    _ = try sched.schedule();
+    _ = try sched.schedule();
+
+    const stats = kv.getStats();
+    try std.testing.expect(stats.prefix_proactive_evictions > 0);
+    try std.testing.expectEqual(@as(usize, 1), kv.prefix_cache.size());
+}
+
 test "BlockAllocator CPU offload swap round-trip" {
     const gpa = std.testing.allocator;
     var alloc = try pa.BlockAllocator.init(gpa, 16, 4, 2, 8, .f32, true);

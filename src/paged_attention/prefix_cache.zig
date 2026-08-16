@@ -17,6 +17,7 @@ pub const PrefixCache = struct {
     hits: usize = 0,
     misses: usize = 0,
     evictions: usize = 0,
+    proactive_evictions: usize = 0,
 
     const Self = @This();
 
@@ -101,6 +102,32 @@ pub const PrefixCache = struct {
         const total = self.hits + self.misses;
         if (total == 0) return 0.0;
         return @as(f64, @floatFromInt(self.hits)) / @as(f64, @floatFromInt(total));
+    }
+
+    pub fn evictStale(self: *Self, max_age: u64) usize {
+        if (max_age == 0 or self.map.count() == 0) return 0;
+        const keys = self.allocator.alloc(u64, self.map.count()) catch return 0;
+        defer self.allocator.free(keys);
+
+        var n: usize = 0;
+        var iter = self.map.iterator();
+        while (iter.next()) |entry| {
+            const age = self.access_counter - entry.value_ptr.last_access;
+            if (age >= max_age) {
+                keys[n] = entry.key_ptr.*;
+                n += 1;
+            }
+        }
+
+        var evicted: usize = 0;
+        for (keys[0..n]) |hash| {
+            if (self.map.fetchRemove(hash)) |removed| {
+                self.block_alloc.release(removed.value.phys_id);
+                self.proactive_evictions += 1;
+                evicted += 1;
+            }
+        }
+        return evicted;
     }
 
     pub fn size(self: *const Self) usize {
