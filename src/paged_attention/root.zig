@@ -34,4 +34,6 @@ pub const Stats = struct {
     sequences_active: usize = 0,
     prefix_hits: usize = 0,
     prefix_misses: usize = 0,
+    prefix_evictions: usize = 0,
+    prefix_hit_rate: f64 = 0.0,
 };

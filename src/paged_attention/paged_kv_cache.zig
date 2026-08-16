@@ -157,4 +157,21 @@ pub const PagedKVCache = struct {
     pub fn getBlock(self: *Self, phys_id: usize) *@import("block.zig").Block {
         return self.block_alloc.blocks[phys_id];
     }
+
+    pub fn getStats(self: *const Self) @import("root.zig").Stats {
+        var stats = @import("root.zig").Stats{};
+        var shared: usize = 0;
+        for (self.block_alloc.blocks) |*b| {
+            if (b.ref_count > 1) shared += 1;
+        }
+        stats.blocks_allocated = self.block_alloc.numTotal() - self.block_alloc.numFree();
+        stats.blocks_free = self.block_alloc.numFree();
+        stats.blocks_shared = shared;
+        stats.sequences_active = self.sequences.count();
+        stats.prefix_hits = self.prefix_cache.hits;
+        stats.prefix_misses = self.prefix_cache.misses;
+        stats.prefix_evictions = self.prefix_cache.evictions;
+        stats.prefix_hit_rate = self.prefix_cache.hitRate();
+        return stats;
+    }
 };

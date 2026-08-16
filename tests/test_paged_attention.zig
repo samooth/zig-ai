@@ -68,6 +68,60 @@ test "PrefixCache basic operations" {
     try std.testing.expectEqual(@as(?usize, null), pc.lookup(0x9999));
 }
 
+test "PrefixCache hit rate metrics" {
+    const gpa = std.testing.allocator;
+    var alloc = try pa.BlockAllocator.init(gpa, 16, 4, 2, 8, .f32, false);
+    defer alloc.deinit();
+    var pc = try pa.PrefixCache.init(gpa, &alloc, 100);
+    defer pc.deinit();
+    try pc.insert(0x1111, 1, 16);
+    _ = pc.lookup(0x1111);
+    _ = pc.lookup(0x1111);
+    _ = pc.lookup(0x2222);
+    try std.testing.expectEqual(@as(usize, 2), pc.hits);
+    try std.testing.expectEqual(@as(usize, 1), pc.misses);
+    try std.testing.expectEqual(@as(usize, 0), pc.evictions);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0 / 3.0), pc.hitRate(), 1e-9);
+}
+
+test "BlockAllocator CPU offload swap round-trip" {
+    const gpa = std.testing.allocator;
+    var alloc = try pa.BlockAllocator.init(gpa, 16, 4, 2, 8, .f32, true);
+    defer alloc.deinit();
+    const b = alloc.alloc().?;
+    try std.testing.expect(!alloc.blocks[b].is_cpu);
+    const dst = alloc.memory_pool[b * alloc.block_bytes ..][0..alloc.block_bytes];
+    for (0..dst.len) |i| dst[i] = @intCast(i % 251);
+
+    try alloc.swapToCpu(b);
+    try std.testing.expect(alloc.blocks[b].is_cpu);
+    try std.testing.expectEqualSlices(u8, dst, alloc.cpu_pool.?[b * alloc.block_bytes ..][0..alloc.block_bytes]);
+
+    @memset(dst, 0);
+    try alloc.swapFromCpu(b);
+    try std.testing.expect(!alloc.blocks[b].is_cpu);
+    for (dst, 0..) |byte, i| try std.testing.expectEqual(@as(u8, @intCast(i % 251)), byte);
+
+    alloc.free(b);
+    try std.testing.expectEqual(@as(usize, 16), alloc.numFree());
+}
+
+test "PagedKVCache getStats reflects prefix cache" {
+    const gpa = std.testing.allocator;
+    var kv = try pa.PagedKVCache.init(gpa, testConfig());
+    defer kv.deinit();
+    const tokens = &[_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    const seq_id = try kv.createSequence();
+    try kv.allocatePrefill(seq_id, 8);
+    try kv.cachePrefix(seq_id, tokens);
+    const matched = try kv.matchPrefix(tokens);
+    try std.testing.expectEqual(@as(usize, 8), matched);
+
+    const stats = kv.getStats();
+    try std.testing.expect(stats.prefix_hits >= 2);
+    try std.testing.expectEqual(@as(usize, 1), stats.sequences_active);
+}
+
 test "Scheduler admit and batch" {
     const gpa = std.testing.allocator;
     var kv = try pa.PagedKVCache.init(gpa, testConfig());

@@ -14,6 +14,9 @@ pub const PrefixCache = struct {
     map: std.AutoHashMap(u64, CacheEntry),
     max_entries: usize,
     access_counter: u64 = 0,
+    hits: usize = 0,
+    misses: usize = 0,
+    evictions: usize = 0,
 
     const Self = @This();
 
@@ -53,9 +56,11 @@ pub const PrefixCache = struct {
     pub fn lookup(self: *Self, block_hash: u64) ?usize {
         self.access_counter += 1;
         if (self.map.getPtr(block_hash)) |entry| {
+            self.hits += 1;
             entry.last_access = self.access_counter;
             return entry.phys_id;
         }
+        self.misses += 1;
         return null;
     }
 
@@ -88,7 +93,14 @@ pub const PrefixCache = struct {
             const entry = self.map.get(oldest_hash).?;
             self.block_alloc.release(entry.phys_id);
             _ = self.map.remove(oldest_hash);
+            self.evictions += 1;
         }
+    }
+
+    pub fn hitRate(self: *const Self) f64 {
+        const total = self.hits + self.misses;
+        if (total == 0) return 0.0;
+        return @as(f64, @floatFromInt(self.hits)) / @as(f64, @floatFromInt(total));
     }
 
     pub fn size(self: *const Self) usize {
