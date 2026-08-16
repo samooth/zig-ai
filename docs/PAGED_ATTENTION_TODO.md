@@ -370,6 +370,7 @@ pub fn bench_paged_attention() !void {
 | Prefix cache hit rate metrics | ✅ (`PrefixCache.hits/misses/evictions` + `PagedKVCache.getStats`) | |
 | Evicción proactiva de bloques fríos | ✅ (`evictStale` + `enable_proactive_evict` en scheduler) | |
 | Offload de bloques GPU⇄host | ✅ (`GpuBlockPool` persistente: `stageBlock`/`evictBlock` granulares) | |
+| Evicción GPU por hit rate | ✅ (`evictCold`/`evictGpuCold` + `PagedAttentionGpu.evictColdBlocksFromCache`) | |
 | Tests unitarios + benchmarks | ✅ (`test_paged_attention_gpu.zig`: decode + prefill vs CPU ref) | |
 
 ---
@@ -415,7 +416,8 @@ qkv_input: [batch, seq_len, num_kv_heads * head_dim * 2]  // K + V concatenados
 6. **Hecho**: Prefix cache hit-rate metrics — `PrefixCache` cuenta `hits`/`misses`/`evictions` (LRU) con `hitRate()`; `PagedKVCache.getStats()` rellena `Stats` (blocks allocated/free/shared, secuencias activas, hits/misses/evictions, hit rate). `swapToCpu`/`swapFromCpu` del BlockAllocator validados round-trip. Tests: `PrefixCache hit rate metrics`, `BlockAllocator CPU offload swap round-trip`, `PagedKVCache getStats reflects prefix cache`.
 7. **Hecho**: Evicción proactiva — `PrefixCache.evictStale(max_age)` libera entradas no tocadas en `max_age` accesos (contador `proactive_evictions`); `Scheduler.schedule()` la invoca cuando `freeBlocks() <= proactive_evict_min_free` (antes de admisión) con edad `proactive_evict_stale_age`, desbloqueando bloques bajo presión de pool antes del LRU forzado a capacidad. Opt-in vía `enable_proactive_evict`. Tests: `PrefixCache evictStale only removes cold entries`, `Scheduler proactive eviction frees stale prefix blocks under pressure`.
 8. **Hecho**: `GpuBlockPool` persistente — buffer `d_cache` alocado una vez (`num_blocks * block_bytes`) + bitmap de residencia. `stageBlock` sube bloques individuales H2D (siempre copia: el host puede haber escrito KV nuevo), `evictBlock` baja D2H al host, `stageTable` sube solo los bloques referenciados por la block table. `decode` y `blockCopy` usan el pool: elimina las copias completas del memory-pool por llamada y las alocaciones/frees de `d_cache`. `PagedAttentionGpu.ensurePool` lo crea lazy. Test: `GPU block pool stage/evict round-trip preserves host data`.
-9. **Luego**: evicción de bloques fríos en GPU según hit rate de prefix cache + paged-memory CUDA
+9. **Hecho**: Evicción de bloques fríos GPU según hit rate — `CacheEntry.hits` por entrada; `evictCold(max_age, min_hit_rate)` evicta entradas frías (por edad **o** bajo hit rate) devolviendo los phys_ids; `evictGpuCold` devuelve bloques fríos sin mutar la caché; `GpuBlockPool.evictBlocks` baja una lista del dispositivo y `PagedAttentionGpu.evictColdBlocksFromCache` lo orquesta. Tests: `evictCold removes low hit-rate entries and returns phys_ids`, `evictGpuCold does not mutate the cache`, `GPU evicts cold prefix blocks from device based on hit rate`.
+10. **Luego**: paged-memory CUDA (cuMemMap/cuMemCreate) para el pool de bloques GPU
 
 ---
 

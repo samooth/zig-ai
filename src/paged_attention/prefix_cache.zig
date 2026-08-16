@@ -6,6 +6,7 @@ pub const CacheEntry = struct {
     phys_id: usize,
     num_tokens: usize,
     last_access: u64,
+    hits: usize = 0,
 };
 
 pub const PrefixCache = struct {
@@ -59,6 +60,7 @@ pub const PrefixCache = struct {
         if (self.map.getPtr(block_hash)) |entry| {
             self.hits += 1;
             entry.last_access = self.access_counter;
+            entry.hits += 1;
             return entry.phys_id;
         }
         self.misses += 1;
@@ -105,29 +107,77 @@ pub const PrefixCache = struct {
     }
 
     pub fn evictStale(self: *Self, max_age: u64) usize {
-        if (max_age == 0 or self.map.count() == 0) return 0;
-        const keys = self.allocator.alloc(u64, self.map.count()) catch return 0;
+        return self.evictWhere(max_age, 0.0);
+    }
+
+    /// Evicta entradas frías: no accedidas en `max_age` accesos **o** con muy
+    /// pocos hits respecto a la edad (`min_hit_rate`), p. ej. bloque subido a
+    /// GPU pero nunca reutilizado. Devuelve los phys_ids desalojados para que
+    /// el llamador los baje también del pool GPU.
+    pub fn evictCold(self: *Self, max_age: u64, min_hit_rate: f64) []usize {
+        return self.evictWhereReturning(max_age, min_hit_rate);
+    }
+
+    /// Igual que `evictCold` pero sin tocar la caché: devuelve los phys_ids
+    /// de bloques GPU fríos que podrían bajarse del dispositivo.
+    pub fn evictGpuCold(self: *Self, max_age: u64, min_hit_rate: f64) []usize {
+        if (self.map.count() == 0) return &.{};
+        const result = self.allocator.alloc(usize, self.map.count()) catch return &.{};
+        var n: usize = 0;
+        var iter = self.map.iterator();
+        while (iter.next()) |entry| {
+            if (self.isCold(entry.value_ptr, max_age, min_hit_rate)) {
+                result[n] = entry.value_ptr.phys_id;
+                n += 1;
+            }
+        }
+        if (n < result.len) {
+            return self.allocator.realloc(result, n) catch result;
+        }
+        return result;
+    }
+
+    fn isCold(self: *const Self, entry: *const CacheEntry, max_age: u64, min_hit_rate: f64) bool {
+        const age = self.access_counter - entry.last_access;
+        const hit_rate: f64 = if (age == 0) 1.0 else
+            @as(f64, @floatFromInt(entry.hits)) / @as(f64, @floatFromInt(age));
+        return age >= max_age or (min_hit_rate > 0 and hit_rate < min_hit_rate);
+    }
+
+    fn evictWhere(self: *Self, max_age: u64, min_hit_rate: f64) usize {
+        const evicted = self.evictWhereReturning(max_age, min_hit_rate);
+        self.allocator.free(evicted);
+        return evicted.len;
+    }
+
+    fn evictWhereReturning(self: *Self, max_age: u64, min_hit_rate: f64) []usize {
+        if (self.map.count() == 0) return &.{};
+        const keys = self.allocator.alloc(u64, self.map.count()) catch return &.{};
         defer self.allocator.free(keys);
 
         var n: usize = 0;
         var iter = self.map.iterator();
         while (iter.next()) |entry| {
-            const age = self.access_counter - entry.value_ptr.last_access;
-            if (age >= max_age) {
+            if (self.isCold(entry.value_ptr, max_age, min_hit_rate)) {
                 keys[n] = entry.key_ptr.*;
                 n += 1;
             }
         }
 
-        var evicted: usize = 0;
+        const result = self.allocator.alloc(usize, n) catch return &.{};
+        var m: usize = 0;
         for (keys[0..n]) |hash| {
             if (self.map.fetchRemove(hash)) |removed| {
+                result[m] = removed.value.phys_id;
+                m += 1;
                 self.block_alloc.release(removed.value.phys_id);
                 self.proactive_evictions += 1;
-                evicted += 1;
             }
         }
-        return evicted;
+        if (m < result.len) {
+            return self.allocator.realloc(result, m) catch result;
+        }
+        return result;
     }
 
     pub fn size(self: *const Self) usize {

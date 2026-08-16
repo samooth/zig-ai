@@ -157,3 +157,48 @@ test "GPU block pool stage/evict round-trip preserves host data" {
         try std.testing.expectApproxEqAbs(@as(f16, @floatCast(@as(f32, @floatFromInt(i)) * 0.5)), v, 1e-3);
     }
 }
+
+test "GPU evicts cold prefix blocks from device based on hit rate" {
+    if (!cudaz.isCudaAvailable()) {
+        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        return error.SkipZigTest;
+    }
+    const gpa = std.testing.allocator;
+    const config = pa.PagedConfig{
+        .block_size = 4,
+        .num_blocks = 64,
+        .head_dim = 8,
+        .num_kv_heads = 2,
+        .num_q_heads = 8,
+        .dtype = .f16,
+        .enable_prefix_cache = true,
+        .max_seq_len = 64,
+        .max_batch_size = 4,
+    };
+    var kv = try pa.PagedKVCache.init(gpa, config);
+    defer kv.deinit();
+
+    var engine = try pa.PagedAttentionGpu.init(gpa, config);
+    defer engine.deinit();
+
+    // cachea un prefix frío y uno caliente
+    const cold = &[_]u32{ 1, 2, 3, 4 };
+    const hot = &[_]u32{ 5, 6, 7, 8 };
+    var sched = pa.Scheduler.init(gpa, kv.config, &kv);
+    defer sched.deinit();
+
+    _ = try sched.submit(.{ .prompt_tokens = cold, .max_new_tokens = 0 });
+    _ = try sched.schedule();
+    sched.finishSequence(1);
+    _ = try sched.submit(.{ .prompt_tokens = hot, .max_new_tokens = 0 });
+    _ = try sched.schedule();
+    sched.finishSequence(2);
+
+    // tocar el caliente para que no sea frío
+    _ = try kv.matchPrefix(hot);
+    _ = try kv.matchPrefix(hot);
+
+    const before = try engine.evictColdBlocksFromCache(kv.block_alloc, &kv.prefix_cache, 1, 0.5);
+    try std.testing.expect(before >= 1);
+    try std.testing.expectEqual(@as(usize, 2), kv.prefix_cache.size());
+}

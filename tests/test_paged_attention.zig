@@ -105,6 +105,44 @@ test "PrefixCache evictStale only removes cold entries" {
     try std.testing.expectEqual(@as(usize, 2), pc.proactive_evictions);
 }
 
+test "PrefixCache evictCold removes low hit-rate entries and returns phys_ids" {
+    const gpa = std.testing.allocator;
+    var alloc = try pa.BlockAllocator.init(gpa, 16, 4, 2, 8, .f32, false);
+    defer alloc.deinit();
+    var pc = try pa.PrefixCache.init(gpa, &alloc, 100);
+    defer pc.deinit();
+
+    // hot: hit twice recently -> hit rate 2/2 = 1.0
+    try pc.insert(0xBBBB, 2, 16); // cold: inserted first, no hits
+    try pc.insert(0xAAAA, 1, 16);
+    _ = pc.lookup(0xAAAA);
+    _ = pc.lookup(0xAAAA);
+
+    const cold_phys = pc.evictCold(1, 0.5);
+    defer gpa.free(cold_phys);
+    try std.testing.expectEqual(@as(usize, 1), cold_phys.len);
+    try std.testing.expectEqual(@as(usize, 2), cold_phys[0]);
+    try std.testing.expectEqual(@as(?usize, null), pc.lookup(0xBBBB));
+    try std.testing.expectEqual(@as(?usize, 1), pc.lookup(0xAAAA));
+}
+
+test "PrefixCache evictGpuCold does not mutate the cache" {
+    const gpa = std.testing.allocator;
+    var alloc = try pa.BlockAllocator.init(gpa, 16, 4, 2, 8, .f32, false);
+    defer alloc.deinit();
+    var pc = try pa.PrefixCache.init(gpa, &alloc, 100);
+    defer pc.deinit();
+    try pc.insert(0xCCCC, 1, 16);
+    try pc.insert(0xDDDD, 2, 16);
+
+    const cold_phys = pc.evictGpuCold(1, 0.5);
+    defer gpa.free(cold_phys);
+    try std.testing.expectEqual(@as(usize, 1), cold_phys.len);
+    try std.testing.expectEqual(@as(usize, 1), cold_phys[0]);
+    // cache intacto: ambas entradas siguen ahí
+    try std.testing.expectEqual(@as(usize, 2), pc.size());
+}
+
 test "Scheduler proactive eviction frees stale prefix blocks under pressure" {
     const gpa = std.testing.allocator;
     var kv = try pa.PagedKVCache.init(gpa, .{

@@ -76,6 +76,14 @@ pub const GpuBlockPool = struct {
         }
     }
 
+    /// Baja del dispositivo una lista de bloques fríos (D2H) y los marca no
+    /// residentes. Se usa cuando la prefix cache desaloja entradas frías.
+    pub fn evictBlocks(self: *Self, block_alloc: *BlockAllocator, phys_ids: []const usize) !void {
+        for (phys_ids) |phys| {
+            try self.evictBlock(block_alloc, phys);
+        }
+    }
+
     pub fn numResident(self: *const Self) usize {
         var n: usize = 0;
         for (self.resident) |r| {
@@ -260,6 +268,24 @@ pub const PagedAttentionGpu = struct {
             try pool.evictBlock(block_alloc, dst);
         }
         try cudaz.cuCtxSynchronize();
+    }
+
+    /// Baja del dispositivo los bloques fríos de la prefix cache (según su
+    /// hit rate) usando `PrefixCache.evictGpuCold`, liberando memoria GPU para
+    /// bloques calientes. Devuelve cuántos bloques se bajaron.
+    pub fn evictColdBlocksFromCache(
+        self: *Self,
+        block_alloc: *BlockAllocator,
+        prefix_cache: *@import("prefix_cache.zig").PrefixCache,
+        max_age: u64,
+        min_hit_rate: f64,
+    ) !usize {
+        try cudaz.ensureCurrent();
+        const pool = try self.ensurePool(block_alloc);
+        const cold = prefix_cache.evictGpuCold(max_age, min_hit_rate);
+        defer self.allocator.free(cold);
+        try pool.evictBlocks(block_alloc, cold);
+        return cold.len;
     }
 };
 
