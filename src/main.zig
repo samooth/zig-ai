@@ -28,7 +28,6 @@ const CliParams = struct {
     max_new_tokens: usize = 128,
     seed: u64 = 42,
     backend: []const u8 = "auto", // auto | cpu | gpu
-    legacy: bool = false, // usar el path contiguo (TransformerLayer + KVCacheManager)
     sampler: pipeline.Sampler = .{},
 };
 
@@ -146,8 +145,6 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args, stdout: anyty
             } else {
                 try stdout.print("[!] Backend inválido: {s} (auto|cpu|gpu)\n", .{v});
             }
-        } else if (std.mem.eql(u8, arg, "--legacy")) {
-            params.legacy = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             try printHelp(stdout);
             std.process.exit(0);
@@ -178,7 +175,6 @@ fn printHelp(stdout: anytype) !void {
         \\  --repetition-penalty <f>  Repetition penalty (def: 1.0 = desactivado)
         \\  --seed <n>                Semilla del RNG (def: 42)
         \\  --backend <auto|cpu|gpu>  Backend matmul (def: auto → GPU si disponible)
-        \\  --legacy                  Path contiguo legacy (TransformerLayer + KVCacheManager)
         \\  -h, --help                Muestra esta ayuda
         \\
     , .{});
@@ -199,10 +195,12 @@ fn runInference(
     defer model.deinit();
     const cfg = model.config;
 
-    // Path por defecto: paged/híbrido (PagedKVCache + Scheduler + HybridLayer).
-    // El path legacy (TransformerLayer + KVCacheManager contiguo) queda
-    // disponible con --legacy para arquitecturas clásicas no-qwen35.
-    if (!params.legacy) {
+    // Detección automática del path según la arquitectura GGUF:
+    //   - híbrido (qwen35/qwen35moe, cfg.is_hybrid) → path paged/híbrido
+    //     (PagedKVCache + Scheduler + HybridLayer).
+    //   - clásico (llama/gemma/mistral, ...) → path legacy contiguo
+    //     (TransformerLayer + KVCacheManager).
+    if (cfg.is_hybrid) {
         try runHybridInference(allocator, &model, params, backend, stdout);
         return;
     }

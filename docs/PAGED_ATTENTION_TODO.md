@@ -373,7 +373,7 @@ pub fn bench_paged_attention() !void {
 | Evicción GPU por hit rate | ✅ (`evictCold`/`evictGpuCold` + `PagedAttentionGpu.evictColdBlocksFromCache`) | |
 | Tests unitarios + benchmarks | ✅ (`test_paged_attention_gpu.zig`: decode + prefill vs CPU ref) | |
 | Pool GPU compartido entre capas | ✅ (una sola instancia `PagedAttentionGpu` para todas las capas de atención — antes cada capa alocaba `num_blocks * block_bytes` por separado → OOM en context_length grandes) | |
-| Path híbrido paginado por defecto | ✅ (`runHybridInference` por defecto; legacy `TransformerLayer`+`KVCacheManager` con `--legacy`) | |
+| Path híbrido paginado por defecto | ✅ (detección automática vía `cfg.is_hybrid` según arquitectura GGUF: qwen35 → paged/híbrido; clásico → legacy contiguo. Sin flags) | |
 | Benchmarks paged-attention | ✅ (`benchmarks/bench_paged_attention.zig` vía `zig build bench-pa`: decode latencia/throughput CPU+GPU vs batch, VRAM vs num_blocks, prefix hit rate, CPU offload) | |
 
 ---
