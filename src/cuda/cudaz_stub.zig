@@ -28,6 +28,84 @@ pub const CUfunction = *opaque {};
 pub const CUstream = *opaque {};
 pub const CUdeviceptr = usize;
 pub const CUevent = *opaque {};
+pub const CUmemGenericAllocationHandle = u64;
+
+pub const CUmemAllocationType = enum(c_int) {
+    INVALID = 0,
+    PINNED = 1,
+};
+
+pub const CUmemAllocationHandleType = enum(c_int) {
+    NONE = 0,
+    POSIX_FILE_DESCRIPTOR = 1,
+    WIN32 = 2,
+    WIN32_KMT = 4,
+};
+
+pub const CUmemLocationType = enum(c_int) {
+    INVALID = 0,
+    DEVICE = 1,
+    HOST = 2,
+    HOST_NUMA = 3,
+    HOST_NUMA_CURRENT = 4,
+};
+
+pub const CUmemLocation = extern struct {
+    type: CUmemLocationType,
+    id: c_int,
+};
+
+pub const CUmemAllocationProp = extern struct {
+    type: CUmemAllocationType,
+    requestedHandleTypes: CUmemAllocationHandleType,
+    location: CUmemLocation,
+    win32HandleMetaData: ?*anyopaque = null,
+    allocFlags: extern struct {
+        compressionType: u8 = 0,
+        gpuDirectRDMACapable: u8 = 0,
+        usage: u16 = 0,
+        reserved: [4]u8 = [_]u8{ 0, 0, 0, 0 },
+    } = .{},
+};
+
+pub const CUmemAccess_flags = enum(c_int) {
+    PROT_NONE = 0,
+    PROT_READ = 1,
+    PROT_READWRITE = 3,
+    PROT_MAX = 0x7FFFFFFF,
+};
+
+pub const CUmemAccessDesc = extern struct {
+    location: CUmemLocation,
+    flags: CUmemAccess_flags,
+};
+
+pub const CU_MEM_ALLOCATION_GRANULARITY_MINIMUM: u64 = 0;
+pub const CU_MEM_ALLOCATION_GRANULARITY_RECOMMENDED: u64 = 1;
+
+pub const CUpointer_attribute = enum(c_int) {
+    CONTEXT = 1,
+    MEMORY_TYPE = 2,
+    DEVICE_POINTER = 3,
+    HOST_POINTER = 4,
+    P2P_TOKENS = 5,
+    SYNC_MEMOPS = 6,
+    BUFFER_ID = 7,
+    IS_MANAGED = 8,
+    DEVICE_ORDINAL = 9,
+    IS_LEGACY_CUDA_IPC_CAPABLE = 10,
+    IS_SYSMEM_REMOTE = 11,
+    ALLOCATION_START = 12,
+    ALLOCATION_SIZE = 13,
+    ALLOCATION_TYPE = 14,
+    BUFFER_SIZE = 15,
+    BUFFER_START = 16,
+};
+
+pub fn cuPointerGetAttribute(data: *anyopaque, attribute: CUpointer_attribute, ptr: CUdeviceptr) !void {
+    const res = cudalib.cuPointerGetAttribute(data, attribute, ptr);
+    if (res != .SUCCESS) return error.CudaError;
+}
 
 pub fn cuInit(flags: c_uint) !void {
     const res = cudalib.cuInit(flags);
@@ -88,6 +166,37 @@ pub fn cuMemAllocHost(bytes: usize) !*anyopaque {
 
 pub fn cuMemFreeHost(ptr: *anyopaque) void { _ = cudalib.cuMemFreeHost(ptr); }
 
+pub fn cuMemAddressReserve(ptr: *CUdeviceptr, size: usize, alignment: usize, addr: CUdeviceptr, flags: u64) !void {
+    const res = cudalib.cuMemAddressReserve(ptr, size, alignment, addr, flags);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuMemAddressFree(ptr: CUdeviceptr, size: usize) void { _ = cudalib.cuMemAddressFree(ptr, size); }
+
+pub fn cuMemCreate(handle: *CUmemGenericAllocationHandle, size: usize, prop: *CUmemAllocationProp, flags: u64) !void {
+    const res = cudalib.cuMemCreate(handle, size, prop, flags);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuMemRelease(handle: CUmemGenericAllocationHandle) void { _ = cudalib.cuMemRelease(handle); }
+
+pub fn cuMemMap(ptr: CUdeviceptr, size: usize, offset: usize, handle: CUmemGenericAllocationHandle, flags: u64) !void {
+    const res = cudalib.cuMemMap(ptr, size, offset, handle, flags);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuMemUnmap(ptr: CUdeviceptr, size: usize) void { _ = cudalib.cuMemUnmap(ptr, size); }
+
+pub fn cuMemSetAccess(ptr: CUdeviceptr, size: usize, desc: *const CUmemAccessDesc, count: usize) !void {
+    const res = cudalib.cuMemSetAccess(ptr, size, desc, count);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuMemGetAllocationGranularity(granularity: *usize, prop: *CUmemAllocationProp, option: u64) !void {
+    const res = cudalib.cuMemGetAllocationGranularity(granularity, prop, option);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
 pub fn cuMemcpyHtoDAsync(dst: CUdeviceptr, src: usize, bytes: usize, stream: CUstream) !void {
     const res = cudalib.cuMemcpyHtoDAsync_v2(dst, @ptrFromInt(src), bytes, stream);
     if (res != .SUCCESS) return error.CudaError;
@@ -95,6 +204,16 @@ pub fn cuMemcpyHtoDAsync(dst: CUdeviceptr, src: usize, bytes: usize, stream: CUs
 
 pub fn cuMemcpyDtoHAsync(dst: usize, src: CUdeviceptr, bytes: usize, stream: CUstream) !void {
     const res = cudalib.cuMemcpyDtoHAsync_v2(@ptrFromInt(dst), src, bytes, stream);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuMemsetD8(dst: CUdeviceptr, value: u8, count: usize) !void {
+    const res = cudalib.cuMemsetD8_v2(dst, value, count);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuMemcpyDtoD(dst: CUdeviceptr, src: CUdeviceptr, bytes: usize) !void {
+    const res = cudalib.cuMemcpyDtoD_v2(dst, src, bytes);
     if (res != .SUCCESS) return error.CudaError;
 }
 
@@ -157,9 +276,20 @@ const cudalib = struct {
     extern "c" fn cuMemFree_v2(dptr: CUdeviceptr) CUresult;
     extern "c" fn cuMemAllocHost_v2(pp: *?*anyopaque, bytesize: usize) CUresult;
     extern "c" fn cuMemFreeHost(p: *anyopaque) CUresult;
+    extern "c" fn cuMemAddressReserve(ptr: *CUdeviceptr, size: usize, alignment: usize, addr: CUdeviceptr, flags: u64) CUresult;
+    extern "c" fn cuMemAddressFree(ptr: CUdeviceptr, size: usize) CUresult;
+    extern "c" fn cuMemCreate(handle: *CUmemGenericAllocationHandle, size: usize, prop: *CUmemAllocationProp, flags: u64) CUresult;
+    extern "c" fn cuMemRelease(handle: CUmemGenericAllocationHandle) CUresult;
+    extern "c" fn cuMemMap(ptr: CUdeviceptr, size: usize, offset: usize, handle: CUmemGenericAllocationHandle, flags: u64) CUresult;
+    extern "c" fn cuMemUnmap(ptr: CUdeviceptr, size: usize) CUresult;
+    extern "c" fn cuMemSetAccess(ptr: CUdeviceptr, size: usize, desc: *const CUmemAccessDesc, count: usize) CUresult;
+    extern "c" fn cuMemGetAllocationGranularity(granularity: *usize, prop: *CUmemAllocationProp, option: u64) CUresult;
+    extern "c" fn cuPointerGetAttribute(data: *anyopaque, attribute: CUpointer_attribute, ptr: CUdeviceptr) CUresult;
     extern "c" fn cuMemcpyHtoDAsync_v2(dst: CUdeviceptr, src: *const anyopaque, bytes: usize, stream: CUstream) CUresult;
     extern "c" fn cuMemcpyDtoHAsync_v2(dst: *anyopaque, src: CUdeviceptr, bytes: usize, stream: CUstream) CUresult;
     extern "c" fn cuMemcpyHtoD_v2(dst: CUdeviceptr, src: *const anyopaque, bytes: usize) CUresult;
+    extern "c" fn cuMemsetD8_v2(dst: CUdeviceptr, value: u8, count: usize) CUresult;
+    extern "c" fn cuMemcpyDtoD_v2(dst: CUdeviceptr, src: CUdeviceptr, bytes: usize) CUresult;
     extern "c" fn cuMemcpyDtoH_v2(dst: *anyopaque, src: CUdeviceptr, bytes: usize) CUresult;
     extern "c" fn cuCtxSynchronize() CUresult;
     extern "c" fn cuStreamCreate(phStream: *CUstream, flags: c_uint) CUresult;

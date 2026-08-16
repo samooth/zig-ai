@@ -158,6 +158,61 @@ test "GPU block pool stage/evict round-trip preserves host data" {
     }
 }
 
+test "Paged GPU block pool (VMM) stage/evict round-trip preserves host data" {
+    if (!cudaz.isCudaAvailable()) {
+        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        return error.SkipZigTest;
+    }
+    const gpa = std.testing.allocator;
+    const granule = pa.PagedGpuBlockPool.getGranule() catch {
+        std.debug.print("SKIP: VMM no soportado\n", .{});
+        return error.SkipZigTest;
+    };
+    // bytes por bloque = block_size * num_kv_heads * head_dim * 2 (f16) * 2 (K+V)
+    const bytes_per_token = @as(usize, 2) * @as(usize, 2) * @as(usize, 8) * @as(usize, 2);
+    if (granule % bytes_per_token != 0) {
+        std.debug.print("SKIP: granule={d} no múltiplo de {d}\n", .{ granule, bytes_per_token });
+        return error.SkipZigTest;
+    }
+    const block_size: usize = granule / bytes_per_token;
+    const config = pa.PagedConfig{
+        .block_size = block_size,
+        .num_blocks = 4,
+        .head_dim = 8,
+        .num_kv_heads = 2,
+        .num_q_heads = 8,
+        .dtype = .f16,
+        .enable_prefix_cache = false,
+        .max_seq_len = block_size * 4,
+        .max_batch_size = 4,
+    };
+    var kv = try pa.PagedKVCache.init(gpa, config);
+    defer kv.deinit();
+
+    var pool = try pa.PagedGpuBlockPool.init(gpa, kv.block_alloc.numTotal(), kv.block_alloc.block_bytes);
+    defer pool.deinit();
+    try std.testing.expectEqual(@as(usize, 0), pool.numResident());
+
+    const seq_id = try kv.createSequence();
+    try kv.allocatePrefill(seq_id, 4);
+    const bt = kv.getBlockTableMut(seq_id).?;
+    const phys = bt.getPhysical(0).?;
+    const data = kv.getBlockData(phys);
+    const fdata = @as([*]f16, @ptrCast(@alignCast(data)))[0 .. kv.block_alloc.block_bytes / 2];
+    for (fdata, 0..) |*v, i| v.* = @floatCast(@as(f32, @floatFromInt(i)) * 0.5);
+
+    try pool.stageBlock(kv.block_alloc, phys);
+    try std.testing.expectEqual(@as(usize, 1), pool.numResident());
+
+    // Modificar host no debe afectar la copia residente hasta evictar.
+    @memset(fdata, 0);
+    try pool.evictBlock(kv.block_alloc, phys);
+    try std.testing.expectEqual(@as(usize, 0), pool.numResident());
+    for (fdata, 0..) |v, i| {
+        try std.testing.expectApproxEqAbs(@as(f16, @floatCast(@as(f32, @floatFromInt(i)) * 0.5)), v, 1e-3);
+    }
+}
+
 test "GPU evicts cold prefix blocks from device based on hit rate" {
     if (!cudaz.isCudaAvailable()) {
         std.debug.print("SKIP: CUDA no disponible\n", .{});
