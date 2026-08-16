@@ -97,6 +97,7 @@ pub const HybridLayer = struct {
     // KV-Cache paginado compartido (solo usado por capas de atención)
     paged_kv: ?*paged.PagedKVCache = null,
     block_table: ?*paged.BlockTable = null,
+    paged_gpu: ?*paged.PagedAttentionGpu = null,
 
     const Self = @This();
 
@@ -108,6 +109,7 @@ pub const HybridLayer = struct {
         backend: matmul.Backend,
         paged_kv: ?*paged.PagedKVCache,
         block_table: ?*paged.BlockTable,
+        paged_gpu: ?*paged.PagedAttentionGpu,
     ) !Self {
         var engine = try matmul.MatmulEngine.init(allocator, backend, .f32);
         errdefer engine.deinit();
@@ -142,6 +144,7 @@ pub const HybridLayer = struct {
             .ssm_layer = null,
             .paged_kv = paged_kv,
             .block_table = block_table,
+            .paged_gpu = paged_gpu,
         };
 
         if (is_attention) {
@@ -163,6 +166,7 @@ pub const HybridLayer = struct {
                 backend,
                 paged_kv orelse return HybridLayerError.KvCacheNotSet,
                 block_table orelse return HybridLayerError.KvCacheNotSet,
+                paged_gpu,
             );
             errdefer if (self.attn_layer) |l| l.deinit();
         } else {

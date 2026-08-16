@@ -63,8 +63,11 @@ pub const AttentionLayer = struct {
     block_table: *paged.BlockTable,
     sequence_id: u64 = 0,
 
-    // Motor GPU de PagedAttention (null si CUDA no disponible)
-    paged_gpu: ?paged.PagedAttentionGpu = null,
+    // Motor GPU de PagedAttention (compartido entre capas; null si CUDA no
+    // disponible). El pool del GPU se indexa por phys_id global del
+    // BlockAllocator compartido, así que una sola instancia cubre todas las
+    // capas de atención (evita OOM: num_blocks * block_bytes por capa).
+    paged_gpu: ?*paged.PagedAttentionGpu = null,
 
     const Self = @This();
 
@@ -75,6 +78,7 @@ pub const AttentionLayer = struct {
         backend: matmul.Backend,
         paged_kv: *paged.PagedKVCache,
         block_table: *paged.BlockTable,
+        paged_gpu: ?*paged.PagedAttentionGpu,
     ) !Self {
         var engine = try matmul.MatmulEngine.init(allocator, backend, .f32);
         errdefer engine.deinit();
@@ -96,16 +100,7 @@ pub const AttentionLayer = struct {
         var attn_k_norm = try Tensor(f32).alloc(allocator, &.{params.head_dim});
         errdefer attn_k_norm.deinit();
 
-        var paged_gpu: ?paged.PagedAttentionGpu = null;
-        const gpu_config = paged.PagedConfig{
-            .block_size = paged_kv.config.block_size,
-            .num_blocks = 0,
-            .head_dim = params.head_dim,
-            .num_kv_heads = params.n_kv_head,
-            .num_q_heads = params.n_head,
-            .dtype = paged_kv.config.dtype,
-        };
-        paged_gpu = paged.PagedAttentionGpu.init(allocator, gpu_config) catch null;
+        const paged_gpu_local: ?*paged.PagedAttentionGpu = paged_gpu;
 
         return Self{
             .allocator = allocator,
@@ -124,7 +119,7 @@ pub const AttentionLayer = struct {
             .scratch_o = scratch_o,
             .paged_kv = paged_kv,
             .block_table = block_table,
-            .paged_gpu = paged_gpu,
+            .paged_gpu = paged_gpu_local,
         };
     }
 
@@ -136,7 +131,6 @@ pub const AttentionLayer = struct {
         self.allocator.free(self.scratch_o);
         self.attn_q_norm.deinit();
         self.attn_k_norm.deinit();
-        if (self.paged_gpu) |*pg| pg.deinit();
     }
 
     pub fn resetState(self: *Self) void {
@@ -317,7 +311,7 @@ pub const AttentionLayer = struct {
         var attn_out = try Tensor(f32).alloc(self.allocator, &.{ N, n_head, head_dim });
         defer attn_out.deinit();
 
-        if (self.paged_gpu) |*gpu| {
+        if (self.paged_gpu) |gpu| {
             const q_stride = n_head * head_dim;
             for (0..N) |t| {
                 const q_off = t * q_stride;
@@ -608,7 +602,7 @@ fn buildTestLayer(allocator: std.mem.Allocator) !TestFixture {
         allocator.destroy(block_table);
     }
 
-    var layer = try AttentionLayer.init(allocator, 0, test_params, .auto, paged_kv, block_table);
+    var layer = try AttentionLayer.init(allocator, 0, test_params, .auto, paged_kv, block_table, null);
     errdefer layer.deinit();
 
     const q_info = try allocator.create(gguf.TensorInfo);

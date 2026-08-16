@@ -531,4 +531,32 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(bench);
     const run_bench = b.addRunArtifact(bench);
     bench_step.dependOn(&run_bench.step);
+
+    // === Benchmark PagedAttention ===
+    const bench_pa_step = b.step("bench-pa", "Run PagedAttention benchmarks");
+    const bench_pa_mod = b.createModule(.{
+        .root_source_file = b.path("benchmarks/bench_paged_attention.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_pa_mod.addImport("paged_attention", paged_attention_mod);
+    bench_pa_mod.addImport("cudaz", cudaz_mod);
+    bench_pa_mod.addImport("time", time_mod);
+    bench_pa_mod.link_libc = true;
+    if (has_cuda) {
+        bench_pa_mod.linkSystemLibrary("cuda", .{});
+        bench_pa_mod.linkSystemLibrary("cudart", .{});
+        if (cuda_lib_dir_exists) bench_pa_mod.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
+        bench_pa_mod.linkSystemLibrary("cublas", .{});
+    }
+    const bench_pa = b.addExecutable(.{
+        .name = "bench_paged_attention",
+        .root_module = bench_pa_mod,
+    });
+    b.installArtifact(bench_pa);
+    const run_bench_pa = b.addRunArtifact(bench_pa);
+    if (paged_cubin_install) |inst| {
+        run_bench_pa.step.dependOn(&inst.step);
+    }
+    bench_pa_step.dependOn(&run_bench_pa.step);
 }

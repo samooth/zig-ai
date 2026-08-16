@@ -286,7 +286,7 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     var block_table = paged_attn.BlockTable.init(gpa, 16);
     defer block_table.deinit(paged_kv.block_alloc);
 
-    var layer = try hybrid_layer.HybridLayer.init(gpa, layer_idx, hparams, true, .auto, &paged_kv, &block_table);
+    var layer = try hybrid_layer.HybridLayer.init(gpa, layer_idx, hparams, true, .auto, &paged_kv, &block_table, null);
     defer layer.deinit();
 
     try layer.loadWeightsFromGguf(&model.file);

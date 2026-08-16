@@ -28,6 +28,7 @@ const CliParams = struct {
     max_new_tokens: usize = 128,
     seed: u64 = 42,
     backend: []const u8 = "auto", // auto | cpu | gpu
+    legacy: bool = false, // usar el path contiguo (TransformerLayer + KVCacheManager)
     sampler: pipeline.Sampler = .{},
 };
 
@@ -145,6 +146,8 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args, stdout: anyty
             } else {
                 try stdout.print("[!] Backend inválido: {s} (auto|cpu|gpu)\n", .{v});
             }
+        } else if (std.mem.eql(u8, arg, "--legacy")) {
+            params.legacy = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             try printHelp(stdout);
             std.process.exit(0);
@@ -175,6 +178,7 @@ fn printHelp(stdout: anytype) !void {
         \\  --repetition-penalty <f>  Repetition penalty (def: 1.0 = desactivado)
         \\  --seed <n>                Semilla del RNG (def: 42)
         \\  --backend <auto|cpu|gpu>  Backend matmul (def: auto → GPU si disponible)
+        \\  --legacy                  Path contiguo legacy (TransformerLayer + KVCacheManager)
         \\  -h, --help                Muestra esta ayuda
         \\
     , .{});
@@ -190,16 +194,20 @@ fn runInference(
     stdout: anytype,
 ) !void {
     try stdout.print("[+] Cargando modelo GGUF: {s}\n", .{model_path});
+    try stdout.flush();
     var model = try gguf_model.GgufModel.load(io, allocator, model_path);
     defer model.deinit();
     const cfg = model.config;
 
-    if (cfg.is_hybrid) {
+    // Path por defecto: paged/híbrido (PagedKVCache + Scheduler + HybridLayer).
+    // El path legacy (TransformerLayer + KVCacheManager contiguo) queda
+    // disponible con --legacy para arquitecturas clásicas no-qwen35.
+    if (!params.legacy) {
         try runHybridInference(allocator, &model, params, backend, stdout);
         return;
     }
 
-    try stdout.print("[+] arch={s} capas={d} heads={d} kv={d} emb={d} ffn={d} vocab={d} ctx={d}\n", .{
+    try stdout.print("[+] arch={s} capas={d} heads={d} kv={d} emb={d} ffn={d} vocab={d} ctx={d} (path legacy)\n", .{
         cfg.architecture, cfg.block_count, cfg.head_count, cfg.head_count_kv,
         cfg.embedding_length, cfg.feed_forward_length, cfg.vocab_size, cfg.context_length,
     });
@@ -295,6 +303,11 @@ fn runHybridInference(
     const vocab = cfg.vocab_size;
     const max_seq_len = cfg.context_length;
 
+    try stdout.print("[+] arch={s} capas={d} heads={d} kv={d} emb={d} ffn={d} vocab={d} ctx={d} (path paged)\n", .{
+        cfg.architecture, cfg.block_count, cfg.head_count, cfg.head_count_kv,
+        cfg.embedding_length, cfg.feed_forward_length, cfg.vocab_size, cfg.context_length,
+    });
+
     var emb = try model.loadEmbedding();
     defer emb.deinit();
     var lm_head = try model.loadLmHead();
@@ -332,6 +345,22 @@ fn runHybridInference(
     var scheduler = paged_attn.Scheduler.init(allocator, paged_kv.config, &paged_kv);
     defer scheduler.deinit();
 
+    // Pool GPU único compartido entre todas las capas de atención: el pool se
+    // indexa por phys_id global del BlockAllocator compartido, así que una sola
+    // instancia (num_blocks * block_bytes) sirve a todas las capas. (Antes cada
+    // capa alocaba su propio pool -> num_attn_layers * num_blocks * block_bytes,
+    // OOM en modelos con context_length grande.)
+    var shared_paged_gpu: ?paged_attn.PagedAttentionGpu = paged_attn.PagedAttentionGpu.init(allocator, .{
+        .block_size = block_size,
+        .num_blocks = 0,
+        .head_dim = head_dim,
+        .num_kv_heads = cfg.head_count_kv,
+        .num_q_heads = cfg.head_count,
+        .dtype = .f16,
+    }) catch null;
+    defer if (shared_paged_gpu) |*g| g.deinit();
+    const shared_gpu_ptr: ?*paged_attn.PagedAttentionGpu = if (shared_paged_gpu) |*g| g else null;
+
     var layers = try allocator.alloc(hybrid_layer.HybridLayer, cfg.block_count);
     var layer_block_tables = try allocator.alloc(?*paged_attn.BlockTable, cfg.block_count);
     defer allocator.free(layer_block_tables);
@@ -349,6 +378,7 @@ fn runHybridInference(
             backend,
             &paged_kv,
             if (layer_block_tables[i]) |bt| bt else null,
+            shared_gpu_ptr,
         );
         try layers[i].loadWeightsFromGguf(&model.file);
     }
@@ -371,7 +401,6 @@ fn runHybridInference(
     const prompt = params.prompt orelse "Hola";
     const prompt_ids = try tok.encode(prompt, .{});
     defer allocator.free(prompt_ids);
-    try stdout.print("[+] prompt ({d} tokens): {s}\n", .{ prompt_ids.len, prompt });
 
     var engine = try matmul.MatmulEngine.init(allocator, backend, .f32);
     defer engine.deinit();
