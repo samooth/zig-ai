@@ -139,11 +139,11 @@ __global__ void paged_attention_decode_kernel(
 ```
 
 **Optimizaciones:**
-- [ ] Shared memory para Q/K/V tiles
-- [ ] Online softmax (iterativo, sin materializar S completo)
-- [ ] Warp-level reduction para softmax
-- [ ] FP16 accumulation en FP32
-- [ ] Vectorized loads (LDST.128)
+- [x] Shared memory para Q/K/V tiles
+- [x] Online softmax (iterativo, sin materializar S completo)
+- [x] Warp-level reduction para softmax
+- [x] FP16 accumulation en FP32
+- [x] Vectorized loads (LDST.128)
 - [ ] Async copy (TMA en Hopper+)
 
 ---
@@ -155,6 +155,14 @@ __global__ void paged_attention_decode_kernel(
 - Usa causal mask (triangular)
 - Puede usar FlashAttention internamente
 - Output: todos los tokens de la secuencia
+
+**Estado: ✅ Implementado** (`paged_attention_prefill_f16_kernel`).
+Un bloque por (token, q_head) con máscara causal, online softmax y loads
+vectorizados (LDST.128). Sustituye al bucle de decode por posición:
+`PagedAttentionGpu.prefill` lanza un solo kernel con grid
+`(seq_len, num_q_heads)` (ver `src/cuda/paged_attention.cu` y
+`src/paged_attention/gpu_kernels.zig`). El engine híbrido lo usa en el
+prefill en bloque (`N > 1`); decode usa el kernel de un token.
 
 ---
 
@@ -330,14 +338,18 @@ zig build test
 zig build test -- test_paged_attention
 ```
 
-**Tests requeridos:**
-- [ ] `test_paged_attention_decode` - decode single token vs CPU reference
-- [ ] `test_paged_attention_prefill` - prefill vs CPU reference
-- [ ] `test_prefix_cache` - prefix match / cache hit rate
-- [ ] `test_block_allocator_cow` - COW en fork
-- [ ] `test_cpu_offload` - swap to CPU + restore
-- [ ] `test_preempt_restore` - preempt + restore sequence
-- [ ] `test_prefix_cache_hit` - shared prefix reutilizado
+**Tests requeridos (todos ✅):**
+- [x] `test_paged_attention_decode` - decode single token vs CPU reference
+- [x] `test_paged_attention_prefill` - prefill vs CPU reference
+- [x] `test_prefix_cache` - prefix match / cache hit rate
+- [x] `test_block_allocator_cow` - COW en fork
+- [x] `test_cpu_offload` - swap to CPU + restore
+- [x] `test_preempt_restore` - preempt + restore sequence
+- [x] `test_prefix_cache_hit` - shared prefix reutilizado
+
+> GPU: `tests/test_paged_attention_gpu.zig` valida decode y prefill contra la
+> referencia CPU (online softmax), el pool persistente y la evicción fría.
+> `zig build test` (con `GGUF_MODEL_PATH`) ejecuta toda la suite.
 
 ### 5.2 Benchmarks
 
@@ -361,8 +373,8 @@ pub fn bench_paged_attention() !void {
 | Integrar `PagedKVCache` en `runHybridInference` | ✅ | |
 | Actualizar `HybridLayer` + `AttentionLayer` para PagedKVCache | ✅ | |
 | Implementar `reshape_and_cache` kernel | ✅ (decode + reshape_and_block_write + block_copy en `paged_attention.cu`) | |
-| Implementar `paged_attention_decode` kernel | ✅ (online softmax, warp-reduce, layout BlockAllocator) | |
-| Implementar `paged_attention_prefill` kernel | ✅ (engine prefill = loop decode, vs CPU ref) | |
+| Implementar `paged_attention_decode` kernel | ✅ (online softmax, warp-reduce, layout BlockAllocator, LDST.128) | |
+| Implementar `paged_attention_prefill` kernel | ✅ (batched causal, grid (seq_len, q_heads); engine prefill N>1) | |
 | Integrar `Scheduler` en `runHybridInference` | ✅ (commit `980d9f2`) | |
 | Prefix Cache + `matchPrefix` en `admitRequests` | ✅ (blocks ref-counted, `createSequenceWithPrefix` reutiliza bloques) | |
 | CPU Offload (`swapToCpu` / `swapFromCpu`) | ✅ (`swapToCpu`/`swapFromCpu` validados round-trip; preemption vía `cpu_backup` host-memory) | |

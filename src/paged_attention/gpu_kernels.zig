@@ -262,8 +262,9 @@ pub const PagedAttentionGpu = struct {
         for (out_f16, 0..) |v, i| out[i] = @floatCast(v);
     }
 
-    /// Prefill: decodifica cada posición de la secuencia (igual que la
-    /// referencia CPU `PagedAttention.prefill`, que itera decode por posición).
+    /// Prefill batch: un solo lanzamiento del kernel `paged_attention_prefill_f16_kernel`
+    /// (bloque por (token, q_head)) con máscara causal, en vez de iterar decode
+    /// por posición. Equivale a `PagedAttention.prefill`.
     pub fn prefill(
         self: *Self,
         queries: []const f32,
@@ -272,15 +273,68 @@ pub const PagedAttentionGpu = struct {
         block_alloc: *BlockAllocator,
         seq_len: usize,
     ) !void {
-        const q_stride = self.config.num_q_heads * self.config.head_dim;
-        for (0..seq_len) |i| {
-            try self.decode(
-                queries[i * q_stride ..][0..q_stride],
-                outs[i * q_stride ..][0..q_stride],
-                block_table,
-                block_alloc,
-            );
+        const config = self.config;
+        const num_q_heads = config.num_q_heads;
+        const num_kv_heads = config.num_kv_heads;
+        const head_dim = config.head_dim;
+        const block_size = config.block_size;
+        const q_stride = num_q_heads * head_dim;
+
+        std.debug.assert(queries.len == seq_len * q_stride);
+        std.debug.assert(outs.len == seq_len * q_stride);
+        if (seq_len == 0) return;
+
+        try cudaz.ensureCurrent();
+
+        const total = seq_len * q_stride;
+        const q_f16 = try self.allocator.alloc(f16, total);
+        defer self.allocator.free(q_f16);
+        for (queries, 0..) |v, i| q_f16[i] = @floatCast(v);
+
+        const max_num_blocks = block_table.numBlocks();
+        const bt_host = try self.allocator.alloc(c_int, max_num_blocks);
+        defer self.allocator.free(bt_host);
+        for (0..max_num_blocks) |i| {
+            bt_host[i] = if (block_table.getPhysical(i)) |phys| @intCast(phys) else -1;
         }
+
+        try self.stageBlocks(block_alloc, block_table);
+
+        var d_outs = try cudaz.cuMemAlloc(total * @sizeOf(f16));
+        defer cudaz.cuMemFree(d_outs);
+        var d_queries = try cudaz.cuMemAlloc(total * @sizeOf(f16));
+        defer cudaz.cuMemFree(d_queries);
+        var d_bt = try cudaz.cuMemAlloc(max_num_blocks * @sizeOf(c_int));
+        defer cudaz.cuMemFree(d_bt);
+
+        try cudaz.cuMemcpyHtoD(d_queries, @intFromPtr(q_f16.ptr), total * @sizeOf(f16));
+        try cudaz.cuMemcpyHtoD(d_bt, @intFromPtr(bt_host.ptr), max_num_blocks * @sizeOf(c_int));
+
+        const func = cudaz.cuModuleGetFunction(self.module, "paged_attention_prefill_f16_kernel") catch return error.KernelNotFound;
+
+        var seq_len_c: c_int = @intCast(seq_len);
+        var num_q_c: c_int = @intCast(num_q_heads);
+        var num_kv_c: c_int = @intCast(num_kv_heads);
+        var head_dim_c: c_int = @intCast(head_dim);
+        var block_size_c: c_int = @intCast(block_size);
+
+        var d_cache_v = try self.cacheBase(block_alloc);
+
+        var kp = [_]?*anyopaque{
+            &d_outs,    &d_queries, &d_cache_v, &d_bt,
+            &seq_len_c, &num_q_c,   &num_kv_c,  &head_dim_c,
+            &block_size_c,
+        };
+        const shared_bytes: c_uint = @intCast(2 * head_dim * @sizeOf(f32));
+        try cudaz.cuLaunchKernel(func, @intCast(seq_len), @intCast(num_q_heads), 1, 32, 1, 1, shared_bytes, self.stream, @ptrCast(&kp), null);
+        try cudaz.cuStreamSynchronize(self.stream);
+
+        const out_f16 = try self.allocator.alloc(f16, total);
+        defer self.allocator.free(out_f16);
+        try cudaz.cuMemcpyDtoH(@intFromPtr(out_f16.ptr), d_outs, total * @sizeOf(f16));
+        try cudaz.cuCtxSynchronize();
+
+        for (out_f16, 0..) |v, i| outs[i] = @floatCast(v);
     }
 
     /// Copia bloques físicos (COW / fork) vía `block_copy_f16_kernel`.

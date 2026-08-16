@@ -313,12 +313,20 @@ pub const AttentionLayer = struct {
 
         if (self.paged_gpu) |gpu| {
             const q_stride = n_head * head_dim;
-            for (0..N) |t| {
-                const q_off = t * q_stride;
-                const o_off = t * q_stride;
+            if (N > 1) {
+                // Prefill en bloque: kernel causal `paged_attention_prefill_f16_kernel`.
+                try gpu.prefill(
+                    Qf32.data[0 .. N * q_stride],
+                    attn_out.data[0 .. N * q_stride],
+                    self.block_table,
+                    self.paged_kv.block_alloc,
+                    N,
+                );
+            } else {
+                // Decode de un token (N == 1): atiende a todos los pasados.
                 try gpu.decode(
-                    Qf32.data[q_off..][0..q_stride],
-                    attn_out.data[o_off..][0..q_stride],
+                    Qf32.data[0..q_stride],
+                    attn_out.data[0..q_stride],
                     self.block_table,
                     self.paged_kv.block_alloc,
                 );

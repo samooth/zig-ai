@@ -20,12 +20,27 @@ pub const PagedAttention = struct {
         block_table: *const BlockTable,
         block_alloc: *BlockAllocator,
     ) !void {
+        return self.decodeLimit(query, out, block_table, block_alloc, block_table.num_tokens);
+    }
+
+    /// Variante de `decode` que limita la atención a los primeros `attend_tokens`
+    /// de la secuencia (máscara causal en prefill). `attend_tokens` debe ser
+    /// `<= block_table.num_tokens`; el bloque físico correspondiente debe contener
+    /// los K/V de esos tokens (p.ej. tras `appendTokens`).
+    fn decodeLimit(
+        self: *const Self,
+        query: []const f32,
+        out: []f32,
+        block_table: *const BlockTable,
+        block_alloc: *BlockAllocator,
+        attend_tokens: usize,
+    ) !void {
         const num_q_heads = self.config.num_q_heads;
         const num_kv_heads = self.config.num_kv_heads;
         const head_dim = self.config.head_dim;
         const q_per_kv = num_q_heads / num_kv_heads;
         const block_size = self.config.block_size;
-        const seq_len = block_table.num_tokens;
+        const seq_len = @min(attend_tokens, block_table.num_tokens);
 
         std.debug.assert(query.len == num_q_heads * head_dim);
         std.debug.assert(out.len == num_q_heads * head_dim);
@@ -134,11 +149,13 @@ pub const PagedAttention = struct {
     ) !void {
         const q_stride = self.config.num_q_heads * self.config.head_dim;
         for (0..seq_len) |i| {
-            try self.decode(
+            // Causal: el token i solo atiende a los tokens [0..i].
+            try self.decodeLimit(
                 queries[i * q_stride ..][0..q_stride],
                 outs[i * q_stride ..][0..q_stride],
                 block_table,
                 block_alloc,
+                i + 1,
             );
         }
     }

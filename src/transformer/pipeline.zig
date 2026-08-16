@@ -87,16 +87,14 @@ pub const Sampler = struct {
             if (work[i] != -std.math.inf(f32)) { idx[cand_count] = i; cand_count += 1; }
         }
 
-        // Ordenar candidatos por work descendente (bubble sort simple)
-        for (0..cand_count) |i| {
-            for (0..cand_count - i - 1) |j| {
-                if (work[idx[j]] < work[idx[j + 1]]) {
-                    const tmp = idx[j];
-                    idx[j] = idx[j + 1];
-                    idx[j + 1] = tmp;
-                }
+        // Ordenar candidatos por work descendente
+        const SortCtx = struct {
+            work: []const f32,
+            fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                return ctx.work[b] < ctx.work[a];
             }
-        }
+        };
+        std.sort.pdq(usize, idx[0..cand_count], SortCtx{ .work = work }, SortCtx.lessThan);
 
         // Softmax estable sobre candidatos
         var max_val: f32 = -std.math.inf(f32);
