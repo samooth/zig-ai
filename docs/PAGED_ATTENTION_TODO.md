@@ -364,9 +364,9 @@ pub fn bench_paged_attention() !void {
 | Implementar `paged_attention_decode` kernel | ✅ (online softmax, warp-reduce, layout BlockAllocator) | |
 | Implementar `paged_attention_prefill` kernel | ✅ (engine prefill = loop decode, vs CPU ref) | |
 | Integrar `Scheduler` en `runHybridInference` | ✅ (commit `980d9f2`) | |
-| Prefix Cache + `matchPrefix` en `admitRequests` | ⬜ | |
-| CPU Offload (`swapToCpu` / `swapFromCpu`) | ⬜ | |
-| Preemption + restore | ⬜ | |
+| Prefix Cache + `matchPrefix` en `admitRequests` | ✅ (blocks ref-counted, `createSequenceWithPrefix` reutiliza bloques) | |
+| CPU Offload (`swapToCpu` / `swapFromCpu`) | ⬜ (preemption vía `cpu_backup` host-memory por ahora) | |
+| Preemption + restore | ✅ (`preemptIfNeeded` + `restorePreempted`, restore diferido un step) | |
 | Prefix cache hit rate metrics | ⬜ | |
 | Tests unitarios + benchmarks | ✅ (`test_paged_attention_gpu.zig`: decode + prefill vs CPU ref) | |
 
@@ -409,7 +409,8 @@ qkv_input: [batch, seq_len, num_kv_heads * head_dim * 2]  // K + V concatenados
 2. **Hecho**: Fase 2 — Kernels CUDA de PagedAttention (`paged_attention.cu` con `extern "C"`): decode (online softmax, warp-reduction, layout BlockAllocator), reshape_and_block_write, block_copy. Motor `PagedAttentionGpu` (patrón cuModuleLoad, como `GgufDequantEngine`) en `gpu_kernels.zig` + build_options con ruta al cubin instalado (`paged_attention_sm86.cubin`, sm_86). Test `test_paged_attention_gpu.zig`: GPU decode/prefill vs CPU reference, max_diff ≈ 2.5e-4. (commit `9c98ffb`)
 3. **Hecho**: Fase 3 — `PagedAttentionGpu.decode` integrado en `AttentionLayer.forward` (reemplaza CPU softmax). KV cache dtype f32→f16 para match con kernels GPU. Forward hace branch: GPU path lanza decode kernel por token sobre el memory-pool f16; CPU path preserva softmax de referencia para validación. Test `test_gguf` E1/E2 pasa (max_abs=0.832) + hybrid_attn unit tests verdes. (commit `895d41f`)
 4. **Hecho**: Fase 4 — `Scheduler` integrado en `runHybridInference`: `submit` del prompt, `schedule` para admisión + gestión de secuencia, pre-asignación de bloques por capa de atención (reemplaza el `appendTokens` interno de `forward`), `appendToken` tras cada token de decode, `finishSequence` al terminar. BlockTables por capa ahora heap-allocated (`?*BlockTable`). (commit `980d9f2`)
-5. **Luego**: Prefix cache (`matchPrefix`/`cachePrefix` en `admitRequests`) + CPU offload (`swapToCpu`/`swapFromCpu` en `BlockAllocator` + `preemptIfNeeded`)
+5. **Hecho**: Prefix cache con reutilización real de bloques — `PrefixCache` tiene ownership ref-counted (`*BlockAllocator`): `insert` hace `acquire`, `evictLRU`/`deinit`/`clear` liberan; `PagedKVCache.block_alloc` es `*BlockAllocator` heap-allocated (fix de dangling pointer que causaba SEGV); `createSequenceWithPrefix(tokens, prefix_len)` comparte bloques físicos del cache + `appendTokens` para el resto; `cachePrefix` se llama en la transición prefill→decode; `admitRequests` usa `matchPrefix` para reutilizar. Preemption/restore: `preemptIfNeeded` mueve el bloque vicio a `Sequence.cpu_backup` (host) y llama `removeSequence`; `restorePreempted` (en `schedule()`) recrea vía `kv_cache.restoreSequence` y restaura el backup, con restore diferido un step (`preempted_step`) para evitar thrash. Victim selection = menor prioridad (tie-break llegada más reciente). Tests: `PrefixCache blocks stay alive across sequence removal`, `Scheduler reuses prefix blocks via cache`, `Scheduler preempts and restores a low-priority sequence`.
+6. **Luego**: CPU offload GPU⇄host de bloques (`swapToCpu`/`swapFromCpu` en `BlockAllocator` + paged-memory) y prefix cache hit rate metrics
 
 ---
 

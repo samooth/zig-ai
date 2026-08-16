@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const Block = @import("block.zig").Block;
+pub const hashTokens = @import("block.zig").hashTokens;
 pub const BlockAllocator = @import("allocator.zig").BlockAllocator;
 pub const BlockTable = @import("block_table.zig").BlockTable;
 pub const PagedKVCache = @import("paged_kv_cache.zig").PagedKVCache;

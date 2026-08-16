@@ -356,7 +356,7 @@ fn runHybridInference(
     defer {
         for (layer_block_tables) |bt_opt| {
             if (bt_opt) |bt| {
-                bt.deinit(&paged_kv.block_alloc);
+                bt.deinit(paged_kv.block_alloc);
                 allocator.destroy(bt);
             }
         }
@@ -411,7 +411,7 @@ fn runHybridInference(
     for (layer_block_tables, 0..) |bt_opt, i| {
         if (bt_opt) |bt| {
             if (bt.num_tokens < seq_len) {
-                try bt.appendTokens(&paged_kv.block_alloc, seq_len - bt.num_tokens);
+                try bt.appendTokens(paged_kv.block_alloc, seq_len - bt.num_tokens);
             }
         }
         _ = i;
@@ -472,7 +472,7 @@ fn runHybridInference(
          for (layer_block_tables) |bt_opt| {
              if (bt_opt) |bt| {
                  if (bt.num_tokens < current_pos + 1) {
-                     try bt.appendToken(&paged_kv.block_alloc);
+                     try bt.appendToken(paged_kv.block_alloc);
                  }
              }
          }

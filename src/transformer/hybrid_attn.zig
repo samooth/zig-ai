@@ -326,7 +326,7 @@ pub const AttentionLayer = struct {
                     Qf32.data[q_off..][0..q_stride],
                     attn_out.data[o_off..][0..q_stride],
                     self.block_table,
-                    &self.paged_kv.block_alloc,
+                    self.paged_kv.block_alloc,
                 );
             }
         } else {
@@ -549,7 +549,7 @@ const TestFixture = struct {
 
     fn deinit(self: *TestFixture) void {
         self.layer.deinit();
-        self.block_table.deinit(&self.paged_kv.block_alloc);
+        self.block_table.deinit(self.paged_kv.block_alloc);
         self.allocator.destroy(self.block_table);
         self.paged_kv.deinit();
         self.allocator.destroy(self.paged_kv);
@@ -604,7 +604,7 @@ fn buildTestLayer(allocator: std.mem.Allocator) !TestFixture {
     const block_table = try allocator.create(paged.BlockTable);
     block_table.* = paged.BlockTable.init(allocator, 8);
     errdefer {
-        block_table.deinit(&paged_kv.block_alloc);
+        block_table.deinit(paged_kv.block_alloc);
         allocator.destroy(block_table);
     }
 
@@ -703,7 +703,7 @@ test "hybrid attention single token hand-computed" {
     var layer = &fixture.layer;
 
     // Pre-allocate blocks (scheduler normally does this)
-    try fixture.block_table.appendTokens(&fixture.paged_kv.block_alloc, 1);
+    try fixture.block_table.appendTokens(fixture.paged_kv.block_alloc, 1);
 
     // Input x = [1, 1, 8] all ones
     var x = try Tensor(f32).alloc(allocator, &.{ 1, 1, test_params.n_embd });
@@ -737,7 +737,7 @@ test "hybrid attention preserves norm with rope" {
     var layer = &fixture.layer;
 
     // Pre-allocate blocks for 4 tokens
-    try fixture.block_table.appendTokens(&fixture.paged_kv.block_alloc, 4);
+    try fixture.block_table.appendTokens(fixture.paged_kv.block_alloc, 4);
 
     var x = try Tensor(f32).alloc(allocator, &.{ 1, 4, test_params.n_embd });
     defer x.deinit();

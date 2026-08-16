@@ -284,7 +284,7 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     });
     defer paged_kv.deinit();
     var block_table = paged_attn.BlockTable.init(gpa, 16);
-    defer block_table.deinit(&paged_kv.block_alloc);
+    defer block_table.deinit(paged_kv.block_alloc);
 
     var layer = try hybrid_layer.HybridLayer.init(gpa, layer_idx, hparams, true, .auto, &paged_kv, &block_table);
     defer layer.deinit();
@@ -311,7 +311,7 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     defer output.deinit();
 
     // Pre-allocate blocks for the 6 prompt tokens (scheduler normally does this)
-    try block_table.appendTokens(&paged_kv.block_alloc, 6);
+    try block_table.appendTokens(paged_kv.block_alloc, 6);
 
     try layer.forward(hidden, &output, 0, 6);
 

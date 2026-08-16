@@ -63,11 +63,11 @@ test "paged attention GPU decode matches CPU reference" {
     defer gpa.free(out_gpu);
 
     const attn = pa.PagedAttention.init(gpa, config);
-    try attn.decode(query, out_cpu, kv.getBlockTable(seq_id).?, &kv.block_alloc);
+    try attn.decode(query, out_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc);
 
     var engine = try pa.PagedAttentionGpu.init(gpa, config);
     defer engine.deinit();
-    try engine.decode(query, out_gpu, kv.getBlockTable(seq_id).?, &kv.block_alloc);
+    try engine.decode(query, out_gpu, kv.getBlockTable(seq_id).?, kv.block_alloc);
 
     var max_diff: f32 = 0;
     for (out_cpu, out_gpu, 0..) |c, g, i| {
@@ -107,11 +107,11 @@ test "paged attention GPU prefill matches CPU reference" {
     defer gpa.free(outs_gpu);
 
     const attn = pa.PagedAttention.init(gpa, config);
-    try attn.prefill(queries, outs_cpu, kv.getBlockTable(seq_id).?, &kv.block_alloc, seq_len);
+    try attn.prefill(queries, outs_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc, seq_len);
 
     var engine = try pa.PagedAttentionGpu.init(gpa, config);
     defer engine.deinit();
-    try engine.prefill(queries, outs_gpu, kv.getBlockTable(seq_id).?, &kv.block_alloc, seq_len);
+    try engine.prefill(queries, outs_gpu, kv.getBlockTable(seq_id).?, kv.block_alloc, seq_len);
 
     var max_diff: f32 = 0;
     for (outs_cpu, outs_gpu, 0..) |c, g, i| {

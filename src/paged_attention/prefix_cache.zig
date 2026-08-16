@@ -1,4 +1,5 @@
 const std = @import("std");
+const BlockAllocator = @import("allocator.zig").BlockAllocator;
 
 pub const CacheEntry = struct {
     block_hash: u64,
@@ -9,29 +10,38 @@ pub const CacheEntry = struct {
 
 pub const PrefixCache = struct {
     allocator: std.mem.Allocator,
+    block_alloc: *BlockAllocator,
     map: std.AutoHashMap(u64, CacheEntry),
     max_entries: usize,
     access_counter: u64 = 0,
 
     const Self = @This();
 
-    pub fn init(gpa: std.mem.Allocator, max_entries: usize) !Self {
+    pub fn init(gpa: std.mem.Allocator, block_alloc: *BlockAllocator, max_entries: usize) !Self {
         return .{
             .allocator = gpa,
+            .block_alloc = block_alloc,
             .map = std.AutoHashMap(u64, CacheEntry).init(gpa),
             .max_entries = max_entries,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        var iter = self.map.valueIterator();
+        while (iter.next()) |entry| {
+            self.block_alloc.release(entry.phys_id);
+        }
         self.map.deinit();
     }
 
     pub fn insert(self: *Self, block_hash: u64, phys_id: usize, num_tokens: usize) !void {
         self.access_counter += 1;
+        if (self.map.contains(block_hash)) return;
         if (self.map.count() >= self.max_entries) {
             try self.evictLRU();
         }
+        self.block_alloc.acquire(phys_id);
+        errdefer self.block_alloc.release(phys_id);
         try self.map.put(block_hash, .{
             .block_hash = block_hash,
             .phys_id = phys_id,
@@ -49,8 +59,7 @@ pub const PrefixCache = struct {
         return null;
     }
 
-    pub fn longestPrefixMatch(self: *Self, tokens: []const u32) usize {
-        const block_size = 16;
+    pub fn longestPrefixMatch(self: *Self, tokens: []const u32, block_size: usize) usize {
         if (tokens.len < block_size) return 0;
 
         var matched: usize = 0;
@@ -76,6 +85,8 @@ pub const PrefixCache = struct {
             }
         }
         if (found) {
+            const entry = self.map.get(oldest_hash).?;
+            self.block_alloc.release(entry.phys_id);
             _ = self.map.remove(oldest_hash);
         }
     }
@@ -85,6 +96,10 @@ pub const PrefixCache = struct {
     }
 
     pub fn clear(self: *Self) void {
+        var iter = self.map.valueIterator();
+        while (iter.next()) |entry| {
+            self.block_alloc.release(entry.phys_id);
+        }
         self.map.clearRetainingCapacity();
     }
 };
