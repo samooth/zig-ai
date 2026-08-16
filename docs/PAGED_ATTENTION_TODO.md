@@ -369,6 +369,7 @@ pub fn bench_paged_attention() !void {
 | Preemption + restore | ✅ (`preemptIfNeeded` + `restorePreempted`, restore diferido un step) | |
 | Prefix cache hit rate metrics | ✅ (`PrefixCache.hits/misses/evictions` + `PagedKVCache.getStats`) | |
 | Evicción proactiva de bloques fríos | ✅ (`evictStale` + `enable_proactive_evict` en scheduler) | |
+| Offload de bloques GPU⇄host | ✅ (`GpuBlockPool` persistente: `stageBlock`/`evictBlock` granulares) | |
 | Tests unitarios + benchmarks | ✅ (`test_paged_attention_gpu.zig`: decode + prefill vs CPU ref) | |
 
 ---
@@ -413,7 +414,8 @@ qkv_input: [batch, seq_len, num_kv_heads * head_dim * 2]  // K + V concatenados
 5. **Hecho**: Prefix cache con reutilización real de bloques — `PrefixCache` tiene ownership ref-counted (`*BlockAllocator`): `insert` hace `acquire`, `evictLRU`/`deinit`/`clear` liberan; `PagedKVCache.block_alloc` es `*BlockAllocator` heap-allocated (fix de dangling pointer que causaba SEGV); `createSequenceWithPrefix(tokens, prefix_len)` comparte bloques físicos del cache + `appendTokens` para el resto; `cachePrefix` se llama en la transición prefill→decode; `admitRequests` usa `matchPrefix` para reutilizar. Preemption/restore: `preemptIfNeeded` mueve el bloque vicio a `Sequence.cpu_backup` (host) y llama `removeSequence`; `restorePreempted` (en `schedule()`) recrea vía `kv_cache.restoreSequence` y restaura el backup, con restore diferido un step (`preempted_step`) para evitar thrash. Victim selection = menor prioridad (tie-break llegada más reciente). Tests: `PrefixCache blocks stay alive across sequence removal`, `Scheduler reuses prefix blocks via cache`, `Scheduler preempts and restores a low-priority sequence`.
 6. **Hecho**: Prefix cache hit-rate metrics — `PrefixCache` cuenta `hits`/`misses`/`evictions` (LRU) con `hitRate()`; `PagedKVCache.getStats()` rellena `Stats` (blocks allocated/free/shared, secuencias activas, hits/misses/evictions, hit rate). `swapToCpu`/`swapFromCpu` del BlockAllocator validados round-trip. Tests: `PrefixCache hit rate metrics`, `BlockAllocator CPU offload swap round-trip`, `PagedKVCache getStats reflects prefix cache`.
 7. **Hecho**: Evicción proactiva — `PrefixCache.evictStale(max_age)` libera entradas no tocadas en `max_age` accesos (contador `proactive_evictions`); `Scheduler.schedule()` la invoca cuando `freeBlocks() <= proactive_evict_min_free` (antes de admisión) con edad `proactive_evict_stale_age`, desbloqueando bloques bajo presión de pool antes del LRU forzado a capacidad. Opt-in vía `enable_proactive_evict`. Tests: `PrefixCache evictStale only removes cold entries`, `Scheduler proactive eviction frees stale prefix blocks under pressure`.
-8. **Luego**: offload de bloques fríos GPU⇄host con paged-memory CUDA
+8. **Hecho**: `GpuBlockPool` persistente — buffer `d_cache` alocado una vez (`num_blocks * block_bytes`) + bitmap de residencia. `stageBlock` sube bloques individuales H2D (siempre copia: el host puede haber escrito KV nuevo), `evictBlock` baja D2H al host, `stageTable` sube solo los bloques referenciados por la block table. `decode` y `blockCopy` usan el pool: elimina las copias completas del memory-pool por llamada y las alocaciones/frees de `d_cache`. `PagedAttentionGpu.ensurePool` lo crea lazy. Test: `GPU block pool stage/evict round-trip preserves host data`.
+9. **Luego**: evicción de bloques fríos en GPU según hit rate de prefix cache + paged-memory CUDA
 
 ---
 

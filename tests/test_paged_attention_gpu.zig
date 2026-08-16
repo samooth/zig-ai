@@ -123,3 +123,37 @@ test "paged attention GPU prefill matches CPU reference" {
     }
     std.debug.print("prefill OK: {d} tokens, max_diff={d}\n", .{ seq_len, max_diff });
 }
+
+test "GPU block pool stage/evict round-trip preserves host data" {
+    if (!cudaz.isCudaAvailable()) {
+        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        return error.SkipZigTest;
+    }
+    const gpa = std.testing.allocator;
+    const config = testConfig();
+    var kv = try pa.PagedKVCache.init(gpa, config);
+    defer kv.deinit();
+
+    var pool = try pa.GpuBlockPool.init(gpa, kv.block_alloc.numTotal(), kv.block_alloc.block_bytes);
+    defer pool.deinit();
+    try std.testing.expectEqual(@as(usize, 0), pool.numResident());
+
+    const seq_id = try kv.createSequence();
+    try kv.allocatePrefill(seq_id, 4);
+    const bt = kv.getBlockTableMut(seq_id).?;
+    const phys = bt.getPhysical(0).?;
+    const data = kv.getBlockData(phys);
+    const fdata = @as([*]f16, @ptrCast(@alignCast(data)))[0 .. kv.block_alloc.block_bytes / 2];
+    for (fdata, 0..) |*v, i| v.* = @floatCast(@as(f32, @floatFromInt(i)) * 0.5);
+
+    try pool.stageBlock(kv.block_alloc, phys);
+    try std.testing.expectEqual(@as(usize, 1), pool.numResident());
+
+    // Modificar host no debe afectar la copia residente hasta evictar.
+    @memset(fdata, 0);
+    try pool.evictBlock(kv.block_alloc, phys);
+    try std.testing.expectEqual(@as(usize, 0), pool.numResident());
+    for (fdata, 0..) |v, i| {
+        try std.testing.expectApproxEqAbs(@as(f16, @floatCast(@as(f32, @floatFromInt(i)) * 0.5)), v, 1e-3);
+    }
+}

@@ -15,11 +15,82 @@ pub const PagedAttentionGpuError = error{
     KernelNotFound,
 };
 
+/// Pool de bloques persistente en el dispositivo. Aloca el buffer `d_cache`
+/// una sola vez (`num_blocks * block_bytes`) y mantiene un bitmap de qué
+/// bloques físicos están residentes en GPU. `stageBlock` sube bloques
+/// individuales H2D; `evictBlock` los baja D2H de vuelta al host. Sustituye
+/// las copias completas del memory-pool en cada llamada a `decode`.
+pub const GpuBlockPool = struct {
+    allocator: std.mem.Allocator,
+    num_blocks: usize,
+    block_bytes: usize,
+    d_cache: cudaz.CUdeviceptr,
+    resident: []bool,
+
+    const Self = @This();
+
+    pub fn init(gpa: std.mem.Allocator, num_blocks: usize, block_bytes: usize) !Self {
+        const resident = try gpa.alloc(bool, num_blocks);
+        errdefer gpa.free(resident);
+        @memset(resident, false);
+        const d_cache = try cudaz.cuMemAlloc(num_blocks * block_bytes);
+        return .{
+            .allocator = gpa,
+            .num_blocks = num_blocks,
+            .block_bytes = block_bytes,
+            .d_cache = d_cache,
+            .resident = resident,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        cudaz.cuMemFree(self.d_cache);
+        self.allocator.free(self.resident);
+    }
+
+    /// Sube el bloque a GPU. Siempre copia H2D: el host puede haber modificado
+    /// el bloque (nuevo KV de tokens recientes) entre llamadas a decode.
+    pub fn stageBlock(self: *Self, block_alloc: *BlockAllocator, phys_id: usize) !void {
+        if (phys_id >= self.num_blocks) return;
+        const src = @intFromPtr(block_alloc.memory_pool.ptr) + phys_id * self.block_bytes;
+        try cudaz.cuMemcpyHtoD(self.d_cache + phys_id * self.block_bytes, src, self.block_bytes);
+        self.resident[phys_id] = true;
+    }
+
+    pub fn evictBlock(self: *Self, block_alloc: *BlockAllocator, phys_id: usize) !void {
+        if (phys_id >= self.num_blocks or !self.resident[phys_id]) return;
+        const dst = @intFromPtr(block_alloc.memory_pool.ptr) + phys_id * self.block_bytes;
+        try cudaz.cuMemcpyDtoH(dst, self.d_cache + phys_id * self.block_bytes, self.block_bytes);
+        self.resident[phys_id] = false;
+    }
+
+    pub fn stageTable(self: *Self, block_alloc: *BlockAllocator, block_table: *const BlockTable) !void {
+        for (0..block_table.numBlocks()) |i| {
+            if (block_table.getPhysical(i)) |phys| try self.stageBlock(block_alloc, phys);
+        }
+    }
+
+    pub fn evictAll(self: *Self, block_alloc: *BlockAllocator) !void {
+        for (0..self.num_blocks) |phys| {
+            try self.evictBlock(block_alloc, phys);
+        }
+    }
+
+    pub fn numResident(self: *const Self) usize {
+        var n: usize = 0;
+        for (self.resident) |r| {
+            if (r) n += 1;
+        }
+        return n;
+    }
+};
+
 pub const PagedAttentionGpu = struct {
     allocator: std.mem.Allocator,
     config: PagedConfig,
     module: cudaz.CUmodule,
     stream: cudaz.CUstream,
+    pool: ?GpuBlockPool = null,
 
     const Self = @This();
 
@@ -35,8 +106,20 @@ pub const PagedAttentionGpu = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.pool) |*p| p.deinit();
         cudaz.cuStreamDestroy(self.stream);
         cudaz.cuModuleUnload(self.module);
+    }
+
+    /// Aloca (o reutiliza) el pool de bloques del dispositivo.
+    pub fn ensurePool(self: *Self, block_alloc: *BlockAllocator) !*GpuBlockPool {
+        if (self.pool) |*p| return p;
+        self.pool = try GpuBlockPool.init(
+            self.allocator,
+            block_alloc.numTotal(),
+            block_alloc.block_bytes,
+        );
+        return &self.pool.?;
     }
 
     /// Decode de un token (1 secuencia). `query`/`out` en f32; K/V se leen del
@@ -61,6 +144,7 @@ pub const PagedAttentionGpu = struct {
         std.debug.assert(out.len == q_stride);
 
         try cudaz.ensureCurrent();
+        const pool = try self.ensurePool(block_alloc);
 
         const q_f16 = try self.allocator.alloc(f16, q_stride);
         defer self.allocator.free(q_f16);
@@ -72,12 +156,13 @@ pub const PagedAttentionGpu = struct {
             bt_host[i] = if (block_table.getPhysical(i)) |phys| @intCast(phys) else -1;
         }
 
+        // Subir solo los bloques referenciados por la block table.
+        try pool.stageTable(block_alloc, block_table);
+
         var d_out = try cudaz.cuMemAlloc(q_stride * @sizeOf(f16));
         defer cudaz.cuMemFree(d_out);
         var d_query = try cudaz.cuMemAlloc(q_stride * @sizeOf(f16));
         defer cudaz.cuMemFree(d_query);
-        var d_cache = try cudaz.cuMemAlloc(block_alloc.memory_pool.len);
-        defer cudaz.cuMemFree(d_cache);
         var d_bt = try cudaz.cuMemAlloc(max_num_blocks * @sizeOf(c_int));
         defer cudaz.cuMemFree(d_bt);
         var seq_len_c: c_int = @intCast(seq_len);
@@ -85,7 +170,6 @@ pub const PagedAttentionGpu = struct {
         defer cudaz.cuMemFree(d_seq_lens);
 
         try cudaz.cuMemcpyHtoD(d_query, @intFromPtr(q_f16.ptr), q_stride * @sizeOf(f16));
-        try cudaz.cuMemcpyHtoD(d_cache, @intFromPtr(block_alloc.memory_pool.ptr), block_alloc.memory_pool.len);
         try cudaz.cuMemcpyHtoD(d_bt, @intFromPtr(bt_host.ptr), max_num_blocks * @sizeOf(c_int));
         try cudaz.cuMemcpyHtoD(d_seq_lens, @intFromPtr(&seq_len_c), @sizeOf(c_int));
 
@@ -100,7 +184,7 @@ pub const PagedAttentionGpu = struct {
         var block_size_c: c_int = @intCast(block_size);
 
         var kp = [_]?*anyopaque{
-            &d_out,      &d_query,   &d_cache,     &d_bt,
+            &d_out,      &d_query,   &pool.d_cache, &d_bt,
             &d_seq_lens, &num_seqs_c, &max_blocks_c, &num_q_c,
             &num_kv_c,   &head_dim_c, &block_size_c,
         };
@@ -146,9 +230,13 @@ pub const PagedAttentionGpu = struct {
         try cudaz.ensureCurrent();
         if (copy_map.len == 0) return;
 
-        var d_cache = try cudaz.cuMemAlloc(block_alloc.memory_pool.len);
-        defer cudaz.cuMemFree(d_cache);
-        try cudaz.cuMemcpyHtoD(d_cache, @intFromPtr(block_alloc.memory_pool.ptr), block_alloc.memory_pool.len);
+        const pool = try self.ensurePool(block_alloc);
+
+        // Subir bloques fuente que no estén residentes.
+        for (copy_map) |m| {
+            const src: usize = @intCast(m[1]);
+            try pool.stageBlock(block_alloc, src);
+        }
 
         const map_host = try self.allocator.alloc([2]c_int, copy_map.len);
         defer self.allocator.free(map_host);
@@ -161,11 +249,16 @@ pub const PagedAttentionGpu = struct {
         var block_bytes_c: c_int = @intCast(block_alloc.block_bytes);
 
         const func = cudaz.cuModuleGetFunction(self.module, "block_copy_f16_kernel") catch return error.KernelNotFound;
-        var kp = [_]?*anyopaque{ &d_cache, &d_cache, &d_map, &num_copies_c, &block_bytes_c };
+        var kp = [_]?*anyopaque{ &pool.d_cache, &pool.d_cache, &d_map, &num_copies_c, &block_bytes_c };
         const blocks: c_uint = @intCast((copy_map.len + 127) / 128);
         try cudaz.cuLaunchKernel(func, blocks, 1, 1, 128, 1, 1, 0, self.stream, @ptrCast(&kp), null);
         try cudaz.cuStreamSynchronize(self.stream);
-        try cudaz.cuMemcpyDtoH(@intFromPtr(block_alloc.memory_pool.ptr), d_cache, block_alloc.memory_pool.len);
+
+        // Bajar solo los bloques destino modificados.
+        for (copy_map) |m| {
+            const dst: usize = @intCast(m[0]);
+            try pool.evictBlock(block_alloc, dst);
+        }
         try cudaz.cuCtxSynchronize();
     }
 };

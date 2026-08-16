@@ -11,6 +11,7 @@ pub const PrefixCache = @import("prefix_cache.zig").PrefixCache;
 pub const Sequence = @import("scheduler.zig").Sequence;
 pub const Request = @import("scheduler.zig").Request;
 pub const PagedAttentionGpu = @import("gpu_kernels.zig").PagedAttentionGpu;
+pub const GpuBlockPool = @import("gpu_kernels.zig").GpuBlockPool;
 
 pub const DType = enum { f32, f16, bf16 };
 
