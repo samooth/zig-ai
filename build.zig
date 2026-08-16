@@ -321,6 +321,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     paged_attention_mod.addImport("cudaz", cudaz_mod);
+    paged_attention_mod.addImport("kv_cache", kv_cache_mod);
     paged_attention_mod.addOptions("build_options", paged_options);
 
     // hybrid_attn usa PagedKVCache para el KV-cache de atención

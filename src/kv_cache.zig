@@ -15,6 +15,7 @@
 const std = @import("std");
 
 pub const quant_types = @import("kv_cache/quant_types.zig");
+pub const kv_quant = @import("kv_cache/kv_quant.zig");
 pub const allocator = @import("kv_cache/allocator.zig");
 pub const gpu_dequant = @import("kv_cache/gpu_dequant.zig");
 pub const kv_cache_manager = @import("kv_cache/kv_cache_manager.zig");

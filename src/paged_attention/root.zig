@@ -1,4 +1,6 @@
 const std = @import("std");
+const kvcache = @import("kv_cache");
+pub const QuantFormat = kvcache.QuantFormat;
 
 pub const Block = @import("block.zig").Block;
 pub const hashTokens = @import("block.zig").hashTokens;
@@ -23,6 +25,10 @@ pub const PagedConfig = struct {
     num_kv_heads: usize = 8,
     num_q_heads: usize = 32,
     dtype: DType = .f16,
+    /// KV cache quantization format K (llama.cpp --cache-type-k; .fp16 = off)
+    quant_k: QuantFormat = .fp16,
+    /// KV cache quantization format V (llama.cpp --cache-type-v; .fp16 = off)
+    quant_v: QuantFormat = .fp16,
     enable_prefix_cache: bool = true,
     enable_cpu_offload: bool = false,
     enable_proactive_evict: bool = false,

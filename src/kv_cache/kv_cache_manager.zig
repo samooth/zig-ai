@@ -6,6 +6,7 @@ const std = @import("std");
 const qt = @import("quant_types.zig");
 const alloc = @import("allocator.zig");
 const gpu_dequant = @import("gpu_dequant.zig");
+const kv_quant = @import("kv_quant.zig");
 
 const KVCacheConfig = qt.KVCacheConfig;
 const LayerQuantConfig = qt.LayerQuantConfig;
@@ -185,7 +186,8 @@ pub const KVCacheManager = struct {
         _ = self.sequences.remove(seq_id);
     }
 
-    /// Almacena nuevos tokens K/V para una secuencia
+    /// Almacena nuevos tokens K/V ya cuantizados (bytes canónicos por bloque)
+    /// para una secuencia, en un run contiguo.
     pub fn appendTokens(
         self: *Self,
         seq_id: u64,
@@ -195,30 +197,22 @@ pub const KVCacheManager = struct {
         v_data: []const u8,
     ) !void {
         const seq = self.sequences.getPtr(seq_id) orelse return error.SequenceNotFound;
-        const lconf = seq.layer_formats[layer_idx];
+        const lconf = &seq.layer_formats[layer_idx];
 
-        // Asignar o extender slots
         const k_slot = try self.ensureSlot(seq_id, layer_idx, head_idx, true, lconf.k_format);
         const v_slot = try self.ensureSlot(seq_id, layer_idx, head_idx, false, lconf.v_format);
 
-        // Copiar datos cuantizados al pool
         const k_buf = self.pool.getBuffer(k_slot) orelse return error.SlotNotFound;
         const v_buf = self.pool.getBuffer(v_slot) orelse return error.SlotNotFound;
 
-        // Calcular offset de escritura (append)
         const seq_len = seq.current_len;
         const head_dim = self.config.head_dim;
-        const k_block_size = lconf.k_block_size;
-        const v_block_size = lconf.v_block_size;
 
-        const k_num_blocks = (seq_len * head_dim + k_block_size - 1) / k_block_size;
-        const v_num_blocks = (seq_len * head_dim + v_block_size - 1) / v_block_size;
+        const k_stride = kv_quant.quantBytes(lconf.k_format, @as(usize, head_dim));
+        const v_stride = kv_quant.quantBytes(lconf.v_format, @as(usize, head_dim));
 
-        const k_meta_bytes = if (lconf.k_format.hasScales()) k_num_blocks * @sizeOf(f32) else 0;
-        const v_meta_bytes = if (lconf.v_format.hasScales()) v_num_blocks * @sizeOf(f32) else 0;
-
-        const k_write_offset = k_meta_bytes + (seq_len * head_dim * lconf.k_format.bitsPerElement()) / 8;
-        const v_write_offset = v_meta_bytes + (seq_len * head_dim * lconf.v_format.bitsPerElement()) / 8;
+        const k_write_offset = seq_len * k_stride;
+        const v_write_offset = seq_len * v_stride;
 
         if (k_write_offset + k_data.len > k_buf.len or v_write_offset + v_data.len > v_buf.len) {
             return error.BufferOverflow;
@@ -227,13 +221,12 @@ pub const KVCacheManager = struct {
         @memcpy(k_buf[k_write_offset .. k_write_offset + k_data.len], k_data);
         @memcpy(v_buf[v_write_offset .. v_write_offset + v_data.len], v_data);
 
-        // Actualizar métricas
-        const fp16_bytes = k_data.len + v_data.len;
-        const saved = fp16_bytes - (k_data.len + v_data.len); // Diferencia vs cuantizado
-        self.metrics.bytes_saved += saved;
+        const fp16_bytes = (k_data.len + v_data.len) * 2;
+        self.metrics.bytes_saved += fp16_bytes - (k_data.len + v_data.len);
     }
 
-    /// Conveniencia: append de tokens en FP16 crudo (sin cuantizar)
+    /// Conveniencia: append de tokens en FP16 crudo.
+    /// Cuantiza internamente según el formato de capa configurado.
     pub fn appendTokensF16(
         self: *Self,
         seq_id: u64,
@@ -242,8 +235,16 @@ pub const KVCacheManager = struct {
         k_data: []const f16,
         v_data: []const f16,
     ) !void {
-        const k_bytes: []const u8 = std.mem.sliceAsBytes(k_data);
-        const v_bytes: []const u8 = std.mem.sliceAsBytes(v_data);
+        const seq = self.sequences.getPtr(seq_id) orelse return error.SequenceNotFound;
+        const lconf = &seq.layer_formats[layer_idx];
+        const k_fmt: QuantFormat = lconf.k_format;
+        const v_fmt: QuantFormat = lconf.v_format;
+
+        const k_bytes = try kv_quant.encodeToOwned(self.allocator, k_fmt, k_data);
+        defer self.allocator.free(k_bytes);
+        const v_bytes = try kv_quant.encodeToOwned(self.allocator, v_fmt, v_data);
+        defer self.allocator.free(v_bytes);
+
         try self.appendTokens(seq_id, layer_idx, head_idx, k_bytes, v_bytes);
     }
 
@@ -375,7 +376,8 @@ pub const KVCacheManager = struct {
                     out[i] = @as(f16, @floatCast(@as(f32, @floatFromInt(q[i])) * scale));
                 }
             },
-            else => return error.UnsupportedCpuDequant,
+            .q8_0, .q4_0, .q4_1 => kv_quant.decode(format, raw, out),
+            .int8_asymmetric, .int4 => return error.UnsupportedCpuDequant,
         }
     }
 };

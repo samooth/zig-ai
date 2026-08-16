@@ -10,8 +10,9 @@ const FlashAttentionCpu = fa.FlashAttentionCpu;
 const FlashAttentionConfig = fa.fa_config.FlashAttentionConfig;
 const TransformerLayer = transformer.TransformerLayer;
 const LayerPrecision = transformer.LayerPrecision;
-const KVCacheManager = kvcache.KVCacheManager;
-const KVCacheConfig = kvcache.KVCacheConfig;
+    const KVCacheManager = kvcache.KVCacheManager;
+    const KVCacheConfig = kvcache.KVCacheConfig;
+    const QuantFormat = kvcache.QuantFormat;
 const pipeline = @import("pipeline");
 const gguf_model = @import("gguf_model");
 const gguf_tokenizer = @import("gguf_tokenizer");
@@ -29,7 +30,23 @@ const CliParams = struct {
     seed: u64 = 42,
     backend: []const u8 = "auto", // auto | cpu | gpu
     sampler: pipeline.Sampler = .{},
+    // --- KV cache quantization (llama.cpp --cache-type-{k,v}) ---
+    cache_type_k: QuantFormat = .fp16,
+    cache_type_v: QuantFormat = .fp16,
+    // --- Draft KV cache quantization (llama.cpp --spec-draft-type-{k,v}) ---
+    spec_draft_type_k: QuantFormat = .fp16,
+    spec_draft_type_v: QuantFormat = .fp16,
+    // --- Parallel sequences (llama.cpp -np) ---
+    num_parallel: usize = 1,
+    // --- Spec-decoding mode (llama.cpp --spec-type) ---
+    spec_type: SpecType = .none,
+    /// Máximo número de tokens a generar en el draft por round (llama.cpp --spec-draft-n-max; def 16)
+    spec_draft_n_max: usize = 16,
+    // --- Chat template (llama.cpp -jinja) ---
+    use_jinja: bool = false,
 };
+
+const SpecType = enum { none, draft_mtp };
 
 /// Resuelve el backend matmul a usar según la opción `--backend`.
 fn resolveBackend(backend: []const u8) matmul.Backend {
@@ -145,6 +162,32 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args, stdout: anyty
             } else {
                 try stdout.print("[!] Backend inválido: {s} (auto|cpu|gpu)\n", .{v});
             }
+        } else if (std.mem.eql(u8, arg, "--cache-type-k")) {
+            params.cache_type_k = try parseQuant(&it, arg);
+        } else if (std.mem.eql(u8, arg, "--cache-type-v")) {
+            params.cache_type_v = try parseQuant(&it, arg);
+        } else if (std.mem.eql(u8, arg, "--spec-draft-type-k")) {
+            params.spec_draft_type_k = try parseQuant(&it, arg);
+        } else if (std.mem.eql(u8, arg, "--spec-draft-type-v")) {
+            params.spec_draft_type_v = try parseQuant(&it, arg);
+        } else if (std.mem.eql(u8, arg, "-np")) {
+            const v = try nextValue(&it, "-np");
+            params.num_parallel = std.fmt.parseInt(usize, v, 10) catch 1;
+            if (params.num_parallel < 1) params.num_parallel = 1;
+        } else if (std.mem.eql(u8, arg, "--spec-type")) {
+            const v = try nextValue(&it, "--spec-type");
+            if (std.mem.eql(u8, v, "none")) {
+                params.spec_type = .none;
+            } else if (std.mem.eql(u8, v, "draft-mtp") or std.mem.eql(u8, v, "mtp")) {
+                params.spec_type = .draft_mtp;
+            } else {
+                try stdout.print("[!] --spec-type inválido: {s} (none|draft-mtp)\n", .{v});
+            }
+        } else if (std.mem.eql(u8, arg, "--spec-draft-n-max")) {
+            const v = try nextValue(&it, "--spec-draft-n-max");
+            params.spec_draft_n_max = std.fmt.parseInt(usize, v, 10) catch 16;
+        } else if (std.mem.eql(u8, arg, "-jinja") or std.mem.eql(u8, arg, "--jinja")) {
+            params.use_jinja = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             try printHelp(stdout);
             std.process.exit(0);
@@ -163,6 +206,13 @@ fn nextValue(it: *std.process.Args.Iterator, name: []const u8) ![]const u8 {
     };
 }
 
+fn parseQuant(it: *std.process.Args.Iterator, flag: []const u8) !QuantFormat {
+    const v = try nextValue(it, flag);
+    if (QuantFormat.fromString(v)) |q| return q;
+    std.debug.print("[!] Formato de cuantización inválido para {s}: {s}\n", .{ flag, v });
+    return error.InvalidQuantFormat;
+}
+
 fn printHelp(stdout: anytype) !void {
     try stdout.print(
         \\Uso: zig-ai-engine [opciones]
@@ -175,6 +225,14 @@ fn printHelp(stdout: anytype) !void {
         \\  --repetition-penalty <f>  Repetition penalty (def: 1.0 = desactivado)
         \\  --seed <n>                Semilla del RNG (def: 42)
         \\  --backend <auto|cpu|gpu>  Backend matmul (def: auto → GPU si disponible)
+        \\  --cache-type-k <fmt>      Cuantización cache K (q8_0|q4_0|q4_1|fp16|...)
+        \\  --cache-type-v <fmt>      Cuantización cache V (q8_0|q4_0|q4_1|fp16|...)
+        \\  --spec-draft-type-k <fmt> Cuantización cache K del draft (def: fp16)
+        \\  --spec-draft-type-v <fmt> Cuantización cache V del draft (def: fp16)
+        \\  -np <n>                   Secuencias paralelas / prefillo (def: 1)
+        \\  --spec-type <draft-mtp>   Decodificación especulativa (def: none)
+        \\  --spec-draft-n-max <n>    Tokens draft por round (def: 16)
+        \\  -jinja                    Usar plantilla chat jinja del tokenizer
         \\  -h, --help                Muestra esta ayuda
         \\
     , .{});
@@ -240,8 +298,36 @@ fn runInference(
         @intCast(cfg.block_count), @intCast(cfg.head_count),
         @intCast(head_dim), @intCast(cfg.context_length),
     );
-    var kv_manager = try KVCacheManager.init(allocator, kv_config, 256);
-    defer kv_manager.deinit();
+
+    // Apply --cache-type-{k,v} (llama.cpp semantics) as per-layer defaults.
+    // fp16 (default) keeps the original store-as-f16 fast path; q8_0/q4_0/q4_1
+    // route through quantized encode/decode in KVCacheManager.
+    const k_fmt: QuantFormat = params.cache_type_k;
+    const v_fmt: QuantFormat = if (params.cache_type_v != params.cache_type_k) params.cache_type_v else k_fmt;
+    const layer_cfgs = try allocator.alloc(kvcache.LayerQuantConfig, cfg.block_count);
+    errdefer allocator.free(layer_cfgs);
+    for (0..cfg.block_count) |l| {
+        const kf: QuantFormat = if (k_fmt == .fp16) k_fmt else k_fmt;
+        const vf: QuantFormat = if (v_fmt == .fp16) v_fmt else v_fmt;
+        layer_cfgs[l] = .{
+            .k_format = kf,
+            .v_format = vf,
+            .k_block_size = if (kf == .fp16) 32 else kf.defaultBlockSize(),
+            .v_block_size = if (vf == .fp16) 32 else vf.defaultBlockSize(),
+            .quant_threshold = null,
+        };
+    }
+    const kv_config_full = blk: {
+        var c = kv_config;
+        c.layer_configs = layer_cfgs;
+        c.use_gpu_dequant = params.cache_type_k != .fp16;
+        break :blk c;
+    };
+    var kv_manager = try KVCacheManager.init(allocator, kv_config_full, 256);
+    defer {
+        if (kv_config_full.layer_configs) |cfgs| allocator.free(cfgs);
+        kv_manager.deinit();
+    }
 
     // Pipeline de inferencia
     var pl = pipeline.InferencePipeline.init(allocator, layers, &kv_manager, cfg.embedding_length, cfg.vocab_size, fa_config);
@@ -325,18 +411,52 @@ fn runHybridInference(
     const blocks_per_seq: usize = (max_seq_len + block_size - 1) / block_size;
     const num_blocks = @max(64, num_attn_layers * blocks_per_seq);
 
-     var paged_kv = try paged_attn.PagedKVCache.init(allocator, .{
-         .block_size = block_size,
-         .num_blocks = num_blocks,
-         .head_dim = head_dim,
-         .num_kv_heads = cfg.head_count_kv,
-         .num_q_heads = cfg.head_count,
-         .dtype = .f16,
-         .enable_prefix_cache = false,
-         .enable_cpu_offload = false,
-         .max_seq_len = max_seq_len,
-         .max_batch_size = 1,
-     });
+    // --- Aviso: cuantización de cache híbrida (q8_0/q4_0) ---
+    // La ruta paged/híbrida almacena K/V en f16; el driver de-deshacer
+    // cuantización paged se enganchará en fase posterior.
+    if (params.cache_type_k != .fp16 or params.cache_type_v != .fp16) {
+        try stdout.print("[!] Cache cuantizado solicitado en ruta híbrida ", .{});
+        try stdout.print("(k={s} v={s}); el driver de-deshacer cuantización paged aún no ", .{
+            params.cache_type_k.toString(), params.cache_type_v.toString() });
+        try stdout.print("está enganchado. Se usará f16.\n", .{});
+        try stdout.flush();
+    }
+
+    // --- Spec-decoding: detectar cabeza MTP (Qwen3.5 nextn) en el GGUF ---
+    // El modelo 0.8B Qwen3.5-Q4_0 carece de tensores `nextn.*` -> draft-mtp no ejecutable.
+    if (params.spec_type == .draft_mtp) {
+        const mtp_tensor = try std.fmt.allocPrint(allocator, "blk.0.nextn.eh_proj.weight", .{});
+        defer allocator.free(mtp_tensor);
+        if (model.file.getTensor(mtp_tensor) == null) {
+            try stdout.print(
+                \\
+                \\[!] --spec-type draft-mtp solicitado pero el modelo NO contiene cabeza MTP
+                \\    (`nextn.*` no encontrado en {s}). El modelo 0.8B Qwen3.5-Q4_0 carece de cabeza
+                \\    MTP, por lo que la decodificación especulativa no puede ejecutarse.
+                \\    Continue sin --spec-type o use un modelo con cabeza MTP (p.ej. Qwen3.5-9B-MTP, Qwen3-9B-MTP).
+                \\
+            , .{model.config.architecture});
+            try stdout.flush();
+            return;
+        }
+        // MTP head presente: el driver especulativo se engancharía aquí (futuro).
+        try stdout.print("[*] Draft MTP detectado: habilitando draft-mtp (driver completo pendiente). n_max={d}\n", .{params.spec_draft_n_max});
+    }
+
+    var paged_kv = try paged_attn.PagedKVCache.init(allocator, .{
+        .block_size = block_size,
+        .num_blocks = num_blocks,
+        .head_dim = head_dim,
+        .num_kv_heads = cfg.head_count_kv,
+        .num_q_heads = cfg.head_count,
+        .dtype = .f16,
+        .quant_k = params.cache_type_k,
+        .quant_v = params.cache_type_v,
+        .enable_prefix_cache = false,
+        .enable_cpu_offload = false,
+        .max_seq_len = max_seq_len,
+        .max_batch_size = 1,
+    });
     defer paged_kv.deinit();
 
     // Scheduler for request admission + sequence lifecycle management
@@ -355,6 +475,8 @@ fn runHybridInference(
         .num_kv_heads = cfg.head_count_kv,
         .num_q_heads = cfg.head_count,
         .dtype = .f16,
+        .quant_k = params.cache_type_k,
+        .quant_v = params.cache_type_v,
     }) catch null;
     defer if (shared_paged_gpu) |*g| g.deinit();
     const shared_gpu_ptr: ?*paged_attn.PagedAttentionGpu = if (shared_paged_gpu) |*g| g else null;
@@ -410,7 +532,7 @@ fn runHybridInference(
         .req_id = 0,
         .prompt_tokens = prompt_ids,
         .max_new_tokens = params.max_new_tokens,
-        .num_samples = 1,
+        .num_samples = params.num_parallel,
         .priority = 0,
     });
     _ = try scheduler.schedule();

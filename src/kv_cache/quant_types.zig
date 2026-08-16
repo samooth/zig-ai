@@ -17,6 +17,8 @@ pub const QuantFormat = enum {
     int4,
     /// Q4_0 (formato GGUF): bloque de 32, scale f16 + 16 bytes de nibbles
     q4_0,
+    /// Q4_1 (formato GGUF): bloque de 32, scale f16 + min f16 + 16 nibbles
+    q4_1,
     /// Q8_0 (formato GGUF): bloque de 32, scale f16 + 32 bytes
     q8_0,
 
@@ -26,7 +28,7 @@ pub const QuantFormat = enum {
             .fp16 => 16,
             .fp32 => 32,
             .int8_symmetric, .int8_asymmetric => 8,
-            .int4, .q4_0 => 4,
+            .int4, .q4_0, .q4_1 => 4,
             .q8_0 => 8,
         };
     }
@@ -37,7 +39,7 @@ pub const QuantFormat = enum {
             .fp16, .fp32 => 1,
             .int8_symmetric, .int8_asymmetric => 64,
             .int4 => 64,
-            .q4_0, .q8_0 => 32,
+            .q4_0, .q4_1, .q8_0 => 32,
         };
     }
 
@@ -66,7 +68,40 @@ pub const QuantFormat = enum {
             .int8_asymmetric => 64 + 8,  // 64 bytes + scale f32 + zp f32
             .int4 => 32 + 8,             // 32 bytes (64 nibbles) + scale + zp
             .q4_0 => 18,                 // 2 bytes scale f16 + 16 bytes datos
+            .q4_1 => 20,                 // 2 bytes scale f16 + 2 bytes min f16 + 16 nibbles
             .q8_0 => 34,                 // 2 bytes scale f16 + 32 bytes datos
+        };
+    }
+
+    /// Parsea un nombre de formato (como en llama.cpp: q8_0, q4_0, fp16, ...).
+    /// Devuelve null si el nombre no es reconocido.
+    pub fn fromString(s: []const u8) ?QuantFormat {
+        if (std.mem.eql(u8, s, "q8_0")) return .q8_0;
+        if (std.mem.eql(u8, s, "q4_0")) return .q4_0;
+        if (std.mem.eql(u8, s, "q4_1")) return .q4_1;
+        if (std.mem.eql(u8, s, "q4_k")) return .q4_0;
+        if (std.mem.eql(u8, s, "q8_k")) return .q8_0;
+        if (std.mem.eql(u8, s, "int4")) return .int4;
+        if (std.mem.eql(u8, s, "int8") or std.mem.eql(u8, s, "int8_sym")) return .int8_symmetric;
+        if (std.mem.eql(u8, s, "int8_asym")) return .int8_asymmetric;
+        if (std.mem.eql(u8, s, "fp16")) return .fp16;
+        if (std.mem.eql(u8, s, "fp32") or std.mem.eql(u8, s, "f32")) return .fp32;
+        if (std.mem.eql(u8, s, "f16")) return .fp16;
+        if (std.mem.eql(u8, s, "none")) return .fp16;
+        return null;
+    }
+
+    /// Nombre legible del formato (para logging).
+    pub fn toString(self: QuantFormat) []const u8 {
+        return switch (self) {
+            .fp16 => "f16",
+            .fp32 => "f32",
+            .int8_symmetric => "int8_sym",
+            .int8_asymmetric => "int8_asym",
+            .int4 => "int4",
+            .q4_0 => "q4_0",
+            .q4_1 => "q4_1",
+            .q8_0 => "q8_0",
         };
     }
 };

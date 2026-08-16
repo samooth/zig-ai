@@ -950,3 +950,30 @@ pub fn generateWithCache(
 ---
 
 *Documento generado en agosto 2026.*
+
+---
+
+## Estado de implementación (agosto 2026 — entrega actual)
+
+- [x] **CLI llama.cpp-compatible** (`src/main.zig` `CliParams`/`parseArgs`):
+  `--cache-type-k`, `--cache-type-v` (`q8_0|q4_0|q4_1|fp16|...` con alias `q4_k`/`q8_k`);
+  `--spec-draft-type-k`, `--spec-draft-type-v`; `-np`; `--spec-type draft-mtp`;
+  `--spec-draft-n-max`; `-jinja`. Ver `printHelp`.
+- [x] **Helper de cuantización host** (`src/kv_cache/kv_quant.zig`): `quantBytes`,
+  `encode`, `encodeToOwned`, `decode` con layout canónico GGUF (q8_0=34B/bloc,
+  q4_0=18B/bloc, q4_1=20B/bloc) + tests de round-trip q8_0/q4_0.
+- [x] **`QuantFormat.fromString`/`toString`** en `src/kv_cache/quant_types.zig`
+  (q4_1 añadido al enum + switches).
+- [x] **Ruta legacy `KVCacheManager`** (`src/kv_cache/kv_cache_manager.zig`):
+  `appendTokensF16` cuantiza realmente (antes raw-memcpy); `appendTokens` usa stride
+  `quantBytes`; `dequantizeCpu` decodifica q8_0/q4_0/q4_1 vía `kv_quant.decode`
+  (antes lanzaba `UnsupportedCpuDequant`). Test `kv_cache append and retrieve q8_0`.
+- [ ] **Ruta híbrida paged (Qwen3.5 0.8B)** — *futuro*: `PagedConfig.quant_{k,v}`
+  están enganchados y el binario advierte ("driver de-deshacer paged aún no está
+  enganchado. Se usará f16.") cuando se solicita cache cuantizado en la ruta híbrida.
+  El store de `hybrid_attn.zig` sigue en f16 hasta que se implemente quantize-on-store
+  + dequant-on-read (CPU y staging GPU).
+- [ ] **Spec-decoding MTP**: `--spec-type draft-mtp` detecta `blk.0.nextn.eh_proj.weight`
+  en el GGUF y aborta con mensaje claro cuando falta (el 0.8B no lo tiene). El driver
+  de draft completo es fase posterior.
+- [ ] **`-jinja`**: flag reconocido; el motor de plantillas completo es fase posterior.
