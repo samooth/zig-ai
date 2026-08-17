@@ -411,17 +411,6 @@ fn runHybridInference(
     const blocks_per_seq: usize = (max_seq_len + block_size - 1) / block_size;
     const num_blocks = @max(64, num_attn_layers * blocks_per_seq);
 
-    // --- Aviso: cuantización de cache híbrida (q8_0/q4_0) ---
-    // La ruta paged/híbrida almacena K/V en f16; el driver de-deshacer
-    // cuantización paged se enganchará en fase posterior.
-    if (params.cache_type_k != .fp16 or params.cache_type_v != .fp16) {
-        try stdout.print("[!] Cache cuantizado solicitado en ruta híbrida ", .{});
-        try stdout.print("(k={s} v={s}); el driver de-deshacer cuantización paged aún no ", .{
-            params.cache_type_k.toString(), params.cache_type_v.toString() });
-        try stdout.print("está enganchado. Se usará f16.\n", .{});
-        try stdout.flush();
-    }
-
     // --- Spec-decoding: detectar cabeza MTP (Qwen3.5 nextn) en el GGUF ---
     // El modelo 0.8B Qwen3.5-Q4_0 carece de tensores `nextn.*` -> draft-mtp no ejecutable.
     if (params.spec_type == .draft_mtp) {
@@ -468,16 +457,27 @@ fn runHybridInference(
     // instancia (num_blocks * block_bytes) sirve a todas las capas. (Antes cada
     // capa alocaba su propio pool -> num_attn_layers * num_blocks * block_bytes,
     // OOM en modelos con context_length grande.)
-    var shared_paged_gpu: ?paged_attn.PagedAttentionGpu = paged_attn.PagedAttentionGpu.init(allocator, .{
-        .block_size = block_size,
-        .num_blocks = 0,
-        .head_dim = head_dim,
-        .num_kv_heads = cfg.head_count_kv,
-        .num_q_heads = cfg.head_count,
-        .dtype = .f16,
-        .quant_k = params.cache_type_k,
-        .quant_v = params.cache_type_v,
-    }) catch null;
+    // Sólo usar el motor GPU de PagedAttention cuando el backend matmul lo pide
+    // (cublas). Con --backend cpu se fuerza paged_gpu=null para que la ruta
+    // legacy de-deshacer cuantizado en host se ejercite (y se evita subir el
+    // pool a device con bytes cuantizados que el kernel f16 no entiende).
+    // El motor de atención GPU asume f16; si el cache está cuantizado, el
+    // staging de-deshacer paged a device no está enganchado todavía, así que se
+    // fuerza la ruta CPU de-deshacer (correcta) en ese caso.
+    const quant_on = params.cache_type_k != .fp16 or params.cache_type_v != .fp16;
+    const use_gpu_kv = (backend == .cublas) and !quant_on;
+    var shared_paged_gpu: ?paged_attn.PagedAttentionGpu = if (use_gpu_kv)
+        paged_attn.PagedAttentionGpu.init(allocator, .{
+            .block_size = block_size,
+            .num_blocks = 0,
+            .head_dim = head_dim,
+            .num_kv_heads = cfg.head_count_kv,
+            .num_q_heads = cfg.head_count,
+            .dtype = .f16,
+            .quant_k = params.cache_type_k,
+            .quant_v = params.cache_type_v,
+        }) catch null
+    else null;
     defer if (shared_paged_gpu) |*g| g.deinit();
     const shared_gpu_ptr: ?*paged_attn.PagedAttentionGpu = if (shared_paged_gpu) |*g| g else null;
 

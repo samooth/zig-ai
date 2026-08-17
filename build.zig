@@ -264,6 +264,7 @@ pub fn build(b: *std.Build) void {
     hybrid_attn_mod.addImport("norm", norm_mod);
     hybrid_attn_mod.addImport("ffn", ffn_mod);
     hybrid_attn_mod.addImport("rope", rope_mod);
+    hybrid_attn_mod.addImport("kv_cache", kv_cache_mod);
 
     // === Módulo hybrid_layer ===
     const hybrid_layer_mod = b.createModule(.{

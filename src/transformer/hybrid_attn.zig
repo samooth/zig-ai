@@ -9,6 +9,9 @@ const gguf = @import("gguf");
 const norm = @import("norm");
 const rope_mod = @import("rope");
 const paged = @import("paged_attention");
+const kv_cache = @import("kv_cache");
+const kv_quant = kv_cache.kv_quant;
+const quantBytes = kv_quant.quantBytes;
 
 pub const HybridAttnError = error{
     WeightFileNotFound,
@@ -69,6 +72,19 @@ pub const AttentionLayer = struct {
     // capas de atención (evita OOM: num_blocks * block_bytes por capa).
     paged_gpu: ?*paged.PagedAttentionGpu = null,
 
+    // Quantized KV-cache staging (solo cuando config.quant_k/v != .fp16).
+    // Se acumulan los valores de un bloque lógico f16 en staging y se cuantizan
+    // con kv_quant.encode al sellar el bloque. Layout por bloque:
+    //   [ K_tile_bytes ][ V_tile_bytes ]
+    k_quant: paged.QuantFormat,
+    v_quant: paged.QuantFormat,
+    k_tile_bytes: usize,
+    v_tile_bytes: usize,
+    k_staging: []f16,
+    v_staging: []f16,
+    staged_block: i64 = -1,
+    staged_tokens: usize = 0,
+
     const Self = @This();
 
     pub fn init(
@@ -102,6 +118,17 @@ pub const AttentionLayer = struct {
 
         const paged_gpu_local: ?*paged.PagedAttentionGpu = paged_gpu;
 
+        const block_size = paged_kv.config.block_size;
+        const k_quant: paged.QuantFormat = paged_kv.config.quant_k;
+        const v_quant: paged.QuantFormat = paged_kv.config.quant_v;
+        const tile_elems = block_size * kv_dim;
+        const k_tile_bytes = quantBytes(k_quant, tile_elems);
+        const v_tile_bytes = quantBytes(v_quant, tile_elems);
+        const k_staging = try allocator.alloc(f16, tile_elems);
+        errdefer allocator.free(k_staging);
+        const v_staging = try allocator.alloc(f16, tile_elems);
+        errdefer allocator.free(v_staging);
+
         return Self{
             .allocator = allocator,
             .layer_idx = layer_idx,
@@ -120,6 +147,12 @@ pub const AttentionLayer = struct {
             .paged_kv = paged_kv,
             .block_table = block_table,
             .paged_gpu = paged_gpu_local,
+            .k_quant = k_quant,
+            .v_quant = v_quant,
+            .k_tile_bytes = k_tile_bytes,
+            .v_tile_bytes = v_tile_bytes,
+            .k_staging = k_staging,
+            .v_staging = v_staging,
         };
     }
 
@@ -131,10 +164,45 @@ pub const AttentionLayer = struct {
         self.allocator.free(self.scratch_o);
         self.attn_q_norm.deinit();
         self.attn_k_norm.deinit();
+        self.allocator.free(self.k_staging);
+        self.allocator.free(self.v_staging);
     }
 
     pub fn resetState(self: *Self) void {
         self.sequence_id = 0;
+        self.staged_block = -1;
+        self.staged_tokens = 0;
+    }
+    /// Cuantiza el tile f16 acumulado (staging) al layout canónico GGUF en
+    /// el bloque físico cuyo bloque lógico es `self.staged_block`. Se usa al
+    /// sellar un bloque completo o al cambiar de bloque lógico.
+    fn flushQuantTile(self: *Self) !void {
+
+        const sblk = self.staged_block;
+        if (sblk < 0) return;
+        const phys_opt = self.block_table.getPhysical(@as(usize, @intCast(sblk)));
+        if (phys_opt) |phys_id| {
+            const block_data = self.paged_kv.block_alloc.memory_pool[phys_id * self.paged_kv.block_alloc.block_bytes ..];
+            const kv_dim = self.params.kv_dim();
+            const nval = self.staged_tokens * kv_dim;
+            // Rellenar el tile con ceros para emitir exactamente k_tile_bytes/v_tile_bytes.
+            if (nval < self.k_staging.len) @memset(self.k_staging[nval..], 0.0);
+            if (nval < self.v_staging.len) @memset(self.v_staging[nval..], 0.0);
+            if (self.k_quant != .fp16) {
+                kv_quant.encode(self.k_quant, self.k_staging, block_data[0..self.k_tile_bytes]);
+            } else {
+                const dst = block_data[0..self.k_tile_bytes];
+                @memcpy(dst, std.mem.sliceAsBytes(self.k_staging));
+            }
+            if (self.v_quant != .fp16) {
+                kv_quant.encode(self.v_quant, self.v_staging, block_data[self.k_tile_bytes..][0..self.v_tile_bytes]);
+            } else {
+                const dst = block_data[self.k_tile_bytes..][0..self.v_tile_bytes];
+                @memcpy(dst, std.mem.sliceAsBytes(self.v_staging));
+            }
+        }
+        self.staged_block = -1;
+        self.staged_tokens = 0;
     }
 
     /// Carga pesos desde GGUF (nombres qwen35).
@@ -284,25 +352,53 @@ pub const AttentionLayer = struct {
 
         const bytes_per_elem = self.paged_kv.block_alloc.bytes_per_elem;
         const kv_stride_block = block_size * kv_dim * bytes_per_elem;
-
+        const quant_on = self.k_quant != .fp16 or self.v_quant != .fp16;
         for (0..N) |t| {
             const global_pos = start_pos + t;
             const block_idx = global_pos / block_size;
             const offset_in_block = global_pos % block_size;
             const phys_id = self.block_table.getPhysical(block_idx) orelse return HybridAttnError.KvCacheNotSet;
             const block_data = self.paged_kv.block_alloc.memory_pool[phys_id * self.paged_kv.block_alloc.block_bytes ..];
-            const kv_offset = offset_in_block * kv_dim * bytes_per_elem;
 
-             for (0..n_kv_head) |h| {
-                 for (0..head_dim) |d| {
-                     const k_idx = kv_offset + (h * head_dim + d) * bytes_per_elem;
-                     const v_idx = k_idx + kv_stride_block;
-                     const kv_val_k = Kf32_hm.data[t * kv_dim + h * head_dim + d];
-                     const kv_val_v = Vf32_hm.data[t * kv_dim + h * head_dim + d];
-                     storeF16(block_data, k_idx, kv_val_k);
-                     storeF16(block_data, v_idx, kv_val_v);
-                 }
-             }
+            if (quant_on) {
+                // Acumular f16 en staging; cuantizar al sellar bloque (offset == block_size-1)
+                // o al cambiar de bloque lógico con datos pendientes.
+                if (self.staged_block != @as(isize, @intCast(block_idx)) and self.staged_tokens > 0) {
+                    try self.flushQuantTile();
+                }
+                const row = offset_in_block * kv_dim;
+                for (0..n_kv_head) |h| {
+                    for (0..head_dim) |d| {
+                        const idx = row + h * head_dim + d;
+                        self.k_staging[idx] = @floatCast(Kf32_hm.data[t * kv_dim + h * head_dim + d]);
+                        self.v_staging[idx] = @floatCast(Vf32_hm.data[t * kv_dim + h * head_dim + d]);
+                    }
+                }
+                if (self.staged_block == -1) self.staged_block = @as(isize, @intCast(block_idx));
+                self.staged_tokens = offset_in_block + 1;
+                if (offset_in_block == block_size - 1) {
+                    try self.flushQuantTile();
+                }
+            } else {
+                const kv_offset = offset_in_block * kv_dim * bytes_per_elem;
+                for (0..n_kv_head) |h| {
+                    for (0..head_dim) |d| {
+                        const k_idx = kv_offset + (h * head_dim + d) * bytes_per_elem;
+                        const v_idx = k_idx + kv_stride_block;
+                        const kv_val_k = Kf32_hm.data[t * kv_dim + h * head_dim + d];
+                        const kv_val_v = Vf32_hm.data[t * kv_dim + h * head_dim + d];
+                        storeF16(block_data, k_idx, kv_val_k);
+                        storeF16(block_data, v_idx, kv_val_v);
+                    }
+                }
+            }
+        }
+
+        // Sellar cualquier bloque parcial aún en staging antes de atender: el
+        // reader (CPU o GPU) lee el memory-pool directamente, así que el tile
+        // acumulado debe estar ya cuantizado (padded con ceros) en el pool.
+        if (quant_on and self.staged_tokens > 0) {
+            try self.flushQuantTile();
         }
 
         // === 7-8. Softmax Attention (causal) ===
@@ -338,22 +434,62 @@ pub const AttentionLayer = struct {
             var V_full = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_kv_head, head_dim });
             defer V_full.deinit();
 
+            // Dequantizar bloques K/V al backing f16 del pool. Si el cache está
+            // cuantizado, cada bloque se de-cuantiza con kv_quant.decode.
+            var last_block: isize = -1;
+            var tile_k: []f16 = &.{};
+            var tile_v: []f16 = &.{};
+            if (self.k_quant != .fp16 or self.v_quant != .fp16) {
+                tile_k = try self.allocator.alloc(f16, kv_dim * block_size);
+                tile_v = try self.allocator.alloc(f16, kv_dim * block_size);
+            }
+            const needs_tile = self.k_quant != .fp16 or self.v_quant != .fp16;
+            defer {
+                if (needs_tile) {
+                    self.allocator.free(tile_k);
+                    self.allocator.free(tile_v);
+                }
+            }
+
             for (0..total_len) |t| {
                 const block_idx = t / block_size;
                 const offset_in_block = t % block_size;
                 const phys_id = self.block_table.getPhysical(block_idx) orelse return HybridAttnError.KvCacheNotSet;
                 const block_data = self.paged_kv.block_alloc.memory_pool[phys_id * self.paged_kv.block_alloc.block_bytes ..];
-                const kv_offset = offset_in_block * kv_dim * bytes_per_elem;
 
-                for (0..n_kv_head) |h| {
-                    for (0..head_dim) |d| {
-                        const k_idx = kv_offset + (h * head_dim + d) * bytes_per_elem;
-                        const v_idx = k_idx + kv_stride_block;
-                        K_full.data[t * kv_dim + h * head_dim + d] = loadF16(block_data, k_idx);
-                        V_full.data[t * kv_dim + h * head_dim + d] = loadF16(block_data, v_idx);
+                // Refundir (dequantizar) el bloque al cambiar de bloque lógico.
+                if (@as(isize, @intCast(block_idx)) != last_block) {
+                    if (self.k_quant != .fp16) {
+                        kv_quant.decode(self.k_quant, block_data[0..self.k_tile_bytes], tile_k);
+                    }
+                    if (self.v_quant != .fp16) {
+                        kv_quant.decode(self.v_quant, block_data[self.k_tile_bytes..][0..self.v_tile_bytes], tile_v);
+                    }
+                    last_block = @as(isize, @intCast(block_idx));
+                }
+
+                if (self.k_quant != .fp16 or self.v_quant != .fp16) {
+                    const row_off = offset_in_block * kv_dim;
+                    for (0..n_kv_head) |h| {
+                        for (0..head_dim) |d| {
+                            const idx = row_off + h * head_dim + d;
+                            K_full.data[t * kv_dim + h * head_dim + d] = @floatCast(tile_k[idx]);
+                            V_full.data[t * kv_dim + h * head_dim + d] = @floatCast(tile_v[idx]);
+                        }
+                    }
+                } else {
+                    const kv_offset = offset_in_block * kv_dim * bytes_per_elem;
+                    for (0..n_kv_head) |h| {
+                        for (0..head_dim) |d| {
+                            const k_idx = kv_offset + (h * head_dim + d) * bytes_per_elem;
+                            const v_idx = k_idx + kv_stride_block;
+                            K_full.data[t * kv_dim + h * head_dim + d] = loadF16(block_data, k_idx);
+                            V_full.data[t * kv_dim + h * head_dim + d] = loadF16(block_data, v_idx);
+                        }
                     }
                 }
             }
+
 
             const repeat_factor = n_head / n_kv_head;
             var K_exp = try Tensor(f32).alloc(self.allocator, &.{ total_len, n_head, head_dim });

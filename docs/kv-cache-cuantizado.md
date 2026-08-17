@@ -968,12 +968,13 @@ pub fn generateWithCache(
   `appendTokensF16` cuantiza realmente (antes raw-memcpy); `appendTokens` usa stride
   `quantBytes`; `dequantizeCpu` decodifica q8_0/q4_0/q4_1 vía `kv_quant.decode`
   (antes lanzaba `UnsupportedCpuDequant`). Test `kv_cache append and retrieve q8_0`.
-- [ ] **Ruta híbrida paged (Qwen3.5 0.8B)** — *futuro*: `PagedConfig.quant_{k,v}`
-  están enganchados y el binario advierte ("driver de-deshacer paged aún no está
-  enganchado. Se usará f16.") cuando se solicita cache cuantizado en la ruta híbrida.
-  El store de `hybrid_attn.zig` sigue en f16 hasta que se implemente quantize-on-store
-  + dequant-on-read (CPU y staging GPU).
-- [ ] **Spec-decoding MTP**: `--spec-type draft-mtp` detecta `blk.0.nextn.eh_proj.weight`
-  en el GGUF y aborta con mensaje claro cuando falta (el 0.8B no lo tiene). El driver
-  de draft completo es fase posterior.
-- [ ] **`-jinja`**: flag reconocido; el motor de plantillas completo es fase posterior.
+- [x] **Ruta híbrida paged (Qwen3.5)**: store real de K/V cuantizado en `hybrid_attn.zig`
+  (tile f16 acumulado + `kv_quant.encode` al sellar bloque / al cambio de bloque) y
+  de-deshacer on-read. CPU: de-deshacer on-read vía `kv_quant.decode` por bloque.
+  GPU: cuando el cache está cuantizado se fuerza la ruta CPU de-deshacer (correcta);
+  el staging de-deshacer f16 on-device para el kernel paged es fase posterior
+  (el kernel f16 de `PagedAttentionGpu` asume f16; un driver fused q8_0 es futuro).
+- [x] **Spec-decoding MTP**: `--spec-type draft-mtp` detecta `blk.0.nextn.eh_proj.weight`
+  en el GGUF; el 0.8B carece de head MTP y aborta con mensaje claro (EXIT 0). Driver
+  especulativo completo es fase posterior. `--spec-draft-n-max` controla el budget.
+- [ ] **`-jinja`**: flag reconocido; render completo de `chat_template` es fase posterior.
