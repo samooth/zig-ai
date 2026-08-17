@@ -805,6 +805,12 @@ fn buildTestLayer(allocator: std.mem.Allocator) !TestFixture {
     var out_bytes: []u8 = undefined;
     layer.w_out = try makeF32Weight(allocator, 3, 4, &out_vals, out_info, &out_bytes);
 
+    // forward lee los pesos grandes ya dequantizados desde scratch_* (como hace
+    // loadWeightsFromGguf); el fixture debe rellenarlos o forward vería ceros.
+    layer.w_qkv.dequantToF32Transposed(layer.scratch_qkv);
+    layer.w_z.dequantToF32Transposed(layer.scratch_z);
+    layer.w_out.dequantToF32Transposed(layer.scratch_out);
+
     return .{
         .allocator = allocator,
         .layer = layer,
@@ -851,6 +857,9 @@ fn buildDenseLayer(allocator: std.mem.Allocator) !TestFixture {
     layer.w_qkv = try makeF32Weight(allocator, 8, 3, &qkv_vals, fixture.qkv_info, &fixture.qkv_bytes);
     layer.w_z = try makeF32Weight(allocator, 4, 3, &z_vals, fixture.z_info, &fixture.z_bytes);
     layer.w_out = try makeF32Weight(allocator, 3, 4, &out_vals, fixture.out_info, &fixture.out_bytes);
+    layer.w_qkv.dequantToF32Transposed(layer.scratch_qkv);
+    layer.w_z.dequantToF32Transposed(layer.scratch_z);
+    layer.w_out.dequantToF32Transposed(layer.scratch_out);
 
     for (0..2) |j| {
         for (0..3) |c| {
