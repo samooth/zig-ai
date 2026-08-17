@@ -174,6 +174,13 @@ pub const SsmLayer = struct {
         self.w_qkv = try loadQuantWeight(g, prefix, "attn_qkv.weight");
         self.w_z = try loadQuantWeight(g, prefix, "attn_gate.weight");
         self.w_out = try loadQuantWeight(g, prefix, "ssm_out.weight");
+
+        // Dequantizar los pesos grandes UNA vez aquí (no por token en forward),
+        // igual que hace la FFN. Los scratch f32 persisten y el caché de pesos
+        // GPU los sube al device una sola vez.
+        self.w_qkv.dequantToF32Transposed(self.scratch_qkv);
+        self.w_z.dequantToF32Transposed(self.scratch_z);
+        self.w_out.dequantToF32Transposed(self.scratch_out);
         self.w_beta.deinit();
         self.w_beta = try loadGgufF32(self.allocator, g, prefix, "ssm_beta.weight", true);
         self.w_alpha.deinit();
@@ -203,8 +210,7 @@ pub const SsmLayer = struct {
         const head_v_dim = p.d_state;
         const N = n;
 
-        // 1. qkv = attn_qkv @ X → [N, qkv_dim] (dequant f32 on-the-fly)
-        self.w_qkv.dequantToF32Transposed(self.scratch_qkv);
+        // 1. qkv = attn_qkv @ X → [N, qkv_dim] (peso ya dequantizado en load)
         var w_qkv_shape = [_]usize{ qkv_dim, p.n_embd };
         var w_qkv_strides = [_]usize{ p.n_embd, 1 };
         const w_qkv32 = Tensor(f32){
@@ -219,8 +225,7 @@ pub const SsmLayer = struct {
         defer qkv.deinit();
         try self.matmul_engine.linearProjection(f32, x, w_qkv32, &qkv);
 
-        // 2. z = attn_gate @ X → [N, value_dim]
-        self.w_z.dequantToF32Transposed(self.scratch_z);
+        // 2. z = attn_gate @ X → [N, value_dim] (peso ya dequantizado en load)
         var w_z_shape = [_]usize{ p.d_inner, p.n_embd };
         var w_z_strides = [_]usize{ p.n_embd, 1 };
         const w_z32 = Tensor(f32){
@@ -309,8 +314,7 @@ pub const SsmLayer = struct {
             }
         }
 
-        // 8. out = ssm_out @ attn_out → [N, n_embd]
-        self.w_out.dequantToF32Transposed(self.scratch_out);
+        // 8. out = ssm_out @ attn_out → [N, n_embd] (peso ya dequantizado en load)
         var w_out_shape = [_]usize{ p.n_embd, p.d_inner };
         var w_out_strides = [_]usize{ p.d_inner, 1 };
         const w_out32 = Tensor(f32){
