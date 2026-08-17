@@ -42,6 +42,7 @@ const kernel_names = [_][:0]const u8{
     "rmsNormGateMulKernel",
     "rmsNormKernel",
     "sigmoidGateKernel",
+    "sigmoidGateProjKernel",
     "sigmoidKernel",
     "splitQGKernel",
     "swigluKernel",
@@ -130,6 +131,22 @@ pub const LayerKernels = struct {
         const func = try self.get("sigmoidGateKernel");
         var kp = [_]?*anyopaque{ &bv, &gv, &dv, &sv, &n1, &dt1 };
         try cudaz.cuLaunchKernel(func, n_u((n + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
+    }
+
+    pub fn sigmoidGateProj(self: *LayerKernels, x: usize, w_beta: usize, w_alpha: usize, dt_bias: usize, ssm_a: usize, beta: usize, gate: usize, N: usize, K: usize, dt_rank: usize) !void {
+        var xv = x;
+        var wbv = w_beta;
+        var wav = w_alpha;
+        var dv = dt_bias;
+        var sv = ssm_a;
+        var bv = beta;
+        var gv = gate;
+        var N1: c_int = n_c(N);
+        var K1: c_int = n_c(K);
+        var dt1: c_int = n_c(dt_rank);
+        const func = try self.get("sigmoidGateProjKernel");
+        var kp = [_]?*anyopaque{ &xv, &wbv, &wav, &dv, &sv, &bv, &gv, &N1, &K1, &dt1 };
+        try cudaz.cuLaunchKernel(func, @intCast(dt_rank), @intCast(N), 1, 256, 1, 1, n_u(K * @sizeOf(f32)), self.stream, @ptrCast(&kp), null);
     }
 
     pub fn l2NormHeads(self: *LayerKernels, conv_out: usize, N: usize, qkv_dim: usize, key_dim: usize, n_k_heads: usize, head_v_dim: usize, eps: f32) !void {

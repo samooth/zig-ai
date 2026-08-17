@@ -110,6 +110,52 @@ extern "C" __global__ void sigmoidGateKernel(
     }
 }
 
+// ─── fused beta=x·W_beta, alpha=x·W_alpha, sigmoid(beta), gateCompute ────────
+// One block per (h, n): computes both projections of the same x row, applies
+// sigmoid(beta) and gate = ssm_a*softplus(alpha + dt_bias), and writes the two
+// [N, dt_rank] outputs. Replaces 2 cublas SGEMM + sigmoidGate.
+extern "C" __global__ void sigmoidGateProjKernel(
+    const float* __restrict__ x,
+    const float* __restrict__ w_beta,
+    const float* __restrict__ w_alpha,
+    const float* __restrict__ dt_bias,
+    const float* __restrict__ ssm_a,
+    float* __restrict__ beta,
+    float* __restrict__ gate,
+    int N, int K, int dt_rank)
+{
+    const int h = blockIdx.x;
+    const int n = blockIdx.y;
+    if (h >= dt_rank || n >= N) return;
+    extern __shared__ float sx[];
+    const float* xrow = x + (size_t)n * K;
+    for (int i = threadIdx.x; i < K; i += blockDim.x) sx[i] = xrow[i];
+    __syncthreads();
+    const float* wb = w_beta + (size_t)h * K;
+    const float* wa = w_alpha + (size_t)h * K;
+    float s_b = 0.0f, s_a = 0.0f;
+    for (int i = threadIdx.x; i < K; i += blockDim.x) {
+        s_b += sx[i] * wb[i];
+        s_a += sx[i] * wa[i];
+    }
+    __shared__ float rb[256], ra[256];
+    rb[threadIdx.x] = s_b;
+    ra[threadIdx.x] = s_a;
+    __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) {
+            rb[threadIdx.x] += rb[threadIdx.x + o];
+            ra[threadIdx.x] += ra[threadIdx.x + o];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        const int off = n * dt_rank + h;
+        beta[off] = 1.0f / (1.0f + expf(-rb[0]));
+        gate[off] = ssm_a[h] * logf(1.0f + expf(ra[0] + dt_bias[h]));
+    }
+}
+
 // ─── L2-normalize Q and K heads in conv_out (fiel a ggml_l2_norm) ─────────────
 // conv_out: [N, qkv_dim]; Q in [0,key_dim), K in [key_dim, 2*key_dim).
 // scale = 1 / max(sqrt(sum x^2), eps) per head.

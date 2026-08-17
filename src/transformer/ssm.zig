@@ -566,9 +566,12 @@ pub fn forwardGPU(
         try self.matmul_engine.linearProjectionDevice(x, w_qkv32, &g.qkv, n, p.n_embd, qkv_dim);
         try self.matmul_engine.linearProjectionDevice(x, w_z32, &g.z, n, p.n_embd, d_inner);
     }
-    try self.matmul_engine.linearProjectionDevice(x, self.w_beta, &g.beta, n, p.n_embd, dt_rank);
-    try self.matmul_engine.linearProjectionDevice(x, self.w_alpha, &g.gate, n, p.n_embd, dt_rank);
-    try lk.sigmoidGate(g.beta.ptr(), g.gate.ptr(), @intFromPtr(g.d_dt_bias.dev_ptr), @intFromPtr(g.d_ssm_a.dev_ptr), n * dt_rank, dt_rank);
+    // beta/alpha: proyección f32 del mismo x + sigmoid(beta) + gateCompute en un
+    // solo kernel (reemplaza 2 cublas SGEMM + sigmoidGate). Los pesos se suben
+    // a GPU de forma cacheada vía projectionDevicePtr.
+    const w_beta_dev = try self.matmul_engine.projectionDevicePtr(self.w_beta);
+    const w_alpha_dev = try self.matmul_engine.projectionDevicePtr(self.w_alpha);
+    try lk.sigmoidGateProj(x.ptr(), w_beta_dev, w_alpha_dev, @intFromPtr(g.d_dt_bias.dev_ptr), @intFromPtr(g.d_ssm_a.dev_ptr), g.beta.ptr(), g.gate.ptr(), n, p.n_embd, dt_rank);
 
     // conv1d causal + silu leyendo conv_state/qkv directo (sin staging); el
     // estado desplazado se escribe en conv_in (scratch) y se copia de vuelta.

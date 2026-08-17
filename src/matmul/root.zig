@@ -298,6 +298,23 @@ pub const MatmulEngine = struct {
         try cublas.gemmCuBlasF32Device(handle, d_B, X.buf, Y.buf, N, M, K, false, true, 1.0, 0.0);
     }
 
+    /// Devuelve el puntero device del peso f32 (subido/cacheado como en
+    /// linearProjectionDevice) sin hacer el matmul, para kernels custom que
+    /// leen el peso directamente.
+    pub fn projectionDevicePtr(self: *Self, W_T: Tensor(f32)) !usize {
+        if (self.backend != .cublas or self.weight_cache == null) {
+            @panic("projectionDevicePtr requiere backend cublas");
+        }
+        const key = @intFromPtr(W_T.data.ptr);
+        const d_B = if (self.weight_cache.?.get(key)) |b| b else blk: {
+            var buf = try cublas.GpuBuffer(f32).alloc(W_T.data.len);
+            try buf.upload(W_T.data);
+            try self.weight_cache.?.put(key, buf);
+            break :blk buf;
+        };
+        return @intFromPtr(d_B.dev_ptr);
+    }
+
     /// Proyección lineal device→device con peso f16 (p.ej. lm_head): X ya vive en
     /// GPU (f32), el peso se convierte a f32 y se cachea como en linearProjection;
     /// Y (f32) se escribe en GPU sin pasar por host.
