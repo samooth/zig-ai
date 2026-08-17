@@ -92,6 +92,24 @@ extern "C" __global__ void gateComputeKernel(
     }
 }
 
+// ─── fused sigmoid(beta) + gateCompute(gate) in one launch ───────────────────
+// beta and gate are both [N, dt_rank]; the per-column h = i % dt_rank.
+extern "C" __global__ void sigmoidGateKernel(
+    float* __restrict__ beta,
+    float* __restrict__ gate,
+    const float* __restrict__ dt_bias,
+    const float* __restrict__ ssm_a,
+    int n, int dt_rank)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        beta[i] = 1.0f / (1.0f + expf(-beta[i]));
+        int h = i % dt_rank;
+        float v = gate[i] + dt_bias[h];
+        gate[i] = ssm_a[h] * logf(1.0f + expf(v));
+    }
+}
+
 // ─── L2-normalize Q and K heads in conv_out (fiel a ggml_l2_norm) ─────────────
 // conv_out: [N, qkv_dim]; Q in [0,key_dim), K in [key_dim, 2*key_dim).
 // scale = 1 / max(sqrt(sum x^2), eps) per head.
@@ -120,22 +138,41 @@ extern "C" __global__ void l2NormHeadsKernel(
     }
 }
 
-// ─── conv1d (causal) + silu on qkv → conv_out ────────────────────────────────
-// conv_in: [(d_conv-1)+N, qkv_dim] (history rows then current); conv_w: [qkv_dim, d_conv].
+// ─── conv1d (causal) + silu on qkv → conv_out, with direct state access ──────
+// Reads conv_state [(d_conv-1), qkv_dim] and qkv [N, qkv_dim] as the combined
+// input rows [(d_conv-1)+N, qkv_dim] (state first), computes causal conv + silu
+// into conv_out [N, qkv_dim], and writes the shifted state (new_state[i] =
+// input row N+i) into state_out. state_out must NOT alias conv_state or qkv.
 extern "C" __global__ void conv1dSiluKernel(
-    const float* __restrict__ conv_in,
+    const float* __restrict__ conv_state,
+    const float* __restrict__ qkv,
     const float* __restrict__ conv_w,
     float* __restrict__ conv_out,
+    float* __restrict__ state_out,
     int N, int qkv_dim, int d_conv)
 {
+    int rows = (N > d_conv - 1 ? N : d_conv - 1);
+    int total = rows * qkv_dim;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N * qkv_dim) return;
+    if (idx >= total) return;
     int t = idx / qkv_dim;
     int c = idx % qkv_dim;
-    float sum = 0.0f;
-    for (int k = 0; k < d_conv; ++k)
-        sum += conv_in[((size_t)(t + k) * qkv_dim) + c] * conv_w[(size_t)c * d_conv + k];
-    conv_out[(size_t)t * qkv_dim + c] = sum / (1.0f + expf(-sum));
+    if (t < N) {
+        float sum = 0.0f;
+        for (int k = 0; k < d_conv; ++k) {
+            int r = t + k;
+            int rr = r < (d_conv - 1) ? r : r - (d_conv - 1);
+            const float* src = (r < d_conv - 1) ? conv_state : qkv;
+            sum += src[(size_t)rr * qkv_dim + c] * conv_w[(size_t)c * d_conv + k];
+        }
+        conv_out[(size_t)t * qkv_dim + c] = sum / (1.0f + expf(-sum));
+    }
+    if (t < d_conv - 1) {
+        int ri = N + t;
+        int srr = ri < (d_conv - 1) ? ri : ri - (d_conv - 1);
+        const float* ssrc = (ri < d_conv - 1) ? conv_state : qkv;
+        state_out[(size_t)t * qkv_dim + c] = ssrc[(size_t)srr * qkv_dim + c];
+    }
 }
 
 // ─── rmsnorm(attn_out) * silu(z) * ssm_norm, per v-head block ────────────────

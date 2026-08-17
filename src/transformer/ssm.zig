@@ -567,18 +567,13 @@ pub fn forwardGPU(
         try self.matmul_engine.linearProjectionDevice(x, w_z32, &g.z, n, p.n_embd, d_inner);
     }
     try self.matmul_engine.linearProjectionDevice(x, self.w_beta, &g.beta, n, p.n_embd, dt_rank);
-    try lk.sigmoid(g.beta.ptr(), n * dt_rank);
     try self.matmul_engine.linearProjectionDevice(x, self.w_alpha, &g.gate, n, p.n_embd, dt_rank);
-    try lk.gateCompute(g.gate.ptr(), @intFromPtr(g.d_dt_bias.dev_ptr), @intFromPtr(g.d_ssm_a.dev_ptr), n * dt_rank, dt_rank);
+    try lk.sigmoidGate(g.beta.ptr(), g.gate.ptr(), @intFromPtr(g.d_dt_bias.dev_ptr), @intFromPtr(g.d_ssm_a.dev_ptr), n * dt_rank, dt_rank);
 
-    // conv_in = [conv_state(history) ; qkv] en device.
-    const conv_qkv_off = (p.d_conv - 1) * qkv_dim * @sizeOf(f32);
-    try cudaz.cuMemcpyDtoD(g.conv_in.ptr(), @intFromPtr(g.d_conv_state.dev_ptr), conv_qkv_off);
-    try cudaz.cuMemcpyDtoD(g.conv_in.ptr() + conv_qkv_off, g.qkv.ptr(), n * qkv_dim * @sizeOf(f32));
-    try lk.conv1dSilu(g.conv_in.ptr(), @intFromPtr(g.d_conv1d.dev_ptr), g.conv_out.ptr(), n, qkv_dim, p.d_conv);
-    // actualizar conv_state con las últimas d_conv-1 filas de conv_in.
-    const hist_off = n * qkv_dim * @sizeOf(f32);
-    try cudaz.cuMemcpyDtoD(@intFromPtr(g.d_conv_state.dev_ptr), g.conv_in.ptr() + hist_off, (p.d_conv - 1) * qkv_dim * @sizeOf(f32));
+    // conv1d causal + silu leyendo conv_state/qkv directo (sin staging); el
+    // estado desplazado se escribe en conv_in (scratch) y se copia de vuelta.
+    try lk.conv1dSilu(@intFromPtr(g.d_conv_state.dev_ptr), g.qkv.ptr(), @intFromPtr(g.d_conv1d.dev_ptr), g.conv_out.ptr(), g.conv_in.ptr(), n, qkv_dim, p.d_conv);
+    try cudaz.cuMemcpyDtoD(@intFromPtr(g.d_conv_state.dev_ptr), g.conv_in.ptr(), (p.d_conv - 1) * qkv_dim * @sizeOf(f32));
 
     try lk.l2NormHeads(g.conv_out.ptr(), n, qkv_dim, key_dim, n_k_heads, head_v_dim, p.rms_eps);
 

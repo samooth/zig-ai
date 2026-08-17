@@ -41,6 +41,7 @@ const kernel_names = [_][:0]const u8{
     "qgemmKernel",
     "rmsNormGateMulKernel",
     "rmsNormKernel",
+    "sigmoidGateKernel",
     "sigmoidKernel",
     "splitQGKernel",
     "swigluKernel",
@@ -119,22 +120,15 @@ pub const LayerKernels = struct {
         try cudaz.cuLaunchKernel(func, n_u((n + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
     }
 
-    pub fn sigmoid(self: *LayerKernels, x: usize, n: usize) !void {
-        var xv = x;
-        var n1: c_int = n_c(n);
-        const func = try self.get("sigmoidKernel");
-        var kp = [_]?*anyopaque{ &xv, &n1 };
-        try cudaz.cuLaunchKernel(func, n_u((n + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
-    }
-
-    pub fn gateCompute(self: *LayerKernels, x: usize, dt_bias: usize, ssm_a: usize, n: usize, dt_rank: usize) !void {
-        var xv = x;
+    pub fn sigmoidGate(self: *LayerKernels, beta: usize, gate: usize, dt_bias: usize, ssm_a: usize, n: usize, dt_rank: usize) !void {
+        var bv = beta;
+        var gv = gate;
         var dv = dt_bias;
         var sv = ssm_a;
         var n1: c_int = n_c(n);
         var dt1: c_int = n_c(dt_rank);
-        const func = try self.get("gateComputeKernel");
-        var kp = [_]?*anyopaque{ &xv, &dv, &sv, &n1, &dt1 };
+        const func = try self.get("sigmoidGateKernel");
+        var kp = [_]?*anyopaque{ &bv, &gv, &dv, &sv, &n1, &dt1 };
         try cudaz.cuLaunchKernel(func, n_u((n + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
     }
 
@@ -151,16 +145,19 @@ pub const LayerKernels = struct {
         try cudaz.cuLaunchKernel(func, @intCast(n_k_heads), @intCast(N), 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
     }
 
-    pub fn conv1dSilu(self: *LayerKernels, conv_in: usize, conv_w: usize, conv_out: usize, N: usize, qkv_dim: usize, d_conv: usize) !void {
-        var civ = conv_in;
+    pub fn conv1dSilu(self: *LayerKernels, conv_state: usize, qkv: usize, conv_w: usize, conv_out: usize, state_out: usize, N: usize, qkv_dim: usize, d_conv: usize) !void {
+        var csv = conv_state;
+        var qv = qkv;
         var cwv = conv_w;
         var cov = conv_out;
+        var sov = state_out;
         var N1: c_int = n_c(N);
         var qv1: c_int = n_c(qkv_dim);
         var dc1: c_int = n_c(d_conv);
         const func = try self.get("conv1dSiluKernel");
-        var kp = [_]?*anyopaque{ &civ, &cwv, &cov, &N1, &qv1, &dc1 };
-        try cudaz.cuLaunchKernel(func, n_u((N * qkv_dim + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
+        var kp = [_]?*anyopaque{ &csv, &qv, &cwv, &cov, &sov, &N1, &qv1, &dc1 };
+        const rows = if (N > d_conv - 1) N else d_conv - 1;
+        try cudaz.cuLaunchKernel(func, n_u((rows * qkv_dim + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
     }
 
     pub fn rmsNormGateMul(self: *LayerKernels, attn_out: usize, z: usize, ssm_norm: usize, N: usize, d_inner: usize, n_v_heads: usize, head_v_dim: usize, eps: f32) !void {
