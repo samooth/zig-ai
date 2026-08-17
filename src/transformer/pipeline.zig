@@ -25,7 +25,13 @@ pub const Sampler = struct {
     pub fn sample(self: Sampler, logits: []const f32, rng: *std.Random.Xoshiro256, history: []const u32) u32 {
         const vocab = logits.len;
 
-        // 0. Fast path: top_p = 1 (sin recorte de núcleo), sin top-k y sin
+        // 0. Greedy directo: temperatura <= 0 sin repetition penalty → escaneo
+        // vectorizado de logits (sin copia intermedia).
+        if (self.temperature <= 0 and self.repetition_penalty == 1.0) {
+            return greedyArgmax(logits);
+        }
+
+        // 0b. Fast path: top_p = 1 (sin recorte de núcleo), sin top-k y sin
         // repetition penalty. El muestreo ponderado NO necesita ordenar: la
         // probabilidad de cada índice es la misma en cualquier orden. Evita el
         // sort completo (248K) y las 3 asignaciones grandes por token, y produce
@@ -63,12 +69,7 @@ pub const Sampler = struct {
 
         // 2. Greedy si temperature <= 0
         if (self.temperature <= 0) {
-            var max_idx: usize = 0;
-            var max_val: f32 = -std.math.inf(f32);
-            for (work, 0..) |v, i| {
-                if (v > max_val) { max_val = v; max_idx = i; }
-            }
-            return @as(u32, @intCast(max_idx));
+            return greedyArgmax(work);
         }
 
         // 3. Temperature scaling
@@ -147,6 +148,36 @@ pub const Sampler = struct {
             if (r <= cumsum) return @as(u32, @intCast(idx[i]));
         }
         return @as(u32, @intCast(idx[cutoff - 1]));
+    }
+
+    /// Argmax vectorizado de 16 en 16. Mantiene la semántica del escaneo
+    /// escalar: el índice de la PRIMERA aparición del máximo.
+    fn greedyArgmax(logits: []const f32) u32 {
+        const V = @Vector(16, f32);
+        var max_idx: usize = 0;
+        var max_val: f32 = -std.math.inf(f32);
+        var i: usize = 0;
+        const n = logits.len;
+        while (i + 16 <= n) : (i += 16) {
+            const vf: V = logits[i..][0..16].*;
+            const cm = @reduce(.Max, vf);
+            if (cm > max_val) {
+                max_val = cm;
+                inline for (0..16) |k| {
+                    if (vf[k] >= cm) {
+                        max_idx = i + k;
+                        break;
+                    }
+                }
+            }
+        }
+        while (i < n) : (i += 1) {
+            if (logits[i] > max_val) {
+                max_val = logits[i];
+                max_idx = i;
+            }
+        }
+        return @as(u32, @intCast(max_idx));
     }
 };
 
