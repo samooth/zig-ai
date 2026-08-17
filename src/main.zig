@@ -82,6 +82,20 @@ fn backendName(b: matmul.Backend) []const u8 {
     };
 }
 
+/// Imprime nombre, compute capability y memoria de la GPU activa, y avisa si
+/// la arquitectura detectada no coincide con la esperada por los cubins.
+fn printGpuInfo(stdout: anytype) !void {
+    const device = cudaz.cuDeviceGet(0) catch return;
+    const info = cudaz.cuDeviceInfo(device) catch return;
+    var arch_buf: [16]u8 = undefined;
+    const gpu_arch = cudaz.gpuArchString(info, &arch_buf);
+    try stdout.print(
+        "[+] GPU: {s} (compute {d}.{d}, {s}, {d:.1} GiB)\n",
+        .{ info.name, info.major, info.minor, gpu_arch, @as(f64, @floatFromInt(info.total_mem_bytes)) / (1024 * 1024 * 1024) },
+    );
+    try stdout.flush();
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
@@ -111,6 +125,7 @@ pub fn main(init: std.process.Init) !void {
     if (params.model_path) |path| {
         if (backend == .cublas) {
             try @import("cudaz").ensureContext();
+            try printGpuInfo(stdout);
         }
         runInference(io, allocator, path, params, backend, stdout) catch |err| {
             if (@errorReturnTrace()) |trace| {
@@ -455,8 +470,9 @@ fn runHybridInference(
     const blocks_per_seq: usize = (max_seq_len + block_size - 1) / block_size;
     const num_blocks = @max(64, num_attn_layers * blocks_per_seq);
 
-    // --- Spec-decoding: detectar cabeza MTP (Qwen3.5 nextn) en el GGUF ---
-    // El modelo 0.8B Qwen3.5-Q4_0 carece de tensores `nextn.*` -> draft-mtp no ejecutable.
+    // --- Spec-decoding: detectar cabeza MTP (tensores `nextn.*`) en el GGUF ---
+    // Solo los modelos con cabeza MTP (p.ej. la familia Qwen3.5 con nextn)
+    // pueden usar draft-mtp.
     if (params.spec_type == .draft_mtp) {
         const mtp_tensor = try std.fmt.allocPrint(allocator, "blk.0.nextn.eh_proj.weight", .{});
         defer allocator.free(mtp_tensor);
@@ -464,9 +480,9 @@ fn runHybridInference(
             try stdout.print(
                 \\
                 \\[!] --spec-type draft-mtp solicitado pero el modelo NO contiene cabeza MTP
-                \\    (`nextn.*` no encontrado en {s}). El modelo 0.8B Qwen3.5-Q4_0 carece de cabeza
-                \\    MTP, por lo que la decodificación especulativa no puede ejecutarse.
-                \\    Continue sin --spec-type o use un modelo con cabeza MTP (p.ej. Qwen3.5-9B-MTP, Qwen3-9B-MTP).
+                \\    (`nextn.*` no encontrado en {s}). La decodificación especulativa
+                \\    requiere un modelo con cabeza MTP; no puede ejecutarse con este modelo.
+                \\    Continue sin --spec-type o use un modelo con cabeza MTP.
                 \\
             , .{model.config.architecture});
             try stdout.flush();

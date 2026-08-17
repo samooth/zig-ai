@@ -119,6 +119,38 @@ pub fn cuDeviceGet(ordinal: c_int) !CUdevice {
     return device;
 }
 
+pub const GpuInfo = struct {
+    name: []const u8,
+    major: c_int,
+    minor: c_int,
+    total_mem_bytes: usize,
+};
+
+/// Nombre + compute capability + memoria total de `dev` (para log/verificación
+/// de que los cubins compilados coinciden con la GPU).
+pub fn cuDeviceInfo(dev: CUdevice) !GpuInfo {
+    var name_buf: [256]u8 = undefined;
+    if (cudalib.cuDeviceGetName(&name_buf, @intCast(name_buf.len), dev) != .SUCCESS) return error.CudaError;
+    const name_len = std.mem.indexOfScalar(u8, &name_buf, 0) orelse name_buf.len;
+    var major: c_int = 0;
+    var minor: c_int = 0;
+    if (cudalib.cuDeviceComputeCapability(&major, &minor, dev) != .SUCCESS) return error.CudaError;
+    var total_mem: usize = 0;
+    if (cudalib.cuDeviceTotalMem(&total_mem, dev) != .SUCCESS) return error.CudaError;
+    return .{
+        .name = name_buf[0..name_len],
+        .major = major,
+        .minor = minor,
+        .total_mem_bytes = total_mem,
+    };
+}
+
+/// "8.6" -> "sm_86" (mismo formato usado en build.zig para los cubins).
+/// Escribe en `buf` (p.ej. "sm_86") y devuelve el slice usado.
+pub fn gpuArchString(info: GpuInfo, buf: []u8) []const u8 {
+    return std.fmt.bufPrint(buf, "sm_{d}{d}", .{ info.major, info.minor }) catch "sm_unknown";
+}
+
 pub fn cuCtxCreate(flags: c_uint, dev: CUdevice) !CUcontext {
     var ctx: CUcontext = undefined;
     const res = cudalib.cuCtxCreate_v2(&ctx, flags, dev);
@@ -339,6 +371,7 @@ const cudalib = struct {
     extern "c" fn cuLaunchKernel(f: CUfunction, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, by: c_uint, bz: c_uint, sm: c_uint, stream: CUstream, params: ?*anyopaque, extra: ?*anyopaque) CUresult;
     extern "c" fn cuDeviceGetName(name: [*]u8, len: c_int, dev: CUdevice) CUresult;
     extern "c" fn cuDeviceTotalMem(mem: *usize, dev: CUdevice) CUresult;
+    extern "c" fn cuDeviceComputeCapability(major: *c_int, minor: *c_int, dev: CUdevice) CUresult;
 };
 
 /// Contexto CUDA creado por `ensureContext()`.

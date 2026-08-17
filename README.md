@@ -117,6 +117,10 @@ zig build
 # Con CUDA (auto-detectado)
 CUDA_PATH=/usr/local/cuda zig build
 
+# Arquitectura GPU: se auto-detecta (nvidia-smi) para compilar los kernels
+# nativos (cubins sm_XX / PTX compute_XX). Se puede forzar:
+zig build -Dgpu-arch=sm_89        # o env: ZIG_AI_GPU_ARCH=sm_89
+
 # Tests
 zig build test
 

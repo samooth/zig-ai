@@ -32,6 +32,14 @@ pub fn build(b: *std.Build) void {
 
     const has_openblas = b.option(bool, "openblas", "Link OpenBLAS") orelse false;
 
+    // ── Arquitectura GPU ──────────────────────────────────────────────────────
+    // Los cubins/PTX CUDA se compilan para la arquitectura detectada en el
+    // host (compute capability vía `nvidia-smi`) en vez de hardcodear sm_86.
+    // Se puede forzar con `-Dgpu-arch=sm_89` o la env `ZIG_AI_GPU_ARCH`.
+    const gpu_arch = gpuArchDetect(b);
+    const gpu_compute = gpuArchToCompute(b, gpu_arch);
+    std.debug.print("GPU arch: {s} (kernels CUDA compilados para {s})\n", .{ gpu_arch, gpu_compute });
+
     var ptx_output: ?std.Build.LazyPath = null;
     var cubin_output: ?std.Build.LazyPath = null;
     var dequant_ptx: ?std.Build.LazyPath = null;
@@ -40,6 +48,8 @@ pub fn build(b: *std.Build) void {
 
     if (has_cuda) {
         const nvcc_path = b.findProgram(&.{"nvcc"}, &.{cuda_bin_path}) catch unreachable;
+        const arch_flag = std.fmt.allocPrint(b.allocator, "-arch={s}", .{gpu_compute}) catch unreachable;
+        const code_flag = std.fmt.allocPrint(b.allocator, "-code={s}", .{gpu_arch}) catch unreachable;
 
         const compile_ptx = b.addSystemCommand(&.{
             nvcc_path,
@@ -51,36 +61,36 @@ pub fn build(b: *std.Build) void {
 
         const compile_cubin = b.addSystemCommand(&.{
             nvcc_path,
-            "-arch=compute_80", "-code=sm_80",
+            arch_flag, code_flag,
             "-cubin", "-o",
         });
-        cubin_output = compile_cubin.addOutputFileArg("flash_attention_sm80.cubin");
+        cubin_output = compile_cubin.addOutputFileArg("flash_attention.cubin");
         compile_cubin.addFileArg(b.path("cuda/flash_attention.cu"));
 
-        // Cubin nativo para la GPU detectada (JIT de PTX compute_80 resulta
-        // inestable para lanzamientos repetidos en sm_86). Ajustar si otra GPU.
+        // Cubin/PTX nativo para la GPU detectada (el JIT de PTX compute_80
+        // resultaba inestable para lanzamientos repetidos en sm_86).
         const compile_dequant = b.addSystemCommand(&.{
             nvcc_path,
-            "-arch=compute_86", "-code=sm_86",
-            "-cubin", "-o",
+            arch_flag, code_flag,
+            "-ptx", "-o",
         });
         dequant_ptx = compile_dequant.addOutputFileArg("dequantize_kernels.ptx");
         compile_dequant.addFileArg(b.path("cuda/dequantize_kernels.cu"));
 
         const compile_pa = b.addSystemCommand(&.{
             nvcc_path,
-            "-arch=compute_86", "-code=sm_86",
+            arch_flag, code_flag,
             "-cubin", "-o",
         });
-        paged_cubin = compile_pa.addOutputFileArg("paged_attention_sm86.cubin");
+        paged_cubin = compile_pa.addOutputFileArg("paged_attention.cubin");
         compile_pa.addFileArg(b.path("src/cuda/paged_attention.cu"));
 
         const compile_layer = b.addSystemCommand(&.{
             nvcc_path,
-            "-arch=compute_86", "-code=sm_86",
+            arch_flag, code_flag,
             "-cubin", "-o",
         });
-        layer_cubin = compile_layer.addOutputFileArg("layer_kernels_sm86.cubin");
+        layer_cubin = compile_layer.addOutputFileArg("layer_kernels.cubin");
         compile_layer.addFileArg(b.path("src/cuda/layer_kernels.cu"));
     }
 
@@ -107,9 +117,9 @@ pub fn build(b: *std.Build) void {
     const paged_options = b.addOptions();
     var paged_cubin_install: ?*std.Build.Step.InstallFile = null;
     if (paged_cubin) |cb| {
-        paged_cubin_install = b.addInstallFileWithDir(cb, .{ .custom = "lib" }, "paged_attention_sm86.cubin");
+        paged_cubin_install = b.addInstallFileWithDir(cb, .{ .custom = "lib" }, "paged_attention.cubin");
         b.getInstallStep().dependOn(&paged_cubin_install.?.step);
-        paged_options.addOption([]const u8, "paged_cubin", b.getInstallPath(.{ .custom = "lib" }, "paged_attention_sm86.cubin"));
+        paged_options.addOption([]const u8, "paged_cubin", b.getInstallPath(.{ .custom = "lib" }, "paged_attention.cubin"));
     } else {
         paged_options.addOption([]const u8, "paged_cubin", "");
     }
@@ -117,9 +127,9 @@ pub fn build(b: *std.Build) void {
     // === Options: ruta al cubin de layer_kernels ===
     const layer_options = b.addOptions();
     if (layer_cubin) |cb| {
-        const layer_install = b.addInstallFileWithDir(cb, .{ .custom = "lib" }, "layer_kernels_sm86.cubin");
+        const layer_install = b.addInstallFileWithDir(cb, .{ .custom = "lib" }, "layer_kernels.cubin");
         b.getInstallStep().dependOn(&layer_install.step);
-        layer_options.addOption([]const u8, "layer_cubin", b.getInstallPath(.{ .custom = "lib" }, "layer_kernels_sm86.cubin"));
+        layer_options.addOption([]const u8, "layer_cubin", b.getInstallPath(.{ .custom = "lib" }, "layer_kernels.cubin"));
     } else {
         layer_options.addOption([]const u8, "layer_cubin", "");
     }
@@ -618,4 +628,36 @@ pub fn build(b: *std.Build) void {
         run_bench_pa.step.dependOn(&inst.step);
     }
     bench_pa_step.dependOn(&run_bench_pa.step);
+}
+
+/// Detección de la arquitectura GPU (p.ej. "sm_86") para compilar los kernels
+/// CUDA. Orden de prioridad:
+///   1. `-Dgpu-arch=sm_XX` (opción de build)
+///   2. env `ZIG_AI_GPU_ARCH`
+///   3. auto-detección vía `nvidia-smi --query-gpu=compute_cap`
+///   4. fallback "sm_86" (con aviso; forzar vía `-Dgpu-arch` si es otra GPU).
+fn gpuArchDetect(b: *std.Build) []const u8 {
+    if (b.option([]const u8, "gpu-arch", "Arquitectura GPU para compilar kernels CUDA (p.ej. sm_86). Se auto-detecta vía nvidia-smi si no se indica.")) |a|
+        return a;
+    if (b.graph.environ_map.get("ZIG_AI_GPU_ARCH")) |a|
+        return a;
+    if (!std.process.can_spawn) return "sm_86";
+    var code: u8 = undefined;
+    const out = b.runAllowFail(&.{ "nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader" }, &code, .ignore) catch return "sm_86";
+    defer b.allocator.free(out);
+    var it0 = std.mem.splitScalar(u8, out, '\n');
+    const line0 = it0.next() orelse return "sm_86";
+    const cap = std.mem.trim(u8, line0, " \t\r");
+    if (cap.len < 3) return "sm_86";
+    var it = std.mem.splitScalar(u8, cap, '.');
+    const maj = it.next() orelse return "sm_86";
+    const min = it.next() orelse return "sm_86";
+    return std.fmt.allocPrint(b.allocator, "sm_{s}{s}", .{ maj, std.mem.trim(u8, min, " \t\r") }) catch "sm_86";
+}
+
+/// "sm_86" -> "compute_86"
+fn gpuArchToCompute(b: *std.Build, arch: []const u8) []const u8 {
+    if (arch.len > 3 and std.mem.startsWith(u8, arch, "sm_"))
+        return std.fmt.allocPrint(b.allocator, "compute_{s}", .{arch[3..]}) catch arch;
+    return arch;
 }

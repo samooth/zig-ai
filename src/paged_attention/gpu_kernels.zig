@@ -1,6 +1,7 @@
 //! Motor GPU de PagedAttention (decode / prefill / reshape / copy).
-//! Carga el cubin `paged_attention_sm86.cubin` compilado por el build y lanza
-//! los kernels equivalentes a la referencia CPU (`attention.zig`).
+//! Carga el cubin `paged_attention.cubin` compilado por el build (para la
+//! arquitectura GPU detectada) y lanza los kernels equivalentes a la referencia
+//! CPU (`attention.zig`).
 //! Layout de bloques: memory-pool de `BlockAllocator` (K region + V region por
 //! bloque físico), el mismo que lee `PagedAttention.decode`.
 const std = @import("std");
