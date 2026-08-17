@@ -410,7 +410,6 @@ pub const PagedAttentionGpu = struct {
         };
 const shared_bytes: c_uint = @intCast(2 * head_dim * @sizeOf(f32));
         try cudaz.cuLaunchKernel(func, 1, @intCast(num_q_heads), 1, 32, 1, 1, shared_bytes, self.stream, @ptrCast(&kp), null);
-        try cudaz.cuStreamSynchronize(self.stream);
     }
 
     /// Prefill device→device causal (chunks): `q16`/`out16` son buffers f16 de

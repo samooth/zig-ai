@@ -24,6 +24,29 @@ fn loadModule() !cudaz.CUmodule {
     return g_module.?;
 }
 
+const kernel_names = [_][:0]const u8{
+    "addInplaceKernel",
+    "addKernel",
+    "conv1dSiluKernel",
+    "copyF16toF32Kernel",
+    "copyF32toF16Kernel",
+    "deltaNetKernel",
+    "embeddingGatherKernel",
+    "gateComputeKernel",
+    "gateKernel",
+    "kvAppendF16Kernel",
+    "l2NormHeadsKernel",
+    "mropeKernel",
+    "q4gemmM1Kernel",
+    "qgemmKernel",
+    "rmsNormGateMulKernel",
+    "rmsNormKernel",
+    "sigmoidKernel",
+    "splitQGKernel",
+    "swigluKernel",
+};
+var g_funcs: [kernel_names.len]?cudaz.CUfunction = .{null} ** kernel_names.len;
+
 pub const LayerKernels = struct {
     stream: cudaz.CUstream,
 
@@ -38,6 +61,14 @@ pub const LayerKernels = struct {
 
     fn get(self: *LayerKernels, name: [:0]const u8) !cudaz.CUfunction {
         _ = self;
+        for (kernel_names, 0..) |kn, i| {
+            if (std.mem.eql(u8, kn, name)) {
+                if (g_funcs[i]) |f| return f;
+                const f = try cudaz.cuModuleGetFunction(try loadModule(), name);
+                g_funcs[i] = f;
+                return f;
+            }
+        }
         return cudaz.cuModuleGetFunction(try loadModule(), name) catch return error.KernelNotFound;
     }
 
