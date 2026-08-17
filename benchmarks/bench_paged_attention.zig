@@ -56,7 +56,7 @@ fn benchDecodeBatch(allocator: std.mem.Allocator, batch: usize, seq_len: usize, 
     var engine: ?pa.PagedAttentionGpu = null;
     defer if (engine) |*e| e.deinit();
     if (cudaz.isCudaAvailable()) {
-        engine = try pa.PagedAttentionGpu.init(allocator, config);
+        engine = try pa.PagedAttentionGpu.init(allocator, config, try cudaz.cuStreamCreate(0));
     }
 
     var seq_ids: [64]u64 = undefined;

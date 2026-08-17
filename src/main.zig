@@ -20,6 +20,7 @@ const bpe = @import("tokenizer");
 const cudaz = @import("cudaz");
 const cublas = @import("cublas");
 const layer_kernels = @import("layer_kernels");
+const gguf = @import("gguf");
 const embedding = @import("embedding");
 const hybrid_layer = @import("transformer");
 const norm = @import("norm");
@@ -47,9 +48,18 @@ const CliParams = struct {
     spec_draft_n_max: usize = 16,
     // --- Chat template (llama.cpp -jinja) ---
     use_jinja: bool = false,
+    // --- Cuantización de pesos (--quant auto|off; activa el GEMM Q4_0 device) ---
+    quant: QuantMode = .auto,
+    // --- Batch de prefill (llama.cpp -b/--batch-size lógico, -ub/--ubatch-size
+    // físico). El prompt se procesa en lotes lógicos de `batch_size` y cada uno
+    // en sub-lotes físicos de `ubatch_size` tokens por llamada GPU.
+    batch_size: usize = 2048,
+    ubatch_size: usize = 512,
 };
 
 const SpecType = enum { none, draft_mtp };
+
+const QuantMode = enum { auto, off };
 
 /// Resuelve el backend matmul a usar según la opción `--backend`.
 fn resolveBackend(backend: []const u8) matmul.Backend {
@@ -171,9 +181,9 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args, stdout: anyty
             } else {
                 try stdout.print("[!] Backend inválido: {s} (auto|cpu|gpu)\n", .{v});
             }
-        } else if (std.mem.eql(u8, arg, "--cache-type-k")) {
+        } else if (std.mem.eql(u8, arg, "-ctk") or std.mem.eql(u8, arg, "--cache-type-k")) {
             params.cache_type_k = try parseQuant(&it, arg);
-        } else if (std.mem.eql(u8, arg, "--cache-type-v")) {
+        } else if (std.mem.eql(u8, arg, "-ctv") or std.mem.eql(u8, arg, "--cache-type-v")) {
             params.cache_type_v = try parseQuant(&it, arg);
         } else if (std.mem.eql(u8, arg, "--spec-draft-type-k")) {
             params.spec_draft_type_k = try parseQuant(&it, arg);
@@ -183,6 +193,14 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args, stdout: anyty
             const v = try nextValue(&it, "-np");
             params.num_parallel = std.fmt.parseInt(usize, v, 10) catch 1;
             if (params.num_parallel < 1) params.num_parallel = 1;
+        } else if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--batch-size")) {
+            const v = try nextValue(&it, "--batch-size");
+            params.batch_size = std.fmt.parseInt(usize, v, 10) catch 2048;
+            if (params.batch_size < 1) params.batch_size = 1;
+        } else if (std.mem.eql(u8, arg, "-ub") or std.mem.eql(u8, arg, "--ubatch-size")) {
+            const v = try nextValue(&it, "--ubatch-size");
+            params.ubatch_size = std.fmt.parseInt(usize, v, 10) catch 512;
+            if (params.ubatch_size < 1) params.ubatch_size = 1;
         } else if (std.mem.eql(u8, arg, "--spec-type")) {
             const v = try nextValue(&it, "--spec-type");
             if (std.mem.eql(u8, v, "none")) {
@@ -195,6 +213,15 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args, stdout: anyty
         } else if (std.mem.eql(u8, arg, "--spec-draft-n-max")) {
             const v = try nextValue(&it, "--spec-draft-n-max");
             params.spec_draft_n_max = std.fmt.parseInt(usize, v, 10) catch 16;
+        } else if (std.mem.eql(u8, arg, "--quant")) {
+            const v = try nextValue(&it, "--quant");
+            if (std.mem.eql(u8, v, "off")) {
+                params.quant = .off;
+            } else if (std.mem.eql(u8, v, "auto")) {
+                params.quant = .auto;
+            } else {
+                try stdout.print("[!] --quant inválido: {s} (auto|off)\n", .{v});
+            }
         } else if (std.mem.eql(u8, arg, "-jinja") or std.mem.eql(u8, arg, "--jinja")) {
             params.use_jinja = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -234,13 +261,16 @@ fn printHelp(stdout: anytype) !void {
         \\  --repetition-penalty <f>  Repetition penalty (def: 1.0 = desactivado)
         \\  --seed <n>                Semilla del RNG (def: 42)
         \\  --backend <auto|cpu|gpu>  Backend matmul (def: auto → GPU si disponible)
-        \\  --cache-type-k <fmt>      Cuantización cache K (q8_0|q4_0|q4_1|fp16|...)
-        \\  --cache-type-v <fmt>      Cuantización cache V (q8_0|q4_0|q4_1|fp16|...)
+        \\  -ctk, --cache-type-k <fmt> Cuantización cache K (q8_0|q4_0|q4_1|fp16|...)
+        \\  -ctv, --cache-type-v <fmt> Cuantización cache V (q8_0|q4_0|q4_1|fp16|...)
         \\  --spec-draft-type-k <fmt> Cuantización cache K del draft (def: fp16)
         \\  --spec-draft-type-v <fmt> Cuantización cache V del draft (def: fp16)
         \\  -np <n>                   Secuencias paralelas / prefillo (def: 1)
+        \\  -b, --batch-size <n>      Batch lógico de prefill en tokens (def: 2048)
+        \\  -ub, --ubatch-size <n>    Batch físico por llamada GPU (def: 512)
         \\  --spec-type <draft-mtp>   Decodificación especulativa (def: none)
         \\  --spec-draft-n-max <n>    Tokens draft por round (def: 16)
+        \\  --quant <auto|off>         GEMM de pesos cuantizados Q4_0 (def: auto)
         \\  -jinja                    Usar plantilla chat jinja del tokenizer
         \\  -h, --help                Muestra esta ayuda
         \\
@@ -406,6 +436,9 @@ fn runHybridInference(
     defer emb.deinit();
     var lm_head = try model.loadLmHead();
     defer lm_head.deinit();
+    const lm_head_q = try model.loadLmHeadQuant();
+    layer_kernels.quant_enabled = params.quant == .auto;
+    const lm_head_q4 = lm_head_q.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath();
     var out_norm = try model.loadOutputNorm();
     defer out_norm.deinit();
     const rms_eps = cfg.layer_norm_rms_epsilon;
@@ -477,16 +510,20 @@ fn runHybridInference(
     const gpu_attention_enabled = true;
     const use_gpu_kv = (backend == .cublas) and !quant_on and gpu_attention_enabled;
     var shared_paged_gpu: ?paged_attn.PagedAttentionGpu = if (use_gpu_kv)
-        paged_attn.PagedAttentionGpu.init(allocator, .{
-            .block_size = block_size,
-            .num_blocks = 0,
-            .head_dim = head_dim,
-            .num_kv_heads = cfg.head_count_kv,
-            .num_q_heads = cfg.head_count,
-            .dtype = .f16,
-            .quant_k = params.cache_type_k,
-            .quant_v = params.cache_type_v,
-        }) catch null
+        paged_attn.PagedAttentionGpu.init(
+            allocator,
+            .{
+                .block_size = block_size,
+                .num_blocks = 0,
+                .head_dim = head_dim,
+                .num_kv_heads = cfg.head_count_kv,
+                .num_q_heads = cfg.head_count,
+                .dtype = .f16,
+                .quant_k = params.cache_type_k,
+                .quant_v = params.cache_type_v,
+            },
+            @ptrCast((try matmul.MatmulEngine.sharedCudaStream()).raw),
+        ) catch null
     else null;
     defer if (shared_paged_gpu) |*g| g.deinit();
     const shared_gpu_ptr: ?*paged_attn.PagedAttentionGpu = if (shared_paged_gpu) |*g| g else null;
@@ -556,16 +593,6 @@ fn runHybridInference(
     const hidden_2d = try hidden.reshape(&[_]usize{ seq_len, n_embd });
     defer { if (hidden_2d.allocator) |a| { a.free(hidden_2d.shape); a.free(hidden_2d.strides); } }
 
-    var buf_a = try Tensor(f32).alloc(allocator, &.{ seq_len, n_embd });
-    defer buf_a.deinit();
-    var buf_b = try Tensor(f32).alloc(allocator, &.{ seq_len, n_embd });
-    defer buf_b.deinit();
-    // La primera capa recibe el embedding del prompt (f16 → f32)
-    for (buf_a.data, hidden_2d.data) |*d, s| d.* = @as(f32, @floatCast(s));
-
-    var cur = &buf_a;
-    var nxt = &buf_b;
-
     // Ensure all attention layers have blocks for the prefill sequence
     for (layer_block_tables, 0..) |bt_opt, i| {
         if (bt_opt) |bt| {
@@ -576,45 +603,119 @@ fn runHybridInference(
         _ = i;
     }
 
-    const t_prefill = @import("time").Timer.start();
-    for (layers) |*layer| {
-        try layer.forward(cur.*, nxt, 0, seq_len);
-        const t = cur;
-        cur = nxt;
-        nxt = t;
-    }
-    const prefill_ns = t_prefill.read();
-
-    // Sembrar el estado recurrente SSM en GPU a partir del prefill CPU.
-    for (layers) |*layer| try hybrid_layer.HybridLayer.seedGpuFromHost(layer);
-
-    // LM head sobre el último token del prefill (con output_norm final)
-    var last_shape = [_]usize{ 1, n_embd };
-    var last_strides = [_]usize{ n_embd, 1 };
-    const last_2d = Tensor(f32){
-        .data = cur.data[(seq_len - 1) * n_embd ..][0..n_embd],
-        .shape = &last_shape,
-        .strides = &last_strides,
-        .offset = 0,
-        .allocator = null,
-        .owns_data = false,
-    };
-
-    var normed = try Tensor(f32).alloc(allocator, &.{ 1, n_embd });
-    defer normed.deinit();
-    norm.rmsNorm(f32, f32, last_2d, out_norm, rms_eps, &normed);
-
-    var normed16 = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
-    defer normed16.deinit();
-    for (normed.data, normed16.data) |s, *d| d.* = @floatCast(s);
-
-    var logits = try Tensor(f16).alloc(allocator, &.{ 1, vocab });
-    defer logits.deinit();
-    try embedding.lmHeadForward(&engine, normed16, lm_head, &logits);
-
+    const use_gpu_prefill = std.c.getenv("NOGPU_PREFILL") == null;
     var logits_f32 = try allocator.alloc(f32, vocab);
     defer allocator.free(logits_f32);
-    for (logits.data, 0..) |v, i| logits_f32[i] = @as(f32, @floatCast(v));
+
+    const t_prefill = @import("time").Timer.start();
+    if (use_gpu_prefill) {
+        // Prefill 100% GPU en chunks de `ubatch_size` (llama.cpp -ub): embeddings
+        // H2D por chunk, capas forwardGPU con n = chunk. El estado recurrente SSM
+        // y el KV de atención quedan en el pool GPU (sin siembra host→device).
+        const ub = params.ubatch_size;
+        var lk = try layer_kernels.LayerKernels.init(@ptrCast((try matmul.MatmulEngine.sharedCudaStream()).raw));
+        defer lk.deinit();
+        var g_cur = try cublas.GpuTensor(f32).alloc(ub * n_embd);
+        defer g_cur.deinit();
+        var g_nxt = try cublas.GpuTensor(f32).alloc(ub * n_embd);
+        defer g_nxt.deinit();
+        var g_normed = try cublas.GpuTensor(f32).alloc(n_embd);
+        defer g_normed.deinit();
+        var g_logits = try cublas.GpuTensor(f32).alloc(vocab);
+        defer g_logits.deinit();
+        var g_out_norm = try cublas.GpuBuffer(f32).alloc(n_embd);
+        defer g_out_norm.free();
+        try g_out_norm.upload(out_norm.data);
+
+        const stage = try allocator.alloc(f32, ub * n_embd);
+        defer allocator.free(stage);
+
+        var pos: usize = 0;
+        var last_n: usize = 0;
+        var cur2gpu = g_cur;
+        var nxt2gpu = g_nxt;
+        while (pos < seq_len) {
+            const n = @min(ub, seq_len - pos);
+            for (0..n * n_embd) |i| {
+                stage[i] = @as(f32, @floatCast(hidden_2d.data[pos * n_embd + i]));
+            }
+            try cudaz.cuMemcpyHtoD(cur2gpu.ptr(), @intFromPtr(stage.ptr), n * n_embd * @sizeOf(f32));
+            for (layers) |*layer| {
+                try hybrid_layer.HybridLayer.forwardGPU(layer, &lk, cur2gpu, &nxt2gpu, pos, n);
+                const t2 = cur2gpu;
+                cur2gpu = nxt2gpu;
+                nxt2gpu = t2;
+            }
+            pos += n;
+            last_n = n;
+        }
+
+        // LM head sobre el último token del prompt (última fila del buffer final).
+        try cudaz.cuStreamSynchronize(lk.stream);
+        const last_row = cur2gpu.ptr() + (last_n - 1) * n_embd * @sizeOf(f32);
+        try lk.rmsNorm(last_row, @intFromPtr(g_out_norm.dev_ptr), g_normed.ptr(), 1, n_embd, rms_eps);
+        if (lm_head_q4) {
+            try lk.q4gemmLinear(allocator, g_normed.ptr(), lm_head_q.bytes, g_logits.ptr(), n_embd, vocab);
+        } else {
+            try engine.linearProjectionDeviceF16(g_normed, lm_head, &g_logits, 1, n_embd, vocab);
+        }
+        try cudaz.cuStreamSynchronize(lk.stream);
+        try cudaz.cuMemcpyDtoH(@intFromPtr(logits_f32.ptr), g_logits.ptr(), vocab * @sizeOf(f32));
+    } else {
+        var buf_a = try Tensor(f32).alloc(allocator, &.{ seq_len, n_embd });
+        defer buf_a.deinit();
+        var buf_b = try Tensor(f32).alloc(allocator, &.{ seq_len, n_embd });
+        defer buf_b.deinit();
+        // La primera capa recibe el embedding del prompt (f16 → f32)
+        for (buf_a.data, hidden_2d.data) |*d, s| d.* = @as(f32, @floatCast(s));
+
+        var cur = &buf_a;
+        var nxt = &buf_b;
+        for (layers) |*layer| {
+            try layer.forward(cur.*, nxt, 0, seq_len);
+            const t = cur;
+            cur = nxt;
+            nxt = t;
+        }
+
+        // Sembrar el estado recurrente SSM en GPU a partir del prefill CPU.
+        for (layers) |*layer| try hybrid_layer.HybridLayer.seedGpuFromHost(layer);
+
+        // Subir el KV de atención del prefill (host pool) al device pool antes
+        // del decode GPU-residente: el decode device lee bloques residentes.
+        if (shared_gpu_ptr) |gpu| {
+            for (layer_block_tables) |bt_opt| {
+                if (bt_opt) |bt| try gpu.stageTableAll(paged_kv.block_alloc, bt);
+            }
+        }
+
+        // LM head sobre el último token del prefill (con output_norm final)
+        var last_shape = [_]usize{ 1, n_embd };
+        var last_strides = [_]usize{ n_embd, 1 };
+        const last_2d = Tensor(f32){
+            .data = cur.data[(seq_len - 1) * n_embd ..][0..n_embd],
+            .shape = &last_shape,
+            .strides = &last_strides,
+            .offset = 0,
+            .allocator = null,
+            .owns_data = false,
+        };
+
+        var normed = try Tensor(f32).alloc(allocator, &.{ 1, n_embd });
+        defer normed.deinit();
+        norm.rmsNorm(f32, f32, last_2d, out_norm, rms_eps, &normed);
+
+        var normed16 = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
+        defer normed16.deinit();
+        for (normed.data, normed16.data) |s, *d| d.* = @floatCast(s);
+
+        var logits = try Tensor(f16).alloc(allocator, &.{ 1, vocab });
+        defer logits.deinit();
+        try embedding.lmHeadForward(&engine, normed16, lm_head, &logits);
+
+        for (logits.data, 0..) |v, i| logits_f32[i] = @as(f32, @floatCast(v));
+    }
+    const prefill_ns = t_prefill.read();
 
     if (std.c.getenv("DUMP_LOGITS") != null) {
         for (logits_f32, 0..) |v, i| std.debug.print("LG {d} {d}\n", .{ i, v });
@@ -644,10 +745,29 @@ fn runHybridInference(
      defer g_out_norm.free();
      try g_out_norm.upload(out_norm.data);
 
+     const perf_stage = std.c.getenv("PERF_STAGE") != null;
+     var ev: []cudaz.CUevent = undefined;
+     var layer_gpu_ns: []i128 = undefined;
+     var t_blocks_ns: i128 = 0;
+     var t_embed_ns: i128 = 0;
+     var t_enqueue_ns: i128 = 0;
+     var t_d2h_ns: i128 = 0;
+     var t_sample_ns: i128 = 0;
+     var gpu_total_ns: i128 = 0;
+     var gpu_head_ns: i128 = 0;
+     if (perf_stage) {
+         ev = try allocator.alloc(cudaz.CUevent, layers.len + 2);
+         layer_gpu_ns = try allocator.alloc(i128, layers.len);
+         @memset(layer_gpu_ns, 0);
+         for (ev) |*e| e.* = try cudaz.cuEventCreate(0);
+     }
+     const perf_t = @import("time").Timer.start();
+
      for (0..params.max_new_tokens) |_| {
          const last = gen_tokens.items[gen_tokens.items.len - 1];
 
          // Ensure blocks for the new decode token before forward
+         const t_block0 = perf_t.read();
          for (layer_block_tables) |bt_opt| {
              if (bt_opt) |bt| {
                  if (bt.num_tokens < current_pos + 1) {
@@ -655,7 +775,9 @@ fn runHybridInference(
                  }
              }
          }
+         t_blocks_ns += perf_t.read() - t_block0;
 
+         const t_embed0 = perf_t.read();
          var h1 = try Tensor(f16).alloc(allocator, &.{ 1, 1, n_embd });
         defer h1.deinit();
         embedding.embeddingLookup(emb, &[_]u32{last}, 1, 1, &h1);
@@ -669,29 +791,56 @@ fn runHybridInference(
 
         // Subir embedding a GPU (única H2D por token).
         try cudaz.cuMemcpyHtoD(g_cur.ptr(), @intFromPtr(ca.data.ptr), n_embd * @sizeOf(f32));
+        t_embed_ns += perf_t.read() - t_embed0;
+        if (perf_stage) try cudaz.cuEventRecord(ev[0], lk.stream);
 
+        const t_enq0 = perf_t.read();
         var cur2gpu = g_cur;
         var nxt2gpu = g_nxt;
-        for (layers) |*layer| {
+        for (layers, 0..) |*layer, li| {
             try hybrid_layer.HybridLayer.forwardGPU(layer, &lk, cur2gpu, &nxt2gpu, current_pos, 1);
+            if (perf_stage) try cudaz.cuEventRecord(ev[li + 1], lk.stream);
             const t2 = cur2gpu;
             cur2gpu = nxt2gpu;
             nxt2gpu = t2;
         }
+        t_enqueue_ns += perf_t.read() - t_enq0;
 
         // Norma final en GPU, lm_head device→device (peso cacheado en GPU), y un
         // único D2H de los logits para el sampleo.
         try lk.rmsNorm(cur2gpu.ptr(), @intFromPtr(g_out_norm.dev_ptr), g_normed.ptr(), 1, n_embd, rms_eps);
-        try engine.linearProjectionDeviceF16(g_normed, lm_head, &g_logits, 1, n_embd, vocab);
+        // lm_head M=1: Q4_0 device→device si el peso es Q4_0 (8× menos tráfico).
+        if (lm_head_q4) {
+            try lk.q4gemmLinear(allocator, g_normed.ptr(), lm_head_q.bytes, g_logits.ptr(), n_embd, vocab);
+        } else {
+            try engine.linearProjectionDeviceF16(g_normed, lm_head, &g_logits, 1, n_embd, vocab);
+        }
+        if (perf_stage) try cudaz.cuEventRecord(ev[layers.len + 1], lk.stream);
         try cudaz.cuStreamSynchronize(lk.stream);
+        if (perf_stage) {
+            var ms: f32 = 0;
+            for (layers, 0..) |_, li| {
+                try cudaz.cuEventElapsedTime(&ms, ev[li], ev[li + 1]);
+                const ns = @as(i128, @intFromFloat(@as(f64, ms) * std.time.ns_per_ms));
+                layer_gpu_ns[li] += ns;
+            }
+            try cudaz.cuEventElapsedTime(&ms, ev[layers.len], ev[layers.len + 1]);
+            gpu_head_ns += @as(i128, @intFromFloat(@as(f64, ms) * std.time.ns_per_ms));
+            try cudaz.cuEventElapsedTime(&ms, ev[0], ev[layers.len + 1]);
+            gpu_total_ns += @as(i128, @intFromFloat(@as(f64, ms) * std.time.ns_per_ms));
+        }
+        const t_d2h0 = perf_t.read();
         try cudaz.cuMemcpyDtoH(@intFromPtr(logits_f32.ptr), g_logits.ptr(), vocab * @sizeOf(f32));
         if (std.c.getenv("DUMP_LOGITS") != null) {
             for (logits_f32, 0..) |v, i| std.debug.print("LG {d} {d}\n", .{ i, v });
         }
+         const t_samp0 = perf_t.read();
          const next_token = params.sampler.sample(logits_f32, &rng, gen_tokens.items);
          try gen_tokens.append(allocator, next_token);
          try scheduler.appendToken(seq_id, next_token);
          current_pos += 1;
+         t_d2h_ns += t_samp0 - t_d2h0;
+         t_sample_ns += perf_t.read() - t_samp0;
 
          if (gt.eos_id != null and next_token == gt.eos_id.?) break;
      }
@@ -708,8 +857,52 @@ fn runHybridInference(
     const decoded = try tok.decode(gen_tokens.items, allocator);
     defer allocator.free(decoded);
     try stdout.print("{s}\n", .{decoded});
-    try stdout.print("[+] Métricas: prefill {d:.1} ms ({d} tok), generación {d:.1} ms ({d:.2} tok/s)\n", .{ prefill_ms, seq_len, gen_ms, tok_s });
-    try stdout.print("\n=================================================\n", .{});
+try stdout.print("[+] Métricas: prefill {d:.1} ms ({d} tok), generación {d:.1} ms ({d:.2} tok/s)\n", .{ prefill_ms, seq_len, gen_ms, tok_s });
+     if (perf_stage) {
+         const nt: f64 = @floatFromInt(@max(@as(usize, 1), gen_tokens.items.len));
+         var ssm_ns: i128 = 0;
+         var attn_ns: i128 = 0;
+         for (layers, 0..) |layer, li| {
+             if (layer.is_attention) attn_ns += layer_gpu_ns[li] else ssm_ns += layer_gpu_ns[li];
+         }
+         const us = std.time.ns_per_us;
+         try stdout.print("[+] PERF (avg/token):\n", .{});
+         try stdout.print("  host  blocks {d:.1} us  embed {d:.1} us  enqueue {d:.1} us  d2h {d:.1} us  sample {d:.1} us\n", .{
+             @as(f64, @floatFromInt(t_blocks_ns)) / nt / @as(f64, @floatFromInt(us)),
+             @as(f64, @floatFromInt(t_embed_ns)) / nt / @as(f64, @floatFromInt(us)),
+             @as(f64, @floatFromInt(t_enqueue_ns)) / nt / @as(f64, @floatFromInt(us)),
+             @as(f64, @floatFromInt(t_d2h_ns)) / nt / @as(f64, @floatFromInt(us)),
+             @as(f64, @floatFromInt(t_sample_ns)) / nt / @as(f64, @floatFromInt(us)),
+         });
+         try stdout.print("  gpu   ssm {d:.1} us  attn {d:.1} us  head {d:.1} us  total {d:.1} us\n", .{
+             @as(f64, @floatFromInt(ssm_ns)) / nt / @as(f64, @floatFromInt(us)),
+             @as(f64, @floatFromInt(attn_ns)) / nt / @as(f64, @floatFromInt(us)),
+             @as(f64, @floatFromInt(gpu_head_ns)) / nt / @as(f64, @floatFromInt(us)),
+             @as(f64, @floatFromInt(gpu_total_ns)) / nt / @as(f64, @floatFromInt(us)),
+         });
+         var top: [5]usize = undefined;
+         for (0..5) |k| top[k] = k;
+         for (layers, 0..) |_, li| {
+             if (layer_gpu_ns[li] <= layer_gpu_ns[top[4]]) {
+                 top[4] = li;
+                 for (0..3) |k| {
+                     if (layer_gpu_ns[top[k + 1]] > layer_gpu_ns[top[k]]) {
+                         const tmp = top[k];
+                         top[k] = top[k + 1];
+                         top[k + 1] = tmp;
+                     }
+                 }
+             }
+         }
+         try stdout.print("  top layers:\n", .{});
+         for (top) |li| {
+             try stdout.print("    L{d:<2} {s} {d:.1} us\n", .{
+                 li, if (layers[li].is_attention) "attn" else "ssm",
+                 @as(f64, @floatFromInt(layer_gpu_ns[li])) / nt / @as(f64, @floatFromInt(us)),
+             });
+         }
+     }
+     try stdout.print("\n=================================================\n", .{});
     try stdout.print("              Ejecucion completada               \n", .{});
     try stdout.print("=================================================\n", .{});
     try stdout.flush();

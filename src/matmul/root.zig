@@ -295,7 +295,7 @@ pub const MatmulEngine = struct {
             try self.weight_cache.?.put(key, buf);
             break :blk buf;
         };
-        try cublas.gemmCuBlasF32Device(handle, X.buf, d_B, Y.buf, M, N, K, false, true, 1.0, 0.0);
+        try cublas.gemmCuBlasF32Device(handle, d_B, X.buf, Y.buf, N, M, K, false, true, 1.0, 0.0);
     }
 
     /// Proyección lineal device→device con peso f16 (p.ej. lm_head): X ya vive en
@@ -321,7 +321,7 @@ pub const MatmulEngine = struct {
             try self.weight_cache.?.put(key, buf);
             break :blk buf;
         };
-        try cublas.gemmCuBlasF32Device(handle, X32.buf, d_B, Y32.buf, M, N, K, false, true, 1.0, 0.0);
+        try cublas.gemmCuBlasF32Device(handle, d_B, X32.buf, Y32.buf, N, M, K, false, true, 1.0, 0.0);
     }
 
     // ─── FFN SwiGLU ───

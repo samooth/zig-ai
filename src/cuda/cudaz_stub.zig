@@ -248,6 +248,30 @@ pub fn cuStreamSynchronize(stream: CUstream) !void {
     if (res != .SUCCESS) return error.CudaError;
 }
 
+pub fn cuEventCreate(flags: c_uint) !CUevent {
+    var ev: CUevent = undefined;
+    const res = cudalib.cuEventCreate(&ev, flags);
+    if (res != .SUCCESS) return error.CudaError;
+    return ev;
+}
+
+pub fn cuEventDestroy(ev: CUevent) void { _ = cudalib.cuEventDestroy(ev); }
+
+pub fn cuEventRecord(ev: CUevent, stream: CUstream) !void {
+    const res = cudalib.cuEventRecord(ev, stream);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuEventSynchronize(ev: CUevent) !void {
+    const res = cudalib.cuEventSynchronize(ev);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuEventElapsedTime(ms: *f32, start: CUevent, end: CUevent) !void {
+    const res = cudalib.cuEventElapsedTime(ms, start, end);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
 pub fn cuLaunchKernel(
     f: CUfunction, gridDimX: c_uint, gridDimY: c_uint, gridDimZ: c_uint,
     blockDimX: c_uint, blockDimY: c_uint, blockDimZ: c_uint,
@@ -295,6 +319,11 @@ const cudalib = struct {
     extern "c" fn cuStreamCreate(phStream: *CUstream, flags: c_uint) CUresult;
     extern "c" fn cuStreamDestroy_v2(hStream: CUstream) CUresult;
     extern "c" fn cuStreamSynchronize(hStream: CUstream) CUresult;
+    extern "c" fn cuEventCreate(event: *CUevent, flags: c_uint) CUresult;
+    extern "c" fn cuEventDestroy(event: CUevent) CUresult;
+    extern "c" fn cuEventRecord(event: CUevent, stream: CUstream) CUresult;
+    extern "c" fn cuEventSynchronize(event: CUevent) CUresult;
+    extern "c" fn cuEventElapsedTime(ms: *f32, start: CUevent, end: CUevent) CUresult;
     extern "c" fn cuLaunchKernel(f: CUfunction, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, by: c_uint, bz: c_uint, sm: c_uint, stream: CUstream, params: ?*anyopaque, extra: ?*anyopaque) CUresult;
     extern "c" fn cuDeviceGetName(name: [*]u8, len: c_int, dev: CUdevice) CUresult;
     extern "c" fn cuDeviceTotalMem(mem: *usize, dev: CUdevice) CUresult;

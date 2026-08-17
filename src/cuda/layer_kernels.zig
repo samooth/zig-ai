@@ -7,6 +7,14 @@ const build_options = @import("build_options");
 
 var g_module: ?cudaz.CUmodule = null;
 
+/// Control global de la ruta de pesos cuantizados (Q4_0 GEMM device).
+/// Se ajusta con `--quant`; los env `NOQ4*` siguen siendo un override.
+pub var quant_enabled: bool = true;
+
+pub fn quantPath() bool {
+    return quant_enabled and std.c.getenv("NOQ4") == null;
+}
+
 fn loadModule() !cudaz.CUmodule {
     if (g_module) |m| return m;
     const cubin_path = build_options.layer_cubin;
@@ -175,6 +183,56 @@ pub const LayerKernels = struct {
         try cudaz.cuLaunchKernel(func, n_u((n + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
     }
 
+    pub fn splitQG(self: *LayerKernels, qg: usize, q: usize, g: usize, N: usize, n_head: usize, head_dim: usize) !void {
+        var qgv = qg;
+        var qv = q;
+        var gv = g;
+        var N1: c_int = n_c(N);
+        var nh1: c_int = n_c(n_head);
+        var hd1: c_int = n_c(head_dim);
+        const func = try self.get("splitQGKernel");
+        var kp = [_]?*anyopaque{ &qgv, &qv, &gv, &N1, &nh1, &hd1 };
+        try cudaz.cuLaunchKernel(func, n_u((N * n_head * head_dim + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
+    }
+
+    pub fn mrope(self: *LayerKernels, data: usize, rows: usize, N: usize, head_dim: usize, n_rot: usize, base: f32, start_pos: usize) !void {
+        var dv = data;
+        var r1: c_int = n_c(rows);
+        var N1: c_int = n_c(N);
+        var hd1: c_int = n_c(head_dim);
+        var nr1: c_int = n_c(n_rot);
+        var bc: f32 = base;
+        var sp: c_longlong = @intCast(start_pos);
+        const func = try self.get("mropeKernel");
+        var kp = [_]?*anyopaque{ &dv, &r1, &N1, &hd1, &nr1, &bc, &sp };
+        try cudaz.cuLaunchKernel(func, n_u((rows + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
+    }
+
+    pub fn kvAppendF16(self: *LayerKernels, k: usize, v: usize, cache: usize, bt: usize, n: usize, start_pos: usize, kv_dim: usize, n_kv_head: usize, head_dim: usize, block_size: usize) !void {
+        var kv = k;
+        var vv = v;
+        var cv = cache;
+        var btv = bt;
+        var n1: c_int = n_c(n);
+        var sp: c_int = n_c(start_pos);
+        var kvd1: c_int = n_c(kv_dim);
+        var nkh1: c_int = n_c(n_kv_head);
+        var hd1: c_int = n_c(head_dim);
+        var bs1: c_int = n_c(block_size);
+        const func = try self.get("kvAppendF16Kernel");
+        var kp = [_]?*anyopaque{ &kv, &vv, &cv, &btv, &n1, &sp, &kvd1, &nkh1, &hd1, &bs1 };
+        try cudaz.cuLaunchKernel(func, n_u((n * kv_dim + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
+    }
+
+    pub fn gateMul(self: *LayerKernels, attn: usize, g: usize, n: usize) !void {
+        var av = attn;
+        var gv = g;
+        var n1: c_int = n_c(n);
+        const func = try self.get("gateKernel");
+        var kp = [_]?*anyopaque{ &av, &gv, &n1 };
+        try cudaz.cuLaunchKernel(func, n_u((n + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
+    }
+
     pub fn embeddingGather(self: *LayerKernels, emb: usize, token: u32, out: usize, n_embd: usize) !void {
         var ev = emb;
         var ov = out;
@@ -184,4 +242,41 @@ pub const LayerKernels = struct {
         var kp = [_]?*anyopaque{ &ev, &tok1, &ov, &ne1 };
         try cudaz.cuLaunchKernel(func, n_u((n_embd + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
     }
+
+    /// GEMM Q4_0 M=1: C[1,N] = A[1,K] * B_q4[K,N] (peso en bytes Q4_0 tal cual
+    /// el GGUF, sin dequantizar; K múltiplo de 32). Un warp por fila de salida:
+    /// 256 hilos = 8 filas por bloque → grid = ceil(N/8).
+    pub fn q4gemmM1(self: *LayerKernels, a: usize, b: usize, out: usize, k: usize, n: usize) !void {
+        var av = a;
+        var bv = b;
+        var ov = out;
+        var k1: c_int = n_c(k);
+        var n1: c_int = n_c(n);
+        const func = try self.get("q4gemmM1Kernel");
+        const smem: c_uint = @intCast(k * @sizeOf(f32));
+        var kp = [_]?*anyopaque{ &av, &bv, &ov, &k1, &n1 };
+        try cudaz.cuLaunchKernel(func, n_u((n + 7) / 8), 1, 1, 256, 1, 1, smem, self.stream, @ptrCast(&kp), null);
+    }
+
+    /// Proyección Q4_0 M=1 con peso cuantizado: sube los bytes Q4_0 una sola vez
+    /// (cache módulo) y lanza `q4gemmM1`. `w_bytes` = tensor GGUF [in,out] Q4_0.
+    pub fn q4gemmLinear(self: *LayerKernels, allocator: std.mem.Allocator, x: usize, w_bytes: []const u8, out: usize, k: usize, n: usize) !void {
+        const dev = try q4Weight(allocator, @intFromPtr(w_bytes.ptr), w_bytes);
+        try self.q4gemmM1(x, dev, out, k, n);
+    }
 };
+
+var q4_cache: ?std.AutoHashMap(usize, usize) = null;
+
+fn q4Weight(allocator: std.mem.Allocator, key: usize, bytes: []const u8) !usize {
+    if (q4_cache) |*m| {
+        if (m.get(key)) |d| return d;
+    }
+    const dev = try cudaz.cuMemAlloc(bytes.len);
+    try cudaz.cuMemcpyHtoD(dev, @intFromPtr(bytes.ptr), bytes.len);
+    if (q4_cache == null) {
+        q4_cache = std.AutoHashMap(usize, usize).init(allocator);
+    }
+    try q4_cache.?.put(key, dev);
+    return dev;
+}

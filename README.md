@@ -175,6 +175,16 @@ la inferencia end-to-end (carga GGUF + tokenizer + generación autoregresiva); s
 | `--repetition-penalty <f>`| 1.0   | Repetition penalty (1.0 = desactivado)              |
 | `--backend <auto|cpu|gpu>`  | auto | Backend matmul (GPU si disponible)              |
 | `--seed <n>`                | 42      | Semilla del RNG                                     |
+| `-b, --batch-size <n>`      | 2048    | Batch lógico de prefill en tokens                   |
+| `-ub, --ubatch-size <n>`    | 512     | Batch físico por llamada GPU (chunks de prefill)    |
+| `-ctk, --cache-type-k <fmt>`| fp16    | Cuantización de la cache K (q8_0/q4_0/q4_1/...)     |
+| `-ctv, --cache-type-v <fmt>`| fp16    | Cuantización de la cache V (q8_0/q4_0/q4_1/...)     |
+| `--quant <auto|off>`        | auto    | GEMM de pesos cuantizados Q4_0 en GPU (auto = activo)|
+
+El prefill del prompt corre en GPU por chunks de `--ubatch-size` tokens (causal
+por chunk, con solapamiento correcto de conv/deltaNet entre chunks). Variables
+de entorno: `NOGPU_PREFILL=1` fuerza prefill CPU, `NOQ4=1`/`NOQ4SSM=1`/
+`NOQ4ATTN=1`/`NOQ4FFN=1` desactivan el GEMM Q4 por capa.
 
 El sampler combina los parámetros en orden: repetition penalty → temperature →
 top-k → top-p → muestreo multinomial (o greedy si `temperature ≤ 0`).

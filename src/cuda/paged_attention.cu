@@ -232,7 +232,8 @@ extern "C" __global__ void paged_attention_prefill_f16_kernel(
     const half* __restrict__ queries,
     const half* __restrict__ cache,
     const int* __restrict__ block_tables,
-    int seq_len,
+    int n_queries,
+    int start_pos,
     int num_q_heads,
     int num_kv_heads,
     int head_dim,
@@ -240,7 +241,11 @@ extern "C" __global__ void paged_attention_prefill_f16_kernel(
 ) {
     const int token = blockIdx.x;
     const int q_head = blockIdx.y;
-    if (token >= seq_len) return;
+    if (token >= n_queries) return;
+    // Posición absoluta en la secuencia (0 para prefill single-shot; > 0 para
+    // prefill en chunks): mueve la máscara causal sin cambiar el índice local
+    // del query dentro del buffer `queries`.
+    const int abs_token = start_pos + token;
 
     const int tid = threadIdx.x;
     const int nthreads = blockDim.x;
@@ -268,13 +273,13 @@ extern "C" __global__ void paged_attention_prefill_f16_kernel(
     float max_val = -1e30f;
     float exp_sum = 0.0f;
     const float scale_factor = 1.0f / sqrtf((float)head_dim);
-    // Causal: solo bloques que contienen tokens <= `token`.
-    const int last_block = token / block_size;
+    // Causal: solo bloques que contienen tokens <= `abs_token`.
+    const int last_block = abs_token / block_size;
 
     for (int b = 0; b <= last_block; b++) {
         const int phys = block_tables[b];
         if (phys < 0) continue;
-        const int tokens_in_block = (b == last_block) ? (token % block_size) + 1 : block_size;
+        const int tokens_in_block = (b == last_block) ? (abs_token % block_size) + 1 : block_size;
         const int base = phys * block_bytes_half;
 
         for (int t = 0; t < tokens_in_block; t++) {

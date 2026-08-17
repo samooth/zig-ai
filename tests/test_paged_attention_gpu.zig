@@ -65,7 +65,7 @@ test "paged attention GPU decode matches CPU reference" {
     const attn = pa.PagedAttention.init(gpa, config);
     try attn.decode(query, out_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc);
 
-    var engine = try pa.PagedAttentionGpu.init(gpa, config);
+    var engine = try pa.PagedAttentionGpu.init(gpa, config, @ptrCast(@as(u64, 0)));
     defer engine.deinit();
     try engine.decode(query, out_gpu, kv.getBlockTable(seq_id).?, kv.block_alloc);
 
@@ -109,7 +109,7 @@ test "paged attention GPU prefill matches CPU reference" {
     const attn = pa.PagedAttention.init(gpa, config);
     try attn.prefill(queries, outs_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc, seq_len);
 
-    var engine = try pa.PagedAttentionGpu.init(gpa, config);
+    var engine = try pa.PagedAttentionGpu.init(gpa, config, @ptrCast(@as(u64, 0)));
     defer engine.deinit();
     try engine.prefill(queries, outs_gpu, kv.getBlockTable(seq_id).?, kv.block_alloc, seq_len);
 
@@ -233,7 +233,7 @@ test "GPU evicts cold prefix blocks from device based on hit rate" {
     var kv = try pa.PagedKVCache.init(gpa, config);
     defer kv.deinit();
 
-    var engine = try pa.PagedAttentionGpu.init(gpa, config);
+    var engine = try pa.PagedAttentionGpu.init(gpa, config, @ptrCast(@as(u64, 0)));
     defer engine.deinit();
 
     // cachea un prefix frío y uno caliente
@@ -299,7 +299,7 @@ test "paged attention GPU decode matches CPU (real head_dim 128)" {
     const attn = pa.PagedAttention.init(gpa, config);
     try attn.decode(query, out_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc);
 
-    var engine = try pa.PagedAttentionGpu.init(gpa, config);
+    var engine = try pa.PagedAttentionGpu.init(gpa, config, @ptrCast(@as(u64, 0)));
     defer engine.deinit();
     try engine.decode(query, out_gpu, kv.getBlockTable(seq_id).?, kv.block_alloc);
 

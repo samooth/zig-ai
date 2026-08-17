@@ -20,6 +20,7 @@ pub const PagedGpuBlockPool = struct {
     vaddr: cudaz.CUdeviceptr,
     handles: []cudaz.CUmemGenericAllocationHandle,
     resident: []bool,
+    dirty: []bool,
 
     const Self = @This();
 
@@ -56,6 +57,10 @@ pub const PagedGpuBlockPool = struct {
         errdefer gpa.free(resident);
         @memset(resident, false);
 
+        const dirty = try gpa.alloc(bool, num_blocks);
+        errdefer gpa.free(dirty);
+        @memset(dirty, false);
+
         return .{
             .allocator = gpa,
             .num_blocks = num_blocks,
@@ -64,6 +69,7 @@ pub const PagedGpuBlockPool = struct {
             .vaddr = vaddr,
             .handles = handles,
             .resident = resident,
+            .dirty = dirty,
         };
     }
 
@@ -77,6 +83,12 @@ pub const PagedGpuBlockPool = struct {
         cudaz.cuMemAddressFree(self.vaddr, self.num_blocks * self.block_bytes);
         self.allocator.free(self.handles);
         self.allocator.free(self.resident);
+        self.allocator.free(self.dirty);
+    }
+
+    pub fn markDirty(self: *Self, phys_id: usize) void {
+        if (phys_id >= self.num_blocks) return;
+        self.dirty[phys_id] = true;
     }
 
     fn blockAddr(self: *const Self, phys_id: usize) cudaz.CUdeviceptr {
@@ -85,6 +97,7 @@ pub const PagedGpuBlockPool = struct {
 
     pub fn stageBlock(self: *Self, block_alloc: *BlockAllocator, phys_id: usize) !void {
         if (phys_id >= self.num_blocks) return;
+        if (self.resident[phys_id] and !self.dirty[phys_id]) return;
         if (!self.resident[phys_id]) {
             var prop = cudaz.CUmemAllocationProp{
                 .type = .PINNED,
@@ -105,6 +118,7 @@ pub const PagedGpuBlockPool = struct {
         }
         const src = @intFromPtr(block_alloc.memory_pool.ptr) + phys_id * self.block_bytes;
         try cudaz.cuMemcpyHtoD(self.blockAddr(phys_id), src, self.block_bytes);
+        self.dirty[phys_id] = false;
     }
 
     pub fn evictBlock(self: *Self, block_alloc: *BlockAllocator, phys_id: usize) !void {
@@ -120,6 +134,38 @@ pub const PagedGpuBlockPool = struct {
         for (0..block_table.numBlocks()) |i| {
             if (block_table.getPhysical(i)) |phys| try self.stageBlock(block_alloc, phys);
         }
+    }
+
+    /// Marca el bloque residente y lo mapea (VMM) sin copiar H2D: el KV se
+    /// escribe por GPU (kvAppendF16) directamente sobre la memoria mapeada.
+    pub fn ensureCommitted(self: *Self, phys_id: usize) !void {
+        if (phys_id >= self.num_blocks) return;
+        if (!self.resident[phys_id]) {
+            var prop = cudaz.CUmemAllocationProp{
+                .type = .PINNED,
+                .requestedHandleTypes = .NONE,
+                .location = .{ .type = .DEVICE, .id = 0 },
+            };
+            var handle: cudaz.CUmemGenericAllocationHandle = 0;
+            try cudaz.cuMemCreate(&handle, self.block_bytes, &prop, 0);
+            errdefer cudaz.cuMemRelease(handle);
+            try cudaz.cuMemMap(self.blockAddr(phys_id), self.block_bytes, 0, handle, 0);
+            var access = cudaz.CUmemAccessDesc{
+                .location = .{ .type = .DEVICE, .id = 0 },
+                .flags = .PROT_READWRITE,
+            };
+            try cudaz.cuMemSetAccess(self.blockAddr(phys_id), self.block_bytes, &access, 1);
+            self.handles[phys_id] = handle;
+            self.resident[phys_id] = true;
+        }
+        self.dirty[phys_id] = false;
+    }
+
+    /// Baja (async, stream-ordered) el bloque escrito por GPU al host pool.
+    pub fn syncBlockToHost(self: *Self, block_alloc: *BlockAllocator, phys_id: usize, stream: cudaz.CUstream) !void {
+        if (phys_id >= self.num_blocks or !self.resident[phys_id]) return;
+        const dst = @intFromPtr(block_alloc.memory_pool.ptr) + phys_id * self.block_bytes;
+        try cudaz.cuMemcpyDtoHAsync(dst, self.blockAddr(phys_id), self.block_bytes, stream);
     }
 
     pub fn evictBlocks(self: *Self, block_alloc: *BlockAllocator, phys_ids: []const usize) !void {

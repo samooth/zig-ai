@@ -4,6 +4,9 @@
 const std = @import("std");
 const Tensor = @import("core").Tensor;
 const matmul = @import("matmul");
+const cublas = @import("cublas");
+const cudaz = @import("cudaz");
+const layer_kernels = @import("layer_kernels");
 const QuantWeight = @import("quant_weight").QuantWeight;
 const gguf = @import("gguf");
 const norm = @import("norm");
@@ -85,6 +88,9 @@ pub const AttentionLayer = struct {
     staged_block: i64 = -1,
     staged_tokens: usize = 0,
 
+    // Buffers GPU para el forward de atención residente (Phase 1b).
+    gpu: ?AttentionGpu = null,
+
     const Self = @This();
 
     pub fn init(
@@ -157,6 +163,7 @@ pub const AttentionLayer = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.gpu) |*g| g.deinit();
         self.matmul_engine.deinit();
         self.allocator.free(self.scratch_q);
         self.allocator.free(self.scratch_k);
@@ -396,6 +403,9 @@ pub const AttentionLayer = struct {
                         storeF16(block_data, v_idx, kv_val_v);
                     }
                 }
+                // El bloque recién escrito es modificado en host: el pool GPU
+                // debe re-subirlo en el próximo decode (dirty en vez de salto).
+                if (self.paged_gpu) |gpu| gpu.markDirty(phys_id);
             }
         }
 
@@ -586,6 +596,204 @@ pub const AttentionLayer = struct {
         // === 11. Salida: mixer-only, sin residual ni post-norm ni FFN ===
         // HybridLayer se encarga de residual + post-norm + FFN.
         for (out.data, attn_proj.data) |*o, a| o.* = a;
+    }
+
+    // ─── Forward de atención 100% GPU (Phase 1b, decode N == 1) ──────────────
+    // Todo vive en device: proyecciones, split Q|G, Q/K norm, MRoPE, KV-append
+    // f16, decode paginado device→device, gate y proyección de salida. Un solo
+    // sync por token en el llamador. Fiel al forward CPU (incluida la semántica
+    // flat de MRoPE) para que decode GPU == prefill CPU.
+    pub fn forwardGPU(
+        self: *Self,
+        lk: *layer_kernels.LayerKernels,
+        x: cublas.GpuTensor(f32),
+        out: *cublas.GpuTensor(f32),
+        start_pos: usize,
+        n: usize,
+    ) !void {
+        const p = self.params;
+        const qg_dim = p.qg_dim();
+        const kv_dim = p.kv_dim();
+        const head_dim = p.head_dim;
+        const n_head = p.n_head;
+        const n_kv_head = p.n_kv_head;
+        const q_dim = n_head * head_dim;
+
+        try AttentionLayer.ensureGpu(self);
+        const g = &self.gpu.?;
+        try g.ensureN(n);
+
+        var w_q_shape = [_]usize{ qg_dim, p.n_embd };
+        var w_q_strides = [_]usize{ p.n_embd, 1 };
+        const w_q32 = Tensor(f32){ .data = self.scratch_q, .shape = &w_q_shape, .strides = &w_q_strides, .offset = 0, .allocator = null, .owns_data = false };
+        var w_k_shape = [_]usize{ kv_dim, p.n_embd };
+        var w_k_strides = [_]usize{ p.n_embd, 1 };
+        const w_k32 = Tensor(f32){ .data = self.scratch_k, .shape = &w_k_shape, .strides = &w_k_strides, .offset = 0, .allocator = null, .owns_data = false };
+        var w_v_shape = [_]usize{ kv_dim, p.n_embd };
+        var w_v_strides = [_]usize{ p.n_embd, 1 };
+        const w_v32 = Tensor(f32){ .data = self.scratch_v, .shape = &w_v_shape, .strides = &w_v_strides, .offset = 0, .allocator = null, .owns_data = false };
+        var w_o_shape = [_]usize{ p.n_embd, q_dim };
+        var w_o_strides = [_]usize{ q_dim, 1 };
+        const w_o32 = Tensor(f32){ .data = self.scratch_o, .shape = &w_o_shape, .strides = &w_o_strides, .offset = 0, .allocator = null, .owns_data = false };
+
+        // 1. Proyecciones Q+G, K, V (device→device, pesos cacheados en GPU).
+        // M=1 con peso Q4_0 → GEMM cuantizado device (8× menos tráfico de VRAM).
+        const q4_ok = n == 1 and self.w_q.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4ATTN") == null;
+        if (q4_ok) {
+            try lk.q4gemmLinear(self.allocator, x.ptr(), self.w_q.bytes, g.g_qg.ptr(), p.n_embd, qg_dim);
+            try lk.q4gemmLinear(self.allocator, x.ptr(), self.w_k.bytes, g.g_k.ptr(), p.n_embd, kv_dim);
+            try lk.q4gemmLinear(self.allocator, x.ptr(), self.w_v.bytes, g.g_v.ptr(), p.n_embd, kv_dim);
+        } else {
+            try self.matmul_engine.linearProjectionDevice(x, w_q32, &g.g_qg, n, p.n_embd, qg_dim);
+            try self.matmul_engine.linearProjectionDevice(x, w_k32, &g.g_k, n, p.n_embd, kv_dim);
+            try self.matmul_engine.linearProjectionDevice(x, w_v32, &g.g_v, n, p.n_embd, kv_dim);
+        }
+
+        // 2. Split Q|G interleaved.
+        try lk.splitQG(g.g_qg.ptr(), g.g_q.ptr(), g.g_g.ptr(), n, n_head, head_dim);
+
+        // 3. Q/K RMSNorm per-head (reusa rmsNorm: rows = n*heads, cols = head_dim).
+        try lk.rmsNorm(g.g_q.ptr(), @intFromPtr(g.g_q_norm.dev_ptr), g.g_q.ptr(), n * n_head, head_dim, p.rms_eps);
+        try lk.mrope(g.g_q.ptr(), n * n_head, n, head_dim, p.n_rot, p.rope_freq_base, start_pos);
+
+        // K es [n, kv_dim] = [n, n_kv_head, head_dim] en el mismo layout flat.
+        try lk.rmsNorm(g.g_k.ptr(), @intFromPtr(g.g_k_norm.dev_ptr), g.g_k.ptr(), n * n_kv_head, head_dim, p.rms_eps);
+        try lk.mrope(g.g_k.ptr(), n * n_kv_head, n, head_dim, p.n_rot, p.rope_freq_base, start_pos);
+
+        // 4. KV-append f16 en device + decode paginado device→device.
+        const gpu = self.paged_gpu orelse return HybridAttnError.KvCacheNotSet;
+        const block_size = self.paged_kv.config.block_size;
+        const max_num_blocks = self.block_table.numBlocks();
+        const bt_host = try self.allocator.alloc(c_int, max_num_blocks);
+        defer self.allocator.free(bt_host);
+        for (0..max_num_blocks) |i| {
+            bt_host[i] = if (self.block_table.getPhysical(i)) |phys| @intCast(phys) else -1;
+        }
+        try gpu.uploadBlockTable(bt_host);
+
+        // Comitear los bloques que escribirá kvAppendF16 (pueden cruzar límites
+        // de bloque en un chunk de prefill): se marcan residentes sin copiar.
+        const first_block = start_pos / block_size;
+        const last_block = (start_pos + n - 1) / block_size;
+        var bi = first_block;
+        while (bi <= last_block) : (bi += 1) {
+            const phys = self.block_table.getPhysical(bi) orelse return HybridAttnError.KvCacheNotSet;
+            try gpu.ensureBlockCommitted(self.paged_kv.block_alloc, phys);
+        }
+
+        const d_cache = try gpu.cacheBase(self.paged_kv.block_alloc);
+        try lk.kvAppendF16(g.g_k.ptr(), g.g_v.ptr(), d_cache, gpu.getDbt(), n, start_pos, kv_dim, n_kv_head, head_dim, block_size);
+        try lk.copyF32toF16(g.g_q.ptr(), g.d_q16, n * q_dim);
+        if (n > 1) {
+            // Prefill causal en bloque (device→device): atiende los n queries
+            // sobre todos los tokens ya escritos en el pool.
+            try gpu.prefillDevice(g.d_q16, g.d_attn16, self.paged_kv.block_alloc, bt_host, n, start_pos);
+        } else {
+            try gpu.decodeDevice(g.d_q16, g.d_attn16, self.paged_kv.block_alloc, bt_host, start_pos + n);
+        }
+        try lk.copyF16toF32(g.d_attn16, g.g_attn.ptr(), n * q_dim);
+
+        // 5. Gate: sigmoid(G) * attn.
+        try lk.gateMul(g.g_attn.ptr(), g.g_g.ptr(), n * q_dim);
+
+        // 6. Proyección de salida device→device (mixer, escrito en `out`).
+        if (q4_ok) {
+            try lk.q4gemmLinear(self.allocator, g.g_attn.ptr(), self.w_o.bytes, out.ptr(), q_dim, p.n_embd);
+        } else {
+            try self.matmul_engine.linearProjectionDevice(g.g_attn, w_o32, out, n, q_dim, p.n_embd);
+        }
+
+        // 7. Sincronizar los bloques escritos al pool host (D2H async): el pool host
+        // sigue siendo autoritativo para scheduler/COW.
+        bi = first_block;
+        while (bi <= last_block) : (bi += 1) {
+            const phys2 = self.block_table.getPhysical(bi) orelse return HybridAttnError.KvCacheNotSet;
+            try gpu.syncBlockToHost(self.paged_kv.block_alloc, phys2);
+        }
+    }
+
+    pub fn ensureGpu(self: *Self) !void {
+        if (self.gpu != null) return;
+        self.gpu = try AttentionGpu.alloc(self.params, self.attn_q_norm.data, self.attn_k_norm.data);
+    }
+};
+
+// ─── Buffers GPU de la capa de atención ──────────────────────────────────────
+pub const AttentionGpu = struct {
+    g_qg: cublas.GpuTensor(f32), // [n, qg_dim]
+    g_k: cublas.GpuTensor(f32), // [n, kv_dim]
+    g_v: cublas.GpuTensor(f32), // [n, kv_dim]
+    g_q: cublas.GpuTensor(f32), // [n, n_head*head_dim]
+    g_g: cublas.GpuTensor(f32), // [n, n_head*head_dim]
+    g_attn: cublas.GpuTensor(f32), // [n, n_head*head_dim]
+    g_q_norm: cublas.GpuBuffer(f32), // [head_dim]
+    g_k_norm: cublas.GpuBuffer(f32), // [head_dim]
+    d_q16: cudaz.CUdeviceptr = 0,
+    d_attn16: cudaz.CUdeviceptr = 0,
+    cap_n: usize = 0,
+    params: HybridAttnParams,
+
+    fn alloc(p: HybridAttnParams, q_norm: []f32, k_norm: []f32) !AttentionGpu {
+        const g_q_norm = try cublas.GpuBuffer(f32).alloc(p.head_dim);
+        errdefer g_q_norm.free();
+        try g_q_norm.upload(q_norm);
+        const g_k_norm = try cublas.GpuBuffer(f32).alloc(p.head_dim);
+        errdefer g_k_norm.free();
+        try g_k_norm.upload(k_norm);
+        return .{
+            .g_qg = undefined,
+            .g_k = undefined,
+            .g_v = undefined,
+            .g_q = undefined,
+            .g_g = undefined,
+            .g_attn = undefined,
+            .g_q_norm = g_q_norm,
+            .g_k_norm = g_k_norm,
+            .cap_n = 0,
+            .params = p,
+        };
+    }
+
+    fn ensureN(self: *AttentionGpu, n: usize) !void {
+        if (self.cap_n >= n) return;
+        const p = self.params;
+        const qg_dim = p.qg_dim();
+        const kv_dim = p.kv_dim();
+        const q_dim = p.n_head * p.head_dim;
+        if (self.cap_n > 0) {
+            self.g_qg.deinit();
+            self.g_k.deinit();
+            self.g_v.deinit();
+            self.g_q.deinit();
+            self.g_g.deinit();
+            self.g_attn.deinit();
+            if (self.d_q16 != 0) cudaz.cuMemFree(self.d_q16);
+            if (self.d_attn16 != 0) cudaz.cuMemFree(self.d_attn16);
+        }
+        self.g_qg = try cublas.GpuTensor(f32).alloc(n * qg_dim);
+        self.g_k = try cublas.GpuTensor(f32).alloc(n * kv_dim);
+        self.g_v = try cublas.GpuTensor(f32).alloc(n * kv_dim);
+        self.g_q = try cublas.GpuTensor(f32).alloc(n * q_dim);
+        self.g_g = try cublas.GpuTensor(f32).alloc(n * q_dim);
+        self.g_attn = try cublas.GpuTensor(f32).alloc(n * q_dim);
+        self.d_q16 = try cudaz.cuMemAlloc(n * q_dim * @sizeOf(f16));
+        self.d_attn16 = try cudaz.cuMemAlloc(n * q_dim * @sizeOf(f16));
+        self.cap_n = n;
+    }
+
+    fn deinit(self: *AttentionGpu) void {
+        self.g_q_norm.free();
+        self.g_k_norm.free();
+        if (self.cap_n > 0) {
+            self.g_qg.deinit();
+            self.g_k.deinit();
+            self.g_v.deinit();
+            self.g_q.deinit();
+            self.g_g.deinit();
+            self.g_attn.deinit();
+            if (self.d_q16 != 0) cudaz.cuMemFree(self.d_q16);
+            if (self.d_attn16 != 0) cudaz.cuMemFree(self.d_attn16);
+        }
     }
 };
 

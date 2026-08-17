@@ -331,8 +331,9 @@ pub const HybridLayer = struct {
 
     // ─── Forward híbrido residente en GPU (Path B) ──────────────────────────────
     // Activa, mixer, residual, FFN y normas viven íntegramente en device; solo hay
-    // UNA sincronización de stream por token (en el llamador). Para capas de atención
-    // el mixer se calcula en host con transferencias diminutas (6 capas).
+    // UNA sincronización de stream por token (en el llamador). Para capas de
+    // atención el mixer (incluido decode paginado, MRoPE y KV) también corre en
+    // GPU (Phase 1b); el KV escrito se baja al host pool vía D2H async.
     pub const HybridGpu = struct {
     g_norm: cublas.GpuTensor(f32),
     g_mixer: cublas.GpuTensor(f32),
@@ -342,10 +343,8 @@ pub const HybridLayer = struct {
     g_ffn: cublas.GpuTensor(f32),
     g_attn_norm: cublas.GpuBuffer(f32),
     g_attn_post_norm: cublas.GpuBuffer(f32),
-    // Host fallback para capas de atención.
-    h_x: []f32,
-    h_out: []f32,
     cap_n: usize,
+    params: HybridLayerParams,
 
     fn alloc(p: HybridLayerParams) !HybridGpu {
         const g_attn_norm = try cublas.GpuBuffer(f32).alloc(p.n_embd);
@@ -359,10 +358,29 @@ pub const HybridLayer = struct {
             .g_ffn = try cublas.GpuTensor(f32).alloc(p.n_embd),
             .g_attn_norm = g_attn_norm,
             .g_attn_post_norm = g_attn_post_norm,
-            .h_x = try std.heap.page_allocator.alloc(f32, p.n_embd),
-            .h_out = try std.heap.page_allocator.alloc(f32, p.n_embd),
             .cap_n = 1,
+            .params = p,
         };
+    }
+
+    fn ensureN(self: *HybridGpu, n: usize) !void {
+        if (self.cap_n >= n) return;
+        const p = self.params;
+        if (self.cap_n > 0) {
+            self.g_norm.deinit();
+            self.g_mixer.deinit();
+            self.g_post.deinit();
+            self.g_gate.deinit();
+            self.g_up.deinit();
+            self.g_ffn.deinit();
+        }
+        self.g_norm = try cublas.GpuTensor(f32).alloc(n * p.n_embd);
+        self.g_mixer = try cublas.GpuTensor(f32).alloc(n * p.n_embd);
+        self.g_post = try cublas.GpuTensor(f32).alloc(n * p.n_embd);
+        self.g_gate = try cublas.GpuTensor(f32).alloc(n * p.intermediate_dim);
+        self.g_up = try cublas.GpuTensor(f32).alloc(n * p.intermediate_dim);
+        self.g_ffn = try cublas.GpuTensor(f32).alloc(n * p.n_embd);
+        self.cap_n = n;
     }
 
     fn deinit(self: *HybridGpu) void {
@@ -374,8 +392,6 @@ pub const HybridLayer = struct {
         self.g_ffn.deinit();
         self.g_attn_norm.free();
         self.g_attn_post_norm.free();
-        std.heap.page_allocator.free(self.h_x);
-        std.heap.page_allocator.free(self.h_out);
     }
 };
 
@@ -403,30 +419,16 @@ pub fn forwardGPU(
     const p = self.params;
     try HybridLayer.ensureGpu(self);
     const g = &self.gpu.?;
+    try g.ensureN(n);
 
     try lk.rmsNorm(x.ptr(), @intFromPtr(g.g_attn_norm.dev_ptr), g.g_norm.ptr(), n, p.n_embd, p.rms_eps);
 
     if (self.is_attention) {
-        // Fallback host: D2H de x, forward CPU, H2D del mixer.
-        if (g.cap_n < n) {
-            std.heap.page_allocator.free(g.h_x);
-            std.heap.page_allocator.free(g.h_out);
-            g.h_x = try std.heap.page_allocator.alloc(f32, n * p.n_embd);
-            g.h_out = try std.heap.page_allocator.alloc(f32, n * p.n_embd);
-            g.cap_n = n;
-        }
-        try cudaz.cuMemcpyDtoH(@intFromPtr(g.h_x.ptr), g.g_norm.ptr(), n * p.n_embd * @sizeOf(f32));
-        try cudaz.cuStreamSynchronize(lk.stream);
-        var hx_shape = [_]usize{ n, p.n_embd };
-        var hx_strides = [_]usize{ p.n_embd, 1 };
-        var hout_shape = [_]usize{ n, p.n_embd };
-        var hout_strides = [_]usize{ p.n_embd, 1 };
-        const hx = Tensor(f32){ .data = g.h_x, .shape = &hx_shape, .strides = &hx_strides, .offset = 0, .allocator = null, .owns_data = false };
-        var hout = Tensor(f32){ .data = g.h_out, .shape = &hout_shape, .strides = &hout_strides, .offset = 0, .allocator = null, .owns_data = false };
-        if (self.attn_layer) |*l| try l.forward(hx, &hout, start_pos, n);
-        try cudaz.cuMemcpyHtoD(out.ptr(), @intFromPtr(g.h_out.ptr), n * p.n_embd * @sizeOf(f32));
-        // out = x + mixer (en GPU)
-        try lk.add(x.ptr(), out.ptr(), out.ptr(), n * p.n_embd);
+        // Atención 100% GPU (Phase 1b): proyecciones, split, MRoPE, KV-append,
+        // decode paginado device→device, gate y out-proj viven en device. Solo
+        // el KV recién escrito se baja al pool host (D2H async).
+        if (self.attn_layer) |*l| try l.forwardGPU(lk, g.g_norm, &g.g_mixer, start_pos, n);
+        try lk.add(x.ptr(), g.g_mixer.ptr(), out.ptr(), n * p.n_embd);
     } else {
         if (self.ssm_layer) |*l| try SsmLayer.forwardGPU(l, lk, g.g_norm, &g.g_mixer, n);
         try lk.add(x.ptr(), g.g_mixer.ptr(), out.ptr(), n * p.n_embd);
@@ -444,10 +446,22 @@ pub fn forwardGPU(
     var w_down_strides = [_]usize{ p.intermediate_dim, 1 };
     const w_down32 = Tensor(f32){ .data = self.scratch_down, .shape = &w_down_shape, .strides = &w_down_strides, .offset = 0, .allocator = null, .owns_data = false };
 
-    try self.matmul_engine.linearProjectionDevice(g.g_post, w_gate32, &g.g_gate, n, p.n_embd, p.intermediate_dim);
-    try self.matmul_engine.linearProjectionDevice(g.g_post, w_up32, &g.g_up, n, p.n_embd, p.intermediate_dim);
+    // FFN M=1 con pesos Q4_0 → GEMM cuantizado device (8× menos tráfico VRAM).
+    const q4_ok = n == 1 and self.w_gate.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4FFN") == null;
+    if (q4_ok) {
+        try lk.q4gemmLinear(self.allocator, g.g_post.ptr(), self.w_gate.bytes, g.g_gate.ptr(), p.n_embd, p.intermediate_dim);
+        try lk.q4gemmLinear(self.allocator, g.g_post.ptr(), self.w_up.bytes, g.g_up.ptr(), p.n_embd, p.intermediate_dim);
+    } else {
+        try self.matmul_engine.linearProjectionDevice(g.g_post, w_gate32, &g.g_gate, n, p.n_embd, p.intermediate_dim);
+        try self.matmul_engine.linearProjectionDevice(g.g_post, w_up32, &g.g_up, n, p.n_embd, p.intermediate_dim);
+    }
     try lk.swiglu(g.g_gate.ptr(), g.g_up.ptr(), n * p.intermediate_dim);
-    try self.matmul_engine.linearProjectionDevice(g.g_gate, w_down32, &g.g_ffn, n, p.intermediate_dim, p.n_embd);
+    const w_down_q4 = n == 1 and self.w_down.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4FFN") == null;
+    if (w_down_q4) {
+        try lk.q4gemmLinear(self.allocator, g.g_gate.ptr(), self.w_down.bytes, g.g_ffn.ptr(), p.intermediate_dim, p.n_embd);
+    } else {
+        try self.matmul_engine.linearProjectionDevice(g.g_gate, w_down32, &g.g_ffn, n, p.intermediate_dim, p.n_embd);
+    }
     try lk.addInplace(out.ptr(), g.g_ffn.ptr(), n * p.n_embd);
 }
 };

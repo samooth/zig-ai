@@ -256,6 +256,14 @@ pub fn build(b: *std.Build) void {
     });
     model_config_mod.addImport("gguf", gguf_mod);
 
+    // === Módulo quant_weight ===
+    const quant_weight_mod = b.createModule(.{
+        .root_source_file = b.path("src/loader/quant_weight.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    quant_weight_mod.addImport("gguf", gguf_mod);
+
     // === Módulo gguf_model ===
     const gguf_model_mod = b.createModule(.{
         .root_source_file = b.path("src/loader/gguf_model.zig"),
@@ -265,14 +273,7 @@ pub fn build(b: *std.Build) void {
     gguf_model_mod.addImport("gguf", gguf_mod);
     gguf_model_mod.addImport("model_config", model_config_mod);
     gguf_model_mod.addImport("core", core_mod);
-
-    // === Módulo quant_weight ===
-    const quant_weight_mod = b.createModule(.{
-        .root_source_file = b.path("src/loader/quant_weight.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    quant_weight_mod.addImport("gguf", gguf_mod);
+    gguf_model_mod.addImport("quant_weight", quant_weight_mod);
 
     // === Módulo layer_kernels (elementwise GPU para capa híbrida residente) ===
     const layer_kernels_mod = b.createModule(.{
@@ -311,6 +312,9 @@ pub fn build(b: *std.Build) void {
     hybrid_attn_mod.addImport("ffn", ffn_mod);
     hybrid_attn_mod.addImport("rope", rope_mod);
     hybrid_attn_mod.addImport("kv_cache", kv_cache_mod);
+    hybrid_attn_mod.addImport("cublas", cublas_mod);
+    hybrid_attn_mod.addImport("cudaz", cudaz_mod);
+    hybrid_attn_mod.addImport("layer_kernels", layer_kernels_mod);
 
     // === Módulo hybrid_layer ===
     const hybrid_layer_mod = b.createModule(.{
@@ -537,6 +541,8 @@ pub fn build(b: *std.Build) void {
         tmod.addImport("pipeline", pipeline_mod);
         tmod.addImport("paged_attention", paged_attention_mod);
         tmod.addImport("time", time_mod);
+        tmod.addImport("cublas", cublas_mod);
+        tmod.addImport("layer_kernels", layer_kernels_mod);
 
         const t = b.addTest(.{ .root_module = tmod });
         tmod.link_libc = true;

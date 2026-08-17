@@ -231,10 +231,138 @@ extern "C" __global__ void copyF16toF32Kernel(const half* __restrict__ src, floa
     if (i < n) dst[i] = __half2float(src[i]);
 }
 
+// ─── Split Q|G interleaved: qg [N, n_head*head_dim*2] → q, g [N, n_head*head_dim] ──
+// Q_h at base h*(2*head_dim), G_h at base+head_dim (igual que el forward CPU).
+extern "C" __global__ void splitQGKernel(
+    const float* __restrict__ qg,
+    float* __restrict__ q,
+    float* __restrict__ g,
+    int N, int n_head, int head_dim)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = N * n_head * head_dim;
+    if (i >= total) return;
+    int t = i / (n_head * head_dim);
+    int rem = i % (n_head * head_dim);
+    int h = rem / head_dim;
+    int d = rem % head_dim;
+    int src = t * (n_head * head_dim * 2) + h * (2 * head_dim) + d;
+    q[i] = qg[src];
+    g[i] = qg[src + head_dim];
+}
+
+// ─── MRoPE (NEOX half-split) — fiel a la referencia CPU applyRoPEMultiSection.
+// El CPU copia flat [N, heads, dim] en un tensor [1, heads, N, dim] y rota con
+// row_offset = (h*N + pos)*head_dim; replicamos esa semántica exacta (incluida
+// la transposición) para que decode GPU == prefill CPU. Para texto los 4
+// position ids son iguales → theta = global_pos * scale^ic en todos los sectores.
+// data: [N, n_head, head_dim] flat; rows = n_head (o n_kv_head) * N.
+extern "C" __global__ void mropeKernel(
+    float* __restrict__ data,
+    int rows, int N, int head_dim, int n_rot,
+    float base, long long start_pos)
+{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) return;
+    int pos = row % N;
+    float global_pos = (float)(start_pos + pos);
+    int half_rot = n_rot / 2;
+    float scale = powf(base, -2.0f / (float)n_rot);
+    float* d = data + (size_t)row * head_dim;
+    float theta = global_pos;
+    for (int ic = 0; ic < half_rot; ++ic) {
+        float c = cosf(theta);
+        float s = sinf(theta);
+        float q0 = d[ic];
+        float q1 = d[ic + half_rot];
+        d[ic] = q0 * c - q1 * s;
+        d[ic + half_rot] = q0 * s + q1 * c;
+        theta *= scale;
+    }
+}
+
+// ─── KV-append f16: escribe K/V del token al pool paginado (d_cache).
+// Fiel a reshape_and_block_write_f16_kernel: por bloque físico, K en
+// [0, block_size*kv_dim), V en [block_size*kv_dim, 2*block_size*kv_dim).
+// k/v: [N, kv_dim] f32; bt: block table device (phys por bloque lógico).
+extern "C" __global__ void kvAppendF16Kernel(
+    const float* __restrict__ k,
+    const float* __restrict__ v,
+    half* __restrict__ cache,
+    const int* __restrict__ bt,
+    int n, int start_pos,
+    int kv_dim, int n_kv_head, int head_dim, int block_size)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = n * kv_dim;
+    if (i >= total) return;
+    int t = i / kv_dim;
+    int c = i % kv_dim;
+    int h = c / head_dim;
+    int d = c % head_dim;
+    long long global_pos = (long long)start_pos + t;
+    int block_idx = (int)(global_pos / block_size);
+    int off = (int)(global_pos % block_size);
+    int phys = bt[block_idx];
+    if (phys < 0) return;
+    long long base = (long long)phys * block_size * kv_dim * 2;
+    long long k_idx = base + ((long long)off * kv_dim + h * head_dim + d);
+    long long v_idx = base + ((long long)block_size * kv_dim + (long long)off * kv_dim + h * head_dim + d);
+    cache[k_idx] = __float2half(k[i]);
+    cache[v_idx] = __float2half(v[i]);
+}
+
+// ─── Gate: attn[i] *= sigmoid(g[i]) ─────────────────────────────────────────
+extern "C" __global__ void gateKernel(
+    float* __restrict__ attn,
+    const float* __restrict__ g,
+    int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) attn[i] *= 1.0f / (1.0f + expf(-g[i]));
+}
+
 // ─── embedding gather: out[1,n_embd] = emb[token, :] (f16) ────────────────────
 extern "C" __global__ void embeddingGatherKernel(
     const half* __restrict__ emb, const int token, half* __restrict__ out, int n_embd)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n_embd) out[i] = emb[(size_t)token * n_embd + i];
+}
+
+// ─── Q4_0 M=1 GEMM: C[1,N] = A[1,K] * B_q4[K,N] ─────────────────────────────
+// B es el peso Q4_0 tal cual está en el GGUF (layout [in,out] = [K,N], bloques
+// de 32 a lo largo del dim contiguo K). Cada fila de salida j ocupa bytes
+// contiguos: (K/32) bloques de 18 bytes. A: f32 [K], C: f32 [N].
+// Un warp por fila de salida; grid cubre N/8 filas.
+// K debe ser múltiplo de 32.
+extern "C" __global__ void q4gemmM1Kernel(
+    const float* __restrict__ a,
+    const unsigned char* __restrict__ b,
+    float* __restrict__ c,
+    int K, int N)
+{
+    extern __shared__ float sa[];
+    const int tid = threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    for (int i = tid; i < K; i += blockDim.x) sa[i] = a[i];
+    __syncthreads();
+
+    const int row = blockIdx.x * (blockDim.x >> 5) + warp;
+    if (row >= N) return;
+
+    const int nblocks = K >> 5;
+    const unsigned char* rowb = b + (size_t)row * (nblocks * 18);
+
+    float acc = 0.0f;
+    for (int blk = 0; blk < nblocks; blk++) {
+        const unsigned char* blkptr = rowb + (size_t)blk * 18;
+        const float d = __half2float(*(const __half*)blkptr);
+        const unsigned char q = blkptr[2 + (lane & 15)];
+        const int nibble = (lane < 16) ? (q & 0x0F) : (q >> 4);
+        acc += sa[blk * 32 + lane] * (d * (float)(nibble - 8));
+    }
+    for (int o = 16; o; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
+    if (lane == 0) c[row] = acc;
 }

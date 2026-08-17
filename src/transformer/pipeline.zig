@@ -24,6 +24,27 @@ pub const Sampler = struct {
     /// (usado para repetition penalty).
     pub fn sample(self: Sampler, logits: []const f32, rng: *std.Random.Xoshiro256, history: []const u32) u32 {
         const vocab = logits.len;
+
+        // 0. Fast path: top_p = 1 (sin recorte de núcleo), sin top-k y sin
+        // repetition penalty. El muestreo ponderado NO necesita ordenar: la
+        // probabilidad de cada índice es la misma en cualquier orden. Evita el
+        // sort completo (248K) y las 3 asignaciones grandes por token, y produce
+        // exactamente la misma distribución que el camino genérico.
+        if (self.temperature > 0 and self.top_k == 0 and self.top_p >= 1.0 and self.repetition_penalty == 1.0) {
+            const inv_t = 1.0 / self.temperature;
+            var max_val: f32 = -std.math.inf(f32);
+            for (logits) |v| max_val = @max(max_val, v);
+            var sum: f32 = 0;
+            for (logits) |v| sum += @exp((v - max_val) * inv_t);
+            const r = rng.random().float(f32) * sum;
+            var acc: f32 = 0;
+            for (logits, 0..) |v, i| {
+                acc += @exp((v - max_val) * inv_t);
+                if (r <= acc) return @as(u32, @intCast(i));
+            }
+            return @as(u32, @intCast(logits.len - 1));
+        }
+
         const alloc = std.heap.page_allocator;
 
         var work = alloc.alloc(f32, vocab) catch @panic("sampler OOM");

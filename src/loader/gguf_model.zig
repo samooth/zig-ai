@@ -3,6 +3,7 @@
 //! raíz (embedding, output_norm, lm_head) dequantizados a f16/f32.
 const std = @import("std");
 const gguf = @import("gguf");
+const QuantWeight = @import("quant_weight").QuantWeight;
 const model_config = @import("model_config");
 const Tensor = @import("core").Tensor;
 
@@ -50,6 +51,16 @@ pub const GgufModel = struct {
         const hidden: usize = @intCast(info.dims[0]);
         const vocab: usize = @intCast(info.dims[1]);
         return dequantToF16(self.allocator, info, self.file.tensorData(info), &.{ vocab, hidden });
+    }
+
+    /// output.weight -> QuantWeight Q4_0 (bytes mmap sin dequantizar, [in,out]).
+    /// Para el GEMM cuantizado M=1 del decode. Si el modelo ata embeddings, usa
+    /// token_embd.weight.
+    pub fn loadLmHeadQuant(self: *const Self) !QuantWeight {
+        const info = self.findTensor("output.weight", null) catch
+            (self.findTensor("token_embd.weight", null) catch return GgufModelError.MissingTensor);
+        if (info.n_dims != 2) return GgufModelError.MissingTensor;
+        return QuantWeight.init(info, self.file.tensorData(info));
     }
 
     /// output_norm.weight -> Tensor(f32) [hidden] (gamma de RMSNorm final).
