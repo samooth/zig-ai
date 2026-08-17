@@ -459,13 +459,14 @@ fn runHybridInference(
     // OOM en modelos con context_length grande.)
     // Sólo usar el motor GPU de PagedAttention cuando el backend matmul lo pide
     // (cublas). Con --backend cpu se fuerza paged_gpu=null para que la ruta
-    // legacy de-deshacer cuantizado en host se ejercite (y se evita subir el
-    // pool a device con bytes cuantizados que el kernel f16 no entiende).
-    // El motor de atención GPU asume f16; si el cache está cuantizado, el
-    // staging de-deshacer paged a device no está enganchado todavía, así que se
-    // fuerza la ruta CPU de-deshacer (correcta) en ese caso.
+    // legacy de-deshacer cuantizado en host se ejercite.
+    // NOTA: PagedAttentionGpu tiene un bug de corrección conocido (produce
+    // salida degenerada "1-1-1-..." en GPU). Hasta corregir el kernel, se
+    // fuerza la atención por CPU (correcta) aunque el backend sea cublas; el
+    // matmul sí va por GPU (rápido). TODO: habilitar al corregir PagedAttentionGpu.
     const quant_on = params.cache_type_k != .fp16 or params.cache_type_v != .fp16;
-    const use_gpu_kv = (backend == .cublas) and !quant_on;
+    const gpu_attention_enabled = false;
+    const use_gpu_kv = (backend == .cublas) and !quant_on and gpu_attention_enabled;
     var shared_paged_gpu: ?paged_attn.PagedAttentionGpu = if (use_gpu_kv)
         paged_attn.PagedAttentionGpu.init(allocator, .{
             .block_size = block_size,

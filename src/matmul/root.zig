@@ -57,6 +57,9 @@ pub const MatmulEngine = struct {
     cublas_handle: ?cublas.CuBlasHandle,
     cuda_stream: ?cublas.CudaStream,
     gpu_pool: ?cublas.GpuMemoryPool,
+    /// Caché de pesos residentes en GPU: host_ptr(W) -> buffer device.
+    /// Sube cada matriz de pesos UNA vez y la reusa en todos los tokens.
+    weight_cache: ?std.AutoHashMap(usize, cublas.GpuBuffer(f32)),
     tile_config: types.TileConfig,
 
     pub fn init(allocator: std.mem.Allocator, preferred: Backend, precision: PrecisionMode) !Self {
@@ -68,6 +71,7 @@ pub const MatmulEngine = struct {
             .cublas_handle = null,
             .cuda_stream = null,
             .gpu_pool = null,
+            .weight_cache = null,
             .tile_config = types.TileConfig.default(),
         };
 
@@ -88,6 +92,7 @@ pub const MatmulEngine = struct {
                 gpu_pool.setStream(engine.cuda_stream.?.raw);
                 engine.gpu_pool = gpu_pool;
                 if (engine.cublas_handle) |*h| try h.setStream(engine.cuda_stream.?.raw);
+                engine.weight_cache = std.AutoHashMap(usize, cublas.GpuBuffer(f32)).init(allocator);
             },
             else => {},
         }
@@ -97,6 +102,11 @@ pub const MatmulEngine = struct {
 
     pub fn deinit(self: *Self) void {
         if (build_options.has_cuda) {
+            if (self.weight_cache) |*cache| {
+                var it = cache.valueIterator();
+                while (it.next()) |entry| entry.*.free();
+                cache.deinit();
+            }
             if (self.cuda_stream) |stream| stream.destroy();
             if (self.gpu_pool) |*pool| pool.deinit();
             if (self.cublas_handle) |handle| handle.deinit();
@@ -202,6 +212,50 @@ pub const MatmulEngine = struct {
         std.debug.assert(X.shape[1] == W_T.shape[1]);
         std.debug.assert(Y.shape[0] == X.shape[0]);
         std.debug.assert(Y.shape[1] == W_T.shape[0]);
+
+        // Caché de pesos residentes en GPU: subir W_T una vez y reusarlo en
+        // todos los tokens (el cuello de botella original era re-subir ~3GB de
+        // pesos por token). Solo aplica a proyecciones lineales (B = peso
+        // constante); la atención (Q@K^T) usa gemm() directo sin caché.
+        if (self.backend == .cublas and self.weight_cache != null and self.cublas_handle != null) {
+            const handle = self.cublas_handle.?;
+            const M = X.shape[0];
+            const K = X.shape[1];
+            const N = W_T.shape[0];
+            const key = @intFromPtr(W_T.data.ptr);
+            if (T == f32) {
+                if (self.weight_cache.?.get(key)) |d_B| {
+                    try cublas.gemmCuBlasF32Resident(handle, X, d_B, Y, M, N, K, false, true, 1.0, 0.0);
+                    return;
+                } else {
+                    var d_B = try cublas.GpuBuffer(f32).alloc(W_T.data.len);
+                    try d_B.upload(W_T.data);
+                    try self.weight_cache.?.put(key, d_B);
+                    try cublas.gemmCuBlasF32Resident(handle, X, d_B, Y, M, N, K, false, true, 1.0, 0.0);
+                    return;
+                }
+            } else if (T == f16) {
+                var a_f32 = try Tensor(f32).alloc(self.allocator, &.{ X.shape[0], X.shape[1] });
+                defer a_f32.deinit();
+                for (X.data, a_f32.data) |s, *d| d.* = @floatCast(s);
+                var c_f32 = try Tensor(f32).alloc(self.allocator, Y.shape);
+                defer c_f32.deinit();
+                if (self.weight_cache.?.get(key)) |d_B| {
+                    try cublas.gemmCuBlasF32Resident(handle, a_f32, d_B, &c_f32, M, N, K, false, true, 1.0, 0.0);
+                } else {
+                    var b_f32 = try Tensor(f32).alloc(self.allocator, &.{ W_T.shape[0], W_T.shape[1] });
+                    defer b_f32.deinit();
+                    for (W_T.data, b_f32.data) |s, *d| d.* = @floatCast(s);
+                    var d_B = try cublas.GpuBuffer(f32).alloc(b_f32.data.len);
+                    try d_B.upload(b_f32.data);
+                    try self.weight_cache.?.put(key, d_B);
+                    try cublas.gemmCuBlasF32Resident(handle, a_f32, d_B, &c_f32, M, N, K, false, true, 1.0, 0.0);
+                }
+                for (Y.data, c_f32.data) |*d, s| d.* = @floatCast(s);
+                return;
+            }
+        }
+
         try self.gemm(T, X, W_T, Y, false, true);
     }
 

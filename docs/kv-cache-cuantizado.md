@@ -978,3 +978,48 @@ pub fn generateWithCache(
   en el GGUF; el 0.8B carece de head MTP y aborta con mensaje claro (EXIT 0). Driver
   especulativo completo es fase posterior. `--spec-draft-n-max` controla el budget.
 - [ ] **`-jinja`**: flag reconocido; render completo de `chat_template` es fase posterior.
+
+---
+
+## 8. Rendimiento del matmul — caché de pesos en GPU (agosto 2026)
+
+**Problema raíz (¿por qué zig-ai era ~40× más lento que llama.cpp?).** El motor
+re-subía y re-descuantizaba los pesos en cada token:
+
+1. `hybrid_attn.zig` / `hybrid_layer.zig` llamaban `dequantToF32Transposed` sobre
+   los `scratch_*` **en cada `forward`** (re-descuantizar ~3 GB f32/token en CPU).
+2. `cublas.gemmCuBlasF32` hacía `cudaMalloc` + `upload(B)` de TODA la matriz de
+   pesos **en cada GEMM** (re-subir ~3 GB/token por PCIe). No había residencia
+   de pesos en device.
+
+**Arreglo implementado:**
+
+- `src/matmul/root.zig`: `MatmulEngine` ahora tiene `weight_cache`
+  (`AutoHashMap(usize, GpuBuffer(f32))`) y `linearProjection` sube `W_T` **una
+  vez** (clave = `W_T.data.ptr`) y lo reusa en todos los tokens vía
+  `cublas.gemmCuBlasF32Resident` (sólo sube la activación `A`, pequeña).
+  Cubre attention/FFN/lm_head (todos pasan por `linearProjection`); la atención
+  Q@Kᵀ usa `gemm()` directo y queda fuera de la caché (correcto: B es activación).
+- `dequantToF32Transposed` movido de `forward` a `loadWeightsFromGguf` (una vez).
+
+**Resultado (0.8B Q4_0, RTX 3080 Laptop, `n=48`, temp 0):**
+
+| Motor | KV | tok/s | GPU peak MiB |
+|---|---|---|---|
+| llama.cpp | fp16 | 32.7 | 4087 |
+| llama.cpp | q8_0 | 32.3 | 3153 |
+| zig-ai (antes) | fp16 | 0.62 | 5207 |
+| zig-ai (ahora) | fp16 | 6.97 | 3445 |
+
+~11× más rápido (0.62 → 6.97 tok/s). La caché de pesos NO cambia la corrección
+(mismo peso, mismo orden); validado contra CPU con tests `cublas gemm matches
+naive` / `cublas linearProjection matches naive` en `tests/test_matmul.zig`.
+
+**Bug conocido — `PagedAttentionGpu` (corrección, no rendimiento).** El kernel de
+atención en GPU produce salida degenerada (`1-1-1-…`) en el 0.8B; aislado
+forzando `paged_gpu=null` (atención por CPU) → salida correcta
+("I have a question about the following code…") y matmul sigue en GPU. Hasta
+corregir el kernel, `use_gpu_kv` se fuerza a `false` en `src/main.zig`
+(`gpu_attention_enabled = false`). Por eso zig-ai aún queda ~4.7× por debajo de
+llama.cpp: atención en CPU (no en GPU) y matmul f32 (no f16/tensor-core).
+Pendiente: corregir `PagedAttentionGpu` y migrar a GEMM f16 (tensor cores).

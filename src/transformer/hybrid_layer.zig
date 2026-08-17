@@ -218,6 +218,12 @@ pub const HybridLayer = struct {
         self.w_up = try loadQuantWeight(g, prefix, "ffn_up.weight");
         self.w_down = try loadQuantWeight(g, prefix, "ffn_down.weight");
 
+        // Descuantizar FFN UNA vez aquí (no por token en forward): los scratch
+        // f32 persisten y el caché de pesos GPU los sube al device una sola vez.
+        self.w_gate.dequantToF32Transposed(self.scratch_gate);
+        self.w_up.dequantToF32Transposed(self.scratch_up);
+        self.w_down.dequantToF32Transposed(self.scratch_down);
+
         if (self.is_attention) {
             if (self.attn_layer) |*l| try l.loadWeightsFromGguf(g);
         } else {
@@ -261,7 +267,6 @@ pub const HybridLayer = struct {
         norm.rmsNorm(f32, f32, out.*, self.attn_post_norm, p.rms_eps, &post_norm_buf);
 
         // === 5. FFN SwiGLU ===
-        self.w_gate.dequantToF32Transposed(self.scratch_gate);
         var w_gate_shape = [_]usize{ p.intermediate_dim, p.n_embd };
         var w_gate_strides = [_]usize{ p.n_embd, 1 };
         const w_gate32 = Tensor(f32){
@@ -273,7 +278,6 @@ pub const HybridLayer = struct {
             .owns_data = false,
         };
 
-        self.w_up.dequantToF32Transposed(self.scratch_up);
         var w_up_shape = [_]usize{ p.intermediate_dim, p.n_embd };
         var w_up_strides = [_]usize{ p.n_embd, 1 };
         const w_up32 = Tensor(f32){
@@ -285,7 +289,6 @@ pub const HybridLayer = struct {
             .owns_data = false,
         };
 
-        self.w_down.dequantToF32Transposed(self.scratch_down);
         var w_down_shape = [_]usize{ p.n_embd, p.intermediate_dim };
         var w_down_strides = [_]usize{ p.intermediate_dim, 1 };
         const w_down32 = Tensor(f32){

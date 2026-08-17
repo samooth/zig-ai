@@ -108,3 +108,50 @@ test "f16/bf16 conversion" {
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), back.at2(0, 0), 1e-3);
     try std.testing.expectApproxEqAbs(@as(f32, 4.5), back.at2(1, 1), 1e-3);
 }
+
+test "cublas gemm matches naive (no-trans)" {
+    const allocator = std.testing.allocator;
+    var A = try createTestMatrix(allocator, 3, 4, &[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    defer A.deinit();
+    var B = try createTestMatrix(allocator, 4, 2, &[_]f32{ 1, 0, 0, 1, 1, 0, 0, 1 });
+    defer B.deinit();
+    var Cc = try Tensor(f32).alloc(allocator, &[_]usize{ 3, 2 });
+    defer Cc.deinit();
+    var Cg = try Tensor(f32).alloc(allocator, &[_]usize{ 3, 2 });
+    defer Cg.deinit();
+
+    var cpu = try MatmulEngine.init(allocator, .naive, .f32);
+    defer cpu.deinit();
+    var gpu = try MatmulEngine.init(allocator, .cublas, .f32);
+    defer gpu.deinit();
+
+    try cpu.gemmNoTrans(f32, A, B, &Cc);
+    try gpu.gemmNoTrans(f32, A, B, &Cg);
+    for (0..3) |i| for (0..2) |j| {
+        try std.testing.expectApproxEqAbs(Cc.at2(i, j), Cg.at2(i, j), 1e-2);
+    };
+}
+
+test "cublas linearProjection matches naive" {
+    const allocator = std.testing.allocator;
+    var X = try createTestMatrix(allocator, 2, 3, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer X.deinit();
+    var W_T = try createTestMatrix(allocator, 2, 3, &[_]f32{ 1, 0, 0, 0, 1, 0 });
+    defer W_T.deinit();
+    var Yc = try Tensor(f32).alloc(allocator, &[_]usize{ 2, 2 });
+    defer Yc.deinit();
+    var Yg = try Tensor(f32).alloc(allocator, &[_]usize{ 2, 2 });
+    defer Yg.deinit();
+
+    var cpu = try MatmulEngine.init(allocator, .naive, .f32);
+    defer cpu.deinit();
+    var gpu = try MatmulEngine.init(allocator, .cublas, .f32);
+    defer gpu.deinit();
+
+    try cpu.linearProjection(f32, X, W_T, &Yc);
+    try gpu.linearProjection(f32, X, W_T, &Yg);
+    for (0..2) |i| for (0..2) |j| {
+        try std.testing.expectApproxEqAbs(Yc.at2(i, j), Yg.at2(i, j), 1e-2);
+    };
+}
+

@@ -216,6 +216,14 @@ pub const AttentionLayer = struct {
         self.w_v = try loadQuantWeight(g, prefix, "attn_v.weight");
         self.w_o = try loadQuantWeight(g, prefix, "attn_output.weight");
 
+        // Descuantizar los pesos UNA vez aquí (no por token en forward): los
+        // scratch f32 persisten y el caché de pesos GPU los sube al device una
+        // sola vez. Elimina el cuello de botella de re-descuantizar ~3GB/token.
+        self.w_q.dequantToF32Transposed(self.scratch_q);
+        self.w_k.dequantToF32Transposed(self.scratch_k);
+        self.w_v.dequantToF32Transposed(self.scratch_v);
+        self.w_o.dequantToF32Transposed(self.scratch_o);
+
         // Norm weights (f32)
         self.attn_q_norm.deinit();
         self.attn_q_norm = try loadGgufF32(self.allocator, g, prefix, "attn_q_norm.weight");
@@ -239,7 +247,6 @@ pub const AttentionLayer = struct {
         const N = n;
 
         // === 2. Proyección Q+G fusionada (w_q) ===
-        self.w_q.dequantToF32Transposed(self.scratch_q);
         var w_q_shape = [_]usize{ qg_dim, p.n_embd };
         var w_q_strides = [_]usize{ p.n_embd, 1 };
         const w_q32 = Tensor(f32){
@@ -271,7 +278,6 @@ pub const AttentionLayer = struct {
         }
 
         // === 3. Proyecciones K, V ===
-        self.w_k.dequantToF32Transposed(self.scratch_k);
         var w_k_shape = [_]usize{ kv_dim, p.n_embd };
         var w_k_strides = [_]usize{ p.n_embd, 1 };
         const w_k32 = Tensor(f32){
@@ -286,7 +292,6 @@ pub const AttentionLayer = struct {
         defer Kf32.deinit();
         try self.matmul_engine.linearProjection(f32, x, w_k32, &Kf32);
 
-        self.w_v.dequantToF32Transposed(self.scratch_v);
         var w_v_shape = [_]usize{ kv_dim, p.n_embd };
         var w_v_strides = [_]usize{ p.n_embd, 1 };
         const w_v32 = Tensor(f32){
@@ -564,7 +569,6 @@ pub const AttentionLayer = struct {
         defer attn_flat.deinit();
         for (0..N * q_dim) |i| attn_flat.data[i] = attn_out.data[i];
 
-        self.w_o.dequantToF32Transposed(self.scratch_o);
         var w_o_shape = [_]usize{ p.n_embd, q_dim };
         var w_o_strides = [_]usize{ q_dim, 1 };
         const w_o32 = Tensor(f32){

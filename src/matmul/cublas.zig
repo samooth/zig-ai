@@ -407,6 +407,59 @@ pub fn gemmCuBlasF32(
     handle.sync();
 }
 
+/// GEMM f32 donde B (los pesos) YA está residente en el device (d_B). Solo se
+/// sube A (activación, pequeña) y se descarga C. Evita re-subir los pesos en
+/// cada token de generación (el cuello de botella original de este engine).
+pub fn gemmCuBlasF32Resident(
+    handle: CuBlasHandle,
+    A: Tensor(f32),
+    d_B: GpuBuffer(f32),
+    C: *Tensor(f32),
+    M: usize,
+    N: usize,
+    K: usize,
+    trans_a: bool,
+    trans_b: bool,
+    alpha: f32,
+    beta: f32,
+) !void {
+    std.debug.assert(A.isContiguous() and C.isContiguous());
+
+    var d_A = try GpuBuffer(f32).alloc(A.data.len);
+    defer d_A.free();
+    try d_A.upload(A.data);
+
+    var d_C = try GpuBuffer(f32).alloc(C.data.len);
+    defer d_C.free();
+    try d_C.upload(C.data);
+
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
+    const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
+    const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
+    const ldc: i32 = @intCast(M);
+
+    const status = cublasSgemm_v2(
+        handle.raw,
+        op_a, op_b,
+        @intCast(M), @intCast(N), @intCast(K),
+        &alpha,
+        d_A.dev_ptr, lda,
+        d_B.dev_ptr, ldb,
+        &beta,
+        d_C.dev_ptr, ldc,
+    );
+
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        std.log.err("cublasSgemm (resident) failed: {}", .{status});
+        return error.CuBlasGemmFailed;
+    }
+
+    try d_C.download(C.data);
+    try colMajorToRowMajor(C.data, M, N);
+    handle.sync();
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // GEMM Async con streams — overlap compute/memcpy
 // ═══════════════════════════════════════════════════════════════════════════════
