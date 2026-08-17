@@ -257,3 +257,146 @@ test "GPU evicts cold prefix blocks from device based on hit rate" {
     try std.testing.expect(before >= 1);
     try std.testing.expectEqual(@as(usize, 2), kv.prefix_cache.size());
 }
+
+fn realConfig() pa.PagedConfig {
+    return .{
+        .block_size = 16,
+        .num_blocks = 64,
+        .head_dim = 128,
+        .num_kv_heads = 2,
+        .num_q_heads = 8,
+        .dtype = .f16,
+        .enable_prefix_cache = false,
+        .max_seq_len = 64,
+        .max_batch_size = 4,
+    };
+}
+
+test "paged attention GPU decode matches CPU (real head_dim 128)" {
+    if (!cudaz.isCudaAvailable()) {
+        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        return error.SkipZigTest;
+    }
+    const gpa = std.testing.allocator;
+    const config = realConfig();
+    var kv = try pa.PagedKVCache.init(gpa, config);
+    defer kv.deinit();
+    const seq_id = try kv.createSequence();
+    try kv.allocatePrefill(seq_id, 40); // 3 bloques (16+16+8)
+    try fillBlocks(&kv, seq_id, 123);
+
+    const q_stride = config.num_q_heads * config.head_dim;
+    const query = try gpa.alloc(f32, q_stride);
+    defer gpa.free(query);
+    var rng = std.Random.Xoshiro256.init(7);
+    for (query) |*v| v.* = (rng.random().float(f32) - 0.5) * 2.0;
+
+    const out_cpu = try gpa.alloc(f32, q_stride);
+    defer gpa.free(out_cpu);
+    const out_gpu = try gpa.alloc(f32, q_stride);
+    defer gpa.free(out_gpu);
+
+    const attn = pa.PagedAttention.init(gpa, config);
+    try attn.decode(query, out_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc);
+
+    var engine = try pa.PagedAttentionGpu.init(gpa, config);
+    defer engine.deinit();
+    try engine.decode(query, out_gpu, kv.getBlockTable(seq_id).?, kv.block_alloc);
+
+    var max_diff: f32 = 0;
+    for (out_cpu, out_gpu, 0..) |c, g, i| {
+        max_diff = @max(max_diff, @abs(c - g));
+        if (@abs(c - g) > 1e-2) {
+            std.debug.print("decode mismatch at {d}: cpu={d} gpu={d}\n", .{ i, c, g });
+            return error.DecodeMismatch;
+        }
+    }
+    std.debug.print("real-decode OK: max_diff={d}\n", .{max_diff});
+}
+
+test "paged attention vs TRUE attention (find kernel bug)" {
+    if (!cudaz.isCudaAvailable()) {
+        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        return error.SkipZigTest;
+    }
+    const gpa = std.testing.allocator;
+    const config = realConfig();
+    var kv = try pa.PagedKVCache.init(gpa, config);
+    defer kv.deinit();
+    const seq_id = try kv.createSequence();
+    const total = 40;
+    try kv.allocatePrefill(seq_id, total);
+    try fillBlocks(&kv, seq_id, 123);
+
+    const q_stride = config.num_q_heads * config.head_dim;
+    const query = try gpa.alloc(f32, q_stride);
+    defer gpa.free(query);
+    var rng = std.Random.Xoshiro256.init(7);
+    for (query) |*v| v.* = (rng.random().float(f32) - 0.5) * 2.0;
+
+    const out_paged = try gpa.alloc(f32, q_stride);
+    defer gpa.free(out_paged);
+    const attn = pa.PagedAttention.init(gpa, config);
+    try attn.decode(query, out_paged, kv.getBlockTable(seq_id).?, kv.block_alloc);
+
+    // === TRUE attention (GQA + causal + 1/sqrt(d)) ===
+    const hd = config.head_dim;
+    const n_q = config.num_q_heads;
+    const n_kv = config.num_kv_heads;
+    const kv_dim = n_kv * hd;
+    const q_per_kv = n_q / n_kv;
+    const block_size = config.block_size;
+    const K = try gpa.alloc(f32, total * kv_dim);
+    defer gpa.free(K);
+    const V = try gpa.alloc(f32, total * kv_dim);
+    defer gpa.free(V);
+    const bt = kv.getBlockTable(seq_id).?;
+    for (0..total) |t| {
+        const bidx = t / block_size;
+        const off = t % block_size;
+        const phys = bt.getPhysical(bidx).?;
+        const block_data = kv.block_alloc.memory_pool[phys * kv.block_alloc.block_bytes ..];
+        const fdata = @as([*]f16, @ptrCast(@alignCast(block_data)));
+        for (0..n_kv) |h| {
+            for (0..hd) |d| {
+                const k_idx = off * kv_dim + h * hd + d;
+                const v_idx = k_idx + block_size * kv_dim;
+                K[t * kv_dim + h * hd + d] = fdata[k_idx];
+                V[t * kv_dim + h * hd + d] = fdata[v_idx];
+            }
+        }
+    }
+    // Referencia: softmax de dos pasadas (GQA + causal + 1/sqrt(d)) sobre el KV
+    // que lee el modelo (layout storeF16 del BlockAllocator).
+    const out_true = try gpa.alloc(f32, q_stride);
+    defer gpa.free(out_true);
+    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hd)));
+    for (0..n_q) |qh| {
+        const kv_h = qh / q_per_kv;
+        var scores = try gpa.alloc(f32, total);
+        defer gpa.free(scores);
+        var maxs: f32 = -1e30;
+        for (0..total) |s| {
+            var acc: f32 = 0;
+            for (0..hd) |d| acc += query[qh * hd + d] * K[s * kv_dim + kv_h * hd + d];
+            acc *= scale;
+            scores[s] = acc;
+            if (acc > maxs) maxs = acc;
+        }
+        var sum: f32 = 0;
+        for (0..total) |s| {
+            scores[s] = @exp(scores[s] - maxs);
+            sum += scores[s];
+        }
+        for (0..hd) |d| {
+            var o: f32 = 0;
+            for (0..total) |s| o += scores[s] * V[s * kv_dim + kv_h * hd + d];
+            out_true[qh * hd + d] = o / sum;
+        }
+    }
+
+    var md: f32 = 0;
+    for (out_true, out_paged) |tr, pg| md = @max(md, @abs(tr - pg));
+    std.debug.print("TRUE-vs-PAGED: max_diff={d}\n", .{md});
+    if (md > 1e-2) return error.AttnBug;
+}

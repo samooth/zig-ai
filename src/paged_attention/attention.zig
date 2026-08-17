@@ -92,6 +92,9 @@ pub const PagedAttention = struct {
                     if (score > prev_max) {
                         const scale = @exp(prev_max - score);
                         exp_sums[qh] *= scale;
+                        for (0..head_dim) |dd| {
+                            acc[q_base + dd] *= scale;
+                        }
                         max_scores[qh] = score;
                     }
                     const exp_score = @exp(score - max_scores[qh]);
@@ -160,7 +163,7 @@ pub const PagedAttention = struct {
         }
     }
 
-    fn loadF16(data: []const u8, offset: usize) f32 {
+    pub fn loadF16(data: []const u8, offset: usize) f32 {
         const bits: u16 = @as(u16, data[offset]) | (@as(u16, data[offset + 1]) << 8);
         const sign: u32 = @as(u32, (bits >> 15) & 1);
         const exp: i32 = @as(i32, @intCast((bits >> 10) & 0x1F)) - 15;

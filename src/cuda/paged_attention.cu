@@ -85,6 +85,22 @@ __device__ __forceinline__ void loadQ8(
     acc[s + 7] = 0.0f;
 }
 
+// Reescala 8 valores de acc[0..7] por un escalar (necesario en online softmax
+// cuando cambia el máximo corriente).
+__device__ __forceinline__ void scal8(
+    float* acc, int g8, float scale
+) {
+    const int s = g8 * 8;
+    acc[s + 0] *= scale;
+    acc[s + 1] *= scale;
+    acc[s + 2] *= scale;
+    acc[s + 3] *= scale;
+    acc[s + 4] *= scale;
+    acc[s + 5] *= scale;
+    acc[s + 6] *= scale;
+    acc[s + 7] *= scale;
+}
+
 // Escribe 8 halfs del output desde acc[0..7] normalizado por exp_sum.
 __device__ __forceinline__ void storeOut8(
     half* __restrict__ op, int g8, const float* acc, float inv_sum
@@ -174,6 +190,12 @@ extern "C" __global__ void paged_attention_decode_f16_kernel(
             const float new_max = fmaxf(max_val, score);
             const float scale = expf(max_val - new_max);
             exp_sum *= scale;
+            if (use_vec) {
+                const int vd = head_dim / 8;
+                for (int g = tid; g < vd; g += nthreads) scal8(acc, g, scale);
+            } else {
+                for (int d = tid; d < head_dim; d += nthreads) acc[d] *= scale;
+            }
             max_val = new_max;
             const float exp_score = expf(score - new_max);
             exp_sum += exp_score;
@@ -275,6 +297,12 @@ extern "C" __global__ void paged_attention_prefill_f16_kernel(
             const float new_max = fmaxf(max_val, score);
             const float scale = expf(max_val - new_max);
             exp_sum *= scale;
+            if (use_vec) {
+                const int vd = head_dim / 8;
+                for (int g = tid; g < vd; g += nthreads) scal8(acc, g, scale);
+            } else {
+                for (int d = tid; d < head_dim; d += nthreads) acc[d] *= scale;
+            }
             max_val = new_max;
             const float exp_score = expf(score - new_max);
             exp_sum += exp_score;

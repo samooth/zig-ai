@@ -17,6 +17,7 @@ const pipeline = @import("pipeline");
 const gguf_model = @import("gguf_model");
 const gguf_tokenizer = @import("gguf_tokenizer");
 const bpe = @import("tokenizer");
+const cudaz = @import("cudaz");
 const embedding = @import("embedding");
 const hybrid_layer = @import("transformer");
 const norm = @import("norm");
@@ -344,6 +345,7 @@ fn runInference(
     try stdout.print("[+] prompt ({d} tokens): {s}\n", .{ prompt_ids.len, prompt });
 
     // Motor matmul
+    if (backend == .cublas) cudaz.ensureCurrent() catch {};
     var engine = try matmul.MatmulEngine.init(allocator, backend, .f32);
     defer engine.deinit();
 
@@ -460,12 +462,11 @@ fn runHybridInference(
     // Sólo usar el motor GPU de PagedAttention cuando el backend matmul lo pide
     // (cublas). Con --backend cpu se fuerza paged_gpu=null para que la ruta
     // legacy de-deshacer cuantizado en host se ejercite.
-    // NOTA: PagedAttentionGpu tiene un bug de corrección conocido (produce
-    // salida degenerada "1-1-1-..." en GPU). Hasta corregir el kernel, se
-    // fuerza la atención por CPU (correcta) aunque el backend sea cublas; el
-    // matmul sí va por GPU (rápido). TODO: habilitar al corregir PagedAttentionGpu.
+    // El motor GPU (decode + prefill) usa online-softmax con reescalado correcto
+    // del acumulador al cambiar el máximo corriente, por lo que produce la misma
+    // salida que la referencia CPU.
     const quant_on = params.cache_type_k != .fp16 or params.cache_type_v != .fp16;
-    const gpu_attention_enabled = false;
+    const gpu_attention_enabled = true;
     const use_gpu_kv = (backend == .cublas) and !quant_on and gpu_attention_enabled;
     var shared_paged_gpu: ?paged_attn.PagedAttentionGpu = if (use_gpu_kv)
         paged_attn.PagedAttentionGpu.init(allocator, .{
