@@ -165,7 +165,7 @@ pub const LayerKernels = struct {
         try cudaz.cuLaunchKernel(func, @intCast(n_v_heads), @intCast(N), 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
     }
 
-    pub fn copyF32toF16(self: *LayerKernels, src: usize, dst: usize, n: usize) !void {
+pub fn copyF32toF16(self: *LayerKernels, src: usize, dst: usize, n: usize) !void {
         var sv = src;
         var dv = dst;
         var n1: c_int = n_c(n);
@@ -263,6 +263,27 @@ pub const LayerKernels = struct {
     pub fn q4gemmLinear(self: *LayerKernels, allocator: std.mem.Allocator, x: usize, w_bytes: []const u8, out: usize, k: usize, n: usize) !void {
         const dev = try q4Weight(allocator, @intFromPtr(w_bytes.ptr), w_bytes);
         try self.q4gemmM1(x, dev, out, k, n);
+    }
+
+    /// GEMM cuantizado batched: C[M,N] = A[M,K] * B_q[K,N]. `qtype`:
+    /// 0=q4_0, 1=q4_1, 2=q5_k, 3=q6_k. Pesos GGUF [in,out] sin dequantizar.
+    pub fn qgemmLinear(self: *LayerKernels, allocator: std.mem.Allocator, a: usize, w_bytes: []const u8, out: usize, m: usize, k: usize, n: usize, qtype: u32) !void {
+        const dev = try q4Weight(allocator, @intFromPtr(w_bytes.ptr), w_bytes);
+        try self.qgemm(a, dev, out, m, k, n, qtype);
+    }
+
+    pub fn qgemm(self: *LayerKernels, a: usize, b: usize, out: usize, m: usize, k: usize, n: usize, qtype: u32) !void {
+        var av = a;
+        var bv = b;
+        var ov = out;
+        var m1: c_int = n_c(m);
+        var k1: c_int = n_c(k);
+        var n1: c_int = n_c(n);
+        var t1: c_int = @intCast(qtype);
+        const func = try self.get("qgemmKernel");
+        const smem: c_uint = @intCast(k * @sizeOf(f32));
+        var kp = [_]?*anyopaque{ &av, &bv, &ov, &m1, &k1, &n1, &t1 };
+        try cudaz.cuLaunchKernel(func, n_u((n + 7) / 8), n_u(m), 1, 256, 1, 1, smem, self.stream, @ptrCast(&kp), null);
     }
 };
 

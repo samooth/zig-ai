@@ -366,3 +366,125 @@ extern "C" __global__ void q4gemmM1Kernel(
     for (int o = 16; o; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
     if (lane == 0) c[row] = acc;
 }
+
+// ─── Decodificación de escala/min (6 bits) para Q5_K (ref: get_scale_min_k4) ──
+__device__ __forceinline__ int scaleMinD(int j, const unsigned char* sc) {
+    if (j < 4) return sc[j] & 63;
+    return (sc[j + 4] & 0xF) | ((sc[j - 4] >> 6) << 4);
+}
+__device__ __forceinline__ int scaleMinM(int j, const unsigned char* sc) {
+    if (j < 4) return sc[j + 4] & 63;
+    return (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
+}
+
+// ─── GEMM cuantizado batched (M filas) ────────────────────────────────────────
+// C[M,N] = A[M,K] * B^T, B = peso cuantizado GGUF [N,K] fila por fila.
+// type: 0=q4_0, 1=q4_1, 2=q5_k, 3=q6_k. Un warp por (m, row); A[m] en smem.
+// K múltiplo de 32 (q4_0/q4_1) o 256 (q5_k/q6_k).
+extern "C" __global__ void qgemmKernel(
+    const float* __restrict__ a,
+    const unsigned char* __restrict__ b,
+    float* __restrict__ c,
+    int M, int K, int N, int type)
+{
+    extern __shared__ float sa[];
+    const int tid = threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int m = blockIdx.y;
+    const float* am = a + (size_t)m * K;
+    for (int i = tid; i < K; i += blockDim.x) sa[i] = am[i];
+    __syncthreads();
+
+    const int row = blockIdx.x * (blockDim.x >> 5) + warp;
+    if (row >= N) return;
+
+    const int nblocks = K >> 5;
+    const int nbig = K >> 8;
+    const size_t rowstride =
+        type == 0 ? (size_t)nblocks * 18 :
+        type == 1 ? (size_t)nblocks * 20 :
+        type == 2 ? (size_t)nbig * 176 :
+                    (size_t)nbig * 210;
+    const unsigned char* rowb = b + (size_t)row * rowstride;
+
+    float acc = 0.0f;
+    switch (type) {
+    case 0: { // q4_0: d = q*sc - 8
+        for (int blk = 0; blk < nblocks; blk++) {
+            const unsigned char* bp = rowb + (size_t)blk * 18;
+            const float d = __half2float(*(const __half*)bp);
+            const unsigned char q = bp[2 + (lane & 15)];
+            const int nib = (lane < 16) ? (q & 0x0F) : (q >> 4);
+            acc += sa[blk * 32 + lane] * (d * (float)(nib - 8));
+        }
+        break; }
+    case 1: { // q4_1: val = d*q + m
+        for (int blk = 0; blk < nblocks; blk++) {
+            const unsigned char* bp = rowb + (size_t)blk * 20;
+            const float d = __half2float(*(const __half*)bp);
+            const float mm = __half2float(*(const __half*)(bp + 2));
+            const unsigned char q = bp[4 + (lane & 15)];
+            const int nib = (lane < 16) ? (q & 0x0F) : (q >> 4);
+            acc += sa[blk * 32 + lane] * (d * (float)nib + mm);
+        }
+        break; }
+    case 2: { // q5_k: super-bloque 256, 4 grupos de 64, escalas de 6 bits
+        for (int blk = 0; blk < nbig; blk++) {
+            const unsigned char* bp = rowb + (size_t)blk * 176;
+            const float d = __half2float(*(const __half*)bp);
+            const float mn = __half2float(*(const __half*)(bp + 2));
+            const unsigned char* sc = bp + 4;
+            const unsigned char* qh = bp + 16;
+            const unsigned char* qs = bp + 48;
+            const float* sa_base = sa + (size_t)blk * 256;
+            for (int t = 0; t < 8; t++) {
+                const int idx = lane + t * 32;
+                const int g = idx >> 6;
+                const int sub = idx & 63;
+                const int is = g * 2;
+                float d1, m1; int qv;
+                if (sub < 32) {
+                    const int l = sub;
+                    const int bit = 1 << (2 * g);
+                    d1 = d * (float)scaleMinD(is, sc);
+                    m1 = mn * (float)scaleMinM(is, sc);
+                    qv = (qs[g * 32 + l] & 0xF) + ((qh[l] & bit) ? 16 : 0);
+                } else {
+                    const int l = sub - 32;
+                    const int bit = 2 << (2 * g);
+                    d1 = d * (float)scaleMinD(is + 1, sc);
+                    m1 = mn * (float)scaleMinM(is + 1, sc);
+                    qv = (qs[g * 32 + l] >> 4) + ((qh[l] & bit) ? 16 : 0);
+                }
+                acc += sa_base[idx] * (d1 * (float)qv - m1);
+            }
+        }
+        break; }
+    case 3: { // q6_k: ql/qh + escalas i8, val = d*sc*(q - 32)
+        for (int blk = 0; blk < nbig; blk++) {
+            const unsigned char* bp = rowb + (size_t)blk * 210;
+            const float d = __half2float(*(const __half*)(bp + 208));
+            const unsigned char* ql = bp;
+            const unsigned char* qh = bp + 128;
+            const unsigned char* sc = bp + 192;
+            const float* sa_base = sa + (size_t)blk * 256;
+            for (int t = 0; t < 8; t++) {
+                const int idx = lane + t * 32;
+                const int n2 = idx >> 7;
+                const int sub = idx & 127;
+                const int l = sub & 31;
+                const int part = sub >> 5;
+                const int is = l >> 4;
+                const unsigned char qlb = ql[n2 * 64 + l + ((part & 1) ? 32 : 0)];
+                const unsigned char qv0 = (part < 2) ? (qlb & 0x0F) : (qlb >> 4);
+                const unsigned char qv = qv0 | ((qh[n2 * 32 + l] >> (2 * part)) & 3) << 4;
+                const float s = (float)((signed char)sc[n2 * 8 + is + 2 * part]);
+                acc += sa_base[idx] * (d * s * (float)((int)qv - 32));
+            }
+        }
+        break; }
+    }
+    for (int o = 16; o; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
+    if (lane == 0) c[(size_t)m * N + row] = acc;
+}

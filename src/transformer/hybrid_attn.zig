@@ -637,12 +637,13 @@ pub const AttentionLayer = struct {
         const w_o32 = Tensor(f32){ .data = self.scratch_o, .shape = &w_o_shape, .strides = &w_o_strides, .offset = 0, .allocator = null, .owns_data = false };
 
         // 1. Proyecciones Q+G, K, V (device→device, pesos cacheados en GPU).
-        // M=1 con peso Q4_0 → GEMM cuantizado device (8× menos tráfico de VRAM).
-        const q4_ok = n == 1 and self.w_q.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4ATTN") == null;
+        // Pesos Q4_0 → GEMM cuantizado device (8× menos tráfico de VRAM),
+        // también batched para prefill (n > 1).
+        const q4_ok = self.w_q.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4ATTN") == null;
         if (q4_ok) {
-            try lk.q4gemmLinear(self.allocator, x.ptr(), self.w_q.bytes, g.g_qg.ptr(), p.n_embd, qg_dim);
-            try lk.q4gemmLinear(self.allocator, x.ptr(), self.w_k.bytes, g.g_k.ptr(), p.n_embd, kv_dim);
-            try lk.q4gemmLinear(self.allocator, x.ptr(), self.w_v.bytes, g.g_v.ptr(), p.n_embd, kv_dim);
+            try lk.qgemmLinear(self.allocator, x.ptr(), self.w_q.bytes, g.g_qg.ptr(), n, p.n_embd, qg_dim, 0);
+            try lk.qgemmLinear(self.allocator, x.ptr(), self.w_k.bytes, g.g_k.ptr(), n, p.n_embd, kv_dim, 0);
+            try lk.qgemmLinear(self.allocator, x.ptr(), self.w_v.bytes, g.g_v.ptr(), n, p.n_embd, kv_dim, 0);
         } else {
             try self.matmul_engine.linearProjectionDevice(x, w_q32, &g.g_qg, n, p.n_embd, qg_dim);
             try self.matmul_engine.linearProjectionDevice(x, w_k32, &g.g_k, n, p.n_embd, kv_dim);
@@ -698,7 +699,7 @@ pub const AttentionLayer = struct {
 
         // 6. Proyección de salida device→device (mixer, escrito en `out`).
         if (q4_ok) {
-            try lk.q4gemmLinear(self.allocator, g.g_attn.ptr(), self.w_o.bytes, out.ptr(), q_dim, p.n_embd);
+            try lk.qgemmLinear(self.allocator, g.g_attn.ptr(), self.w_o.bytes, out.ptr(), n, q_dim, p.n_embd, 0);
         } else {
             try self.matmul_engine.linearProjectionDevice(g.g_attn, w_o32, out, n, q_dim, p.n_embd);
         }

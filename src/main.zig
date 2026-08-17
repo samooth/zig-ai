@@ -439,6 +439,7 @@ fn runHybridInference(
     const lm_head_q = try model.loadLmHeadQuant();
     layer_kernels.quant_enabled = params.quant == .auto;
     const lm_head_q4 = lm_head_q.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath();
+    const lm_head_q6k = lm_head_q.dtype() == gguf.GgmlType.q6_k and layer_kernels.quantPath();
     var out_norm = try model.loadOutputNorm();
     defer out_norm.deinit();
     const rms_eps = cfg.layer_norm_rms_epsilon;
@@ -630,37 +631,112 @@ fn runHybridInference(
         const stage = try allocator.alloc(f32, ub * n_embd);
         defer allocator.free(stage);
 
+        const perf_t = @import("time").Timer.start();
+        const perf_prefill = std.c.getenv("PERF_STAGE") != null;
+        var p_ev: []cudaz.CUevent = undefined;
+        var p_layer_ns: []i128 = undefined;
+        var p_t_embed_ns: i128 = 0;
+        var p_t_enq_ns: i128 = 0;
+        var p_gpu_total_ns: i128 = 0;
+        var p_gpu_head_ns: i128 = 0;
+        if (perf_prefill) {
+            p_ev = try allocator.alloc(cudaz.CUevent, layers.len + 3);
+            p_layer_ns = try allocator.alloc(i128, layers.len);
+            @memset(p_layer_ns, 0);
+            for (p_ev) |*e| e.* = try cudaz.cuEventCreate(0);
+        }
+
         var pos: usize = 0;
         var last_n: usize = 0;
         var cur2gpu = g_cur;
         var nxt2gpu = g_nxt;
         while (pos < seq_len) {
             const n = @min(ub, seq_len - pos);
+            const t_emb0 = perf_t.read();
             for (0..n * n_embd) |i| {
                 stage[i] = @as(f32, @floatCast(hidden_2d.data[pos * n_embd + i]));
             }
             try cudaz.cuMemcpyHtoD(cur2gpu.ptr(), @intFromPtr(stage.ptr), n * n_embd * @sizeOf(f32));
-            for (layers) |*layer| {
+            p_t_embed_ns += perf_t.read() - t_emb0;
+            if (perf_prefill) try cudaz.cuEventRecord(p_ev[0], lk.stream);
+            const t_enq0 = perf_t.read();
+            for (layers, 0..) |*layer, li| {
                 try hybrid_layer.HybridLayer.forwardGPU(layer, &lk, cur2gpu, &nxt2gpu, pos, n);
+                if (perf_prefill) try cudaz.cuEventRecord(p_ev[li + 1], lk.stream);
                 const t2 = cur2gpu;
                 cur2gpu = nxt2gpu;
                 nxt2gpu = t2;
             }
+            p_t_enq_ns += perf_t.read() - t_enq0;
             pos += n;
             last_n = n;
         }
 
         // LM head sobre el último token del prompt (última fila del buffer final).
         try cudaz.cuStreamSynchronize(lk.stream);
+        if (perf_prefill) try cudaz.cuEventRecord(p_ev[layers.len + 2], lk.stream);
         const last_row = cur2gpu.ptr() + (last_n - 1) * n_embd * @sizeOf(f32);
         try lk.rmsNorm(last_row, @intFromPtr(g_out_norm.dev_ptr), g_normed.ptr(), 1, n_embd, rms_eps);
         if (lm_head_q4) {
             try lk.q4gemmLinear(allocator, g_normed.ptr(), lm_head_q.bytes, g_logits.ptr(), n_embd, vocab);
+        } else if (lm_head_q6k) {
+            try lk.qgemmLinear(allocator, g_normed.ptr(), lm_head_q.bytes, g_logits.ptr(), 1, n_embd, vocab, 3);
         } else {
             try engine.linearProjectionDeviceF16(g_normed, lm_head, &g_logits, 1, n_embd, vocab);
         }
+        if (perf_prefill) try cudaz.cuEventRecord(p_ev[layers.len + 1], lk.stream);
         try cudaz.cuStreamSynchronize(lk.stream);
         try cudaz.cuMemcpyDtoH(@intFromPtr(logits_f32.ptr), g_logits.ptr(), vocab * @sizeOf(f32));
+        if (perf_prefill) {
+            var ms: f32 = 0;
+            for (layers, 0..) |_, li| {
+                try cudaz.cuEventElapsedTime(&ms, p_ev[li], p_ev[li + 1]);
+                const ns = @as(i128, @intFromFloat(@as(f64, ms) * std.time.ns_per_ms));
+                p_layer_ns[li] += ns;
+            }
+            try cudaz.cuEventElapsedTime(&ms, p_ev[layers.len + 2], p_ev[layers.len + 1]);
+            p_gpu_head_ns += @as(i128, @intFromFloat(@as(f64, ms) * std.time.ns_per_ms));
+            try cudaz.cuEventElapsedTime(&ms, p_ev[0], p_ev[layers.len + 1]);
+            p_gpu_total_ns += @as(i128, @intFromFloat(@as(f64, ms) * std.time.ns_per_ms));
+            const us = std.time.ns_per_us;
+            var ssm_ns: i128 = 0;
+            var attn_ns: i128 = 0;
+            for (layers, 0..) |layer, li| {
+                if (layer.is_attention) attn_ns += p_layer_ns[li] else ssm_ns += p_layer_ns[li];
+            }
+            try stdout.print("[+] PERF prefill (total {d:.1} ms):\n", .{ @as(f64, @floatFromInt(p_gpu_total_ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms)) });
+            try stdout.print("  host  embed {d:.1} us  enqueue {d:.1} us\n", .{
+                @as(f64, @floatFromInt(p_t_embed_ns)) / @as(f64, @floatFromInt(us)),
+                @as(f64, @floatFromInt(p_t_enq_ns)) / @as(f64, @floatFromInt(us)),
+            });
+            try stdout.print("  gpu   ssm {d:.1} us  attn {d:.1} us  head {d:.1} us  total {d:.1} us\n", .{
+                @as(f64, @floatFromInt(ssm_ns)) / @as(f64, @floatFromInt(us)),
+                @as(f64, @floatFromInt(attn_ns)) / @as(f64, @floatFromInt(us)),
+                @as(f64, @floatFromInt(p_gpu_head_ns)) / @as(f64, @floatFromInt(us)),
+                @as(f64, @floatFromInt(p_gpu_total_ns)) / @as(f64, @floatFromInt(us)),
+            });
+            var top: [5]usize = undefined;
+            for (0..5) |k| top[k] = k;
+            for (layers, 0..) |_, li| {
+                if (p_layer_ns[li] <= p_layer_ns[top[4]]) {
+                    top[4] = li;
+                    for (0..3) |k| {
+                        if (p_layer_ns[top[k + 1]] > p_layer_ns[top[k]]) {
+                            const tmp = top[k];
+                            top[k] = top[k + 1];
+                            top[k + 1] = tmp;
+                        }
+                    }
+                }
+            }
+            try stdout.print("  top layers:\n", .{});
+            for (top) |li| {
+                try stdout.print("    L{d:<2} {s} {d:.1} us\n", .{
+                    li, if (layers[li].is_attention) "attn" else "ssm",
+                    @as(f64, @floatFromInt(p_layer_ns[li])) / @as(f64, @floatFromInt(us)),
+                });
+            }
+        }
     } else {
         var buf_a = try Tensor(f32).alloc(allocator, &.{ seq_len, n_embd });
         defer buf_a.deinit();
@@ -812,6 +888,8 @@ fn runHybridInference(
         // lm_head M=1: Q4_0 device→device si el peso es Q4_0 (8× menos tráfico).
         if (lm_head_q4) {
             try lk.q4gemmLinear(allocator, g_normed.ptr(), lm_head_q.bytes, g_logits.ptr(), n_embd, vocab);
+        } else if (lm_head_q6k) {
+            try lk.qgemmLinear(allocator, g_normed.ptr(), lm_head_q.bytes, g_logits.ptr(), 1, n_embd, vocab, 3);
         } else {
             try engine.linearProjectionDeviceF16(g_normed, lm_head, &g_logits, 1, n_embd, vocab);
         }

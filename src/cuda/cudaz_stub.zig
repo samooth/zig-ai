@@ -279,6 +279,16 @@ pub fn cuLaunchKernel(
 ) !void {
     const res = cudalib.cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ,
         blockDimX, blockDimY, blockDimZ, sharedMemBytes, hStream, kernelParams, extra);
+    if (res != .SUCCESS) {
+        var errbuf: [*:0]const u8 = "?";
+        _ = cudalib.cuGetErrorString(res, &errbuf);
+        std.debug.print("cuLaunchKernel FAILED: {s} (0x{x})\n", .{ errbuf, @intFromEnum(res) });
+        return error.CudaError;
+    }
+}
+
+pub fn cuFuncSetAttribute(hfunc: CUfunction, attrib: c_int, value: i64) !void {
+    const res = cudalib.cuFuncSetAttribute(hfunc, attrib, value);
     if (res != .SUCCESS) return error.CudaError;
 }
 
@@ -296,6 +306,8 @@ const cudalib = struct {
     extern "c" fn cuModuleLoad(module: *CUmodule, fname: [*:0]const u8) CUresult;
     extern "c" fn cuModuleUnload(module: CUmodule) CUresult;
     extern "c" fn cuModuleGetFunction(hfunc: *CUfunction, hmod: CUmodule, name: [*:0]const u8) CUresult;
+    extern "c" fn cuGetErrorString(err: CUresult, pStr: *[*:0]const u8) CUresult;
+    extern "c" fn cuFuncSetAttribute(hfunc: CUfunction, attrib: c_int, value: i64) CUresult;
     extern "c" fn cuMemAlloc_v2(dptr: *CUdeviceptr, bytesize: usize) CUresult;
     extern "c" fn cuMemFree_v2(dptr: CUdeviceptr) CUresult;
     extern "c" fn cuMemAllocHost_v2(pp: *?*anyopaque, bytesize: usize) CUresult;

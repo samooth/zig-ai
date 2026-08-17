@@ -446,19 +446,20 @@ pub fn forwardGPU(
     var w_down_strides = [_]usize{ p.intermediate_dim, 1 };
     const w_down32 = Tensor(f32){ .data = self.scratch_down, .shape = &w_down_shape, .strides = &w_down_strides, .offset = 0, .allocator = null, .owns_data = false };
 
-    // FFN M=1 con pesos Q4_0 → GEMM cuantizado device (8× menos tráfico VRAM).
-    const q4_ok = n == 1 and self.w_gate.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4FFN") == null;
+    // FFN con pesos Q4_0/Q4_1 → GEMM cuantizado device (8× menos tráfico VRAM),
+    // también batched para prefill (n > 1).
+    const q4_ok = self.w_gate.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4FFN") == null;
     if (q4_ok) {
-        try lk.q4gemmLinear(self.allocator, g.g_post.ptr(), self.w_gate.bytes, g.g_gate.ptr(), p.n_embd, p.intermediate_dim);
-        try lk.q4gemmLinear(self.allocator, g.g_post.ptr(), self.w_up.bytes, g.g_up.ptr(), p.n_embd, p.intermediate_dim);
+        try lk.qgemmLinear(self.allocator, g.g_post.ptr(), self.w_gate.bytes, g.g_gate.ptr(), n, p.n_embd, p.intermediate_dim, 0);
+        try lk.qgemmLinear(self.allocator, g.g_post.ptr(), self.w_up.bytes, g.g_up.ptr(), n, p.n_embd, p.intermediate_dim, 0);
     } else {
         try self.matmul_engine.linearProjectionDevice(g.g_post, w_gate32, &g.g_gate, n, p.n_embd, p.intermediate_dim);
         try self.matmul_engine.linearProjectionDevice(g.g_post, w_up32, &g.g_up, n, p.n_embd, p.intermediate_dim);
     }
     try lk.swiglu(g.g_gate.ptr(), g.g_up.ptr(), n * p.intermediate_dim);
-    const w_down_q4 = n == 1 and self.w_down.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4FFN") == null;
+    const w_down_q4 = self.w_down.dtype() == gguf.GgmlType.q4_1 and layer_kernels.quantPath() and std.c.getenv("NOQ4FFN") == null;
     if (w_down_q4) {
-        try lk.q4gemmLinear(self.allocator, g.g_gate.ptr(), self.w_down.bytes, g.g_ffn.ptr(), p.intermediate_dim, p.n_embd);
+        try lk.qgemmLinear(self.allocator, g.g_gate.ptr(), self.w_down.bytes, g.g_ffn.ptr(), n, p.intermediate_dim, p.n_embd, 1);
     } else {
         try self.matmul_engine.linearProjectionDevice(g.g_gate, w_down32, &g.g_ffn, n, p.intermediate_dim, p.n_embd);
     }

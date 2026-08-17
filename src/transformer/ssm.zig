@@ -556,11 +556,12 @@ pub fn forwardGPU(
     const w_out32 = Tensor(f32){ .data = self.scratch_out, .shape = &w_out_shape, .strides = &w_out_strides, .offset = 0, .allocator = null, .owns_data = false };
 
     // M=1 con peso Q4_0 → GEMM cuantizado device (8× menos tráfico de VRAM).
-    // Fallback al camino f32 dequantizado para prefill (n > 1) u otros dtypes.
-    const q4_ok = n == 1 and self.w_qkv.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4SSM") == null;
+    // Prefill (n > 1): GEMM cuantizado batched (qgemmKernel) evita subir los
+    // pesos f32 dequantizados a VRAM. Fallback al camino f32 para otros dtypes.
+    const q4_ok = self.w_qkv.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4SSM") == null;
     if (q4_ok) {
-        try lk.q4gemmLinear(self.allocator, x.ptr(), self.w_qkv.bytes, g.qkv.ptr(), p.n_embd, qkv_dim);
-        try lk.q4gemmLinear(self.allocator, x.ptr(), self.w_z.bytes, g.z.ptr(), p.n_embd, d_inner);
+        try lk.qgemmLinear(self.allocator, x.ptr(), self.w_qkv.bytes, g.qkv.ptr(), n, p.n_embd, qkv_dim, 0);
+        try lk.qgemmLinear(self.allocator, x.ptr(), self.w_z.bytes, g.z.ptr(), n, p.n_embd, d_inner, 0);
     } else {
         try self.matmul_engine.linearProjectionDevice(x, w_qkv32, &g.qkv, n, p.n_embd, qkv_dim);
         try self.matmul_engine.linearProjectionDevice(x, w_z32, &g.z, n, p.n_embd, d_inner);
@@ -592,9 +593,11 @@ pub fn forwardGPU(
     }
 
     try lk.rmsNormGateMul(g.attn_out.ptr(), g.z.ptr(), @intFromPtr(g.d_ssm_norm.dev_ptr), n, d_inner, n_v_heads, head_v_dim, p.rms_eps);
-    const w_out_q4 = n == 1 and self.w_out.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4SSM") == null;
+    const w_out_q4 = self.w_out.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4SSM") == null;
     if (w_out_q4) {
-        try lk.q4gemmLinear(self.allocator, g.attn_out.ptr(), self.w_out.bytes, out.ptr(), d_inner, p.n_embd);
+        try lk.qgemmLinear(self.allocator, g.attn_out.ptr(), self.w_out.bytes, out.ptr(), n, d_inner, p.n_embd, 0);
+    } else if (self.w_out.dtype() == gguf.GgmlType.q5_k and layer_kernels.quantPath() and std.c.getenv("NOQ4SSM") == null) {
+        try lk.qgemmLinear(self.allocator, g.attn_out.ptr(), self.w_out.bytes, out.ptr(), n, d_inner, p.n_embd, 2);
     } else {
         try self.matmul_engine.linearProjectionDevice(g.attn_out, w_out32, out, n, d_inner, p.n_embd);
     }
