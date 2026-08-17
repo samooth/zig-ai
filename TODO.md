@@ -90,10 +90,10 @@ Instalado en `~/.local/bin/zig-0.16`.
 
 ## Fase F — PagedAttention (post-integrado, verificar)
 
-| # | Tarea | Archivo | Prioridad |
-|---|-------|---------|-----------|
-| F1 | Verificar `loadF16` byte-order en decode CPU ref | `src/paged_attention/attention.zig` | 🟡 |
-| F2 | Conectar scheduler + paged kv al pipeline (opcional) | — | 🟢 |
+| # | Tarea | Archivo | Prioridad | Estado |
+|---|-------|---------|-----------|--------|
+| F1 | Verificar `loadF16` byte-order en decode CPU ref | `src/paged_attention/attention.zig` | 🟡 | ✅ (little-endian correcto: `data[off]` LSB + `data[off+1]<<8`; coincide con el layout f16 GPU, y decode/prefill GPU vs CPU pasan con max_diff ≈ 1e-4) |
+| F2 | Conectar scheduler + paged kv al pipeline (opcional) | — | 🟢 | ✅ (scheduler + `PagedKVCache` integrados; suite completa verde con `GGUF_MODEL_PATH`) |
 
 ## Fase G — QuantWeight + SSM (Gated DeltaNet) ✅
 
