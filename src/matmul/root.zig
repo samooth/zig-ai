@@ -24,7 +24,8 @@ const simd = @import("simd.zig");
 const tiled = @import("tiled.zig");
 const parallel = @import("parallel.zig");
 const openblas = @import("openblas.zig");
-const cublas = @import("cublas.zig");
+const cublas = @import("cublas");
+
 const types = @import("types.zig");
 const f16bf16 = @import("f16bf16.zig");
 const quant = @import("quant.zig");
@@ -49,6 +50,18 @@ pub const PrecisionMode = enum {
 
 pub const MatmulEngine = struct {
     const Self = @This();
+
+    // Stream CUDA compartido por TODOS los engines (y los kernels elementwise
+    // de la capa híbrida residente). Así todas las GEMM y todos los kernels
+    // corren en un mismo stream y quedan ordenados; se sincroniza una vez por
+    // token. Se crea una sola vez y no se destruye (vive hasta el exit).
+    var g_shared_stream: ?cublas.CudaStream = null;
+
+    pub fn sharedCudaStream() !cublas.CudaStream {
+        if (g_shared_stream) |s| return s;
+        g_shared_stream = try cublas.CudaStream.create();
+        return g_shared_stream.?;
+    }
 
     allocator: std.mem.Allocator,
     backend: Backend,
@@ -87,7 +100,7 @@ pub const MatmulEngine = struct {
             .cublas => {
                 if (!build_options.has_cuda) return error.CuBlasNotLinked;
                 engine.cublas_handle = try cublas.CuBlasHandle.init();
-                engine.cuda_stream = try cublas.CudaStream.create();
+                engine.cuda_stream = try sharedCudaStream();
                 var gpu_pool = cublas.GpuMemoryPool.init(allocator);
                 gpu_pool.setStream(engine.cuda_stream.?.raw);
                 engine.gpu_pool = gpu_pool;
@@ -107,7 +120,7 @@ pub const MatmulEngine = struct {
                 while (it.next()) |entry| entry.*.free();
                 cache.deinit();
             }
-            if (self.cuda_stream) |stream| stream.destroy();
+            // cuda_stream es compartido (g_shared_stream): no se destruye aquí.
             if (self.gpu_pool) |*pool| pool.deinit();
             if (self.cublas_handle) |handle| handle.deinit();
         }
@@ -257,6 +270,58 @@ pub const MatmulEngine = struct {
         }
 
         try self.gemm(T, X, W_T, Y, false, true);
+    }
+
+    // ─── Proyección lineal GPU-resident (A y C ya en device) ───
+    // X y Y son GpuTensor(f32); el peso W_T (host f32 dequantizado) se sube una
+    // vez y se cachea. NO hay H2D de X ni D2H de Y (la salida queda en GPU).
+    pub fn linearProjectionDevice(
+        self: *Self,
+        X: cublas.GpuTensor(f32),
+        W_T: Tensor(f32),
+        Y: *cublas.GpuTensor(f32),
+        M: usize,
+        K: usize,
+        N: usize,
+    ) !void {
+        if (self.backend != .cublas or self.weight_cache == null or self.cublas_handle == null) {
+            @panic("linearProjectionDevice requiere backend cublas");
+        }
+        const handle = self.cublas_handle.?;
+        const key = @intFromPtr(W_T.data.ptr);
+        const d_B = if (self.weight_cache.?.get(key)) |b| b else blk: {
+            var buf = try cublas.GpuBuffer(f32).alloc(W_T.data.len);
+            try buf.upload(W_T.data);
+            try self.weight_cache.?.put(key, buf);
+            break :blk buf;
+        };
+        try cublas.gemmCuBlasF32Device(handle, X.buf, d_B, Y.buf, M, N, K, false, true, 1.0, 0.0);
+    }
+
+    /// Proyección lineal device→device con peso f16 (p.ej. lm_head): X ya vive en
+    /// GPU (f32), el peso se convierte a f32 y se cachea como en linearProjection;
+    /// Y (f32) se escribe en GPU sin pasar por host.
+    pub fn linearProjectionDeviceF16(
+        self: *Self,
+        X32: cublas.GpuTensor(f32),
+        W_T16: Tensor(f16),
+        Y32: *cublas.GpuTensor(f32),
+        M: usize,
+        K: usize,
+        N: usize,
+    ) !void {
+        const handle = self.cublas_handle.?;
+        const key = @intFromPtr(W_T16.data.ptr);
+        const d_B = if (self.weight_cache.?.get(key)) |b| b else blk: {
+            var b_f32 = try Tensor(f32).alloc(self.allocator, &.{ W_T16.shape[0], W_T16.shape[1] });
+            defer b_f32.deinit();
+            for (W_T16.data, b_f32.data) |s, *d| d.* = @floatCast(s);
+            var buf = try cublas.GpuBuffer(f32).alloc(b_f32.data.len);
+            try buf.upload(b_f32.data);
+            try self.weight_cache.?.put(key, buf);
+            break :blk buf;
+        };
+        try cublas.gemmCuBlasF32Device(handle, X32.buf, d_B, Y32.buf, M, N, K, false, true, 1.0, 0.0);
     }
 
     // ─── FFN SwiGLU ───

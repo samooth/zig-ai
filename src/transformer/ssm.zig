@@ -29,6 +29,9 @@
 const std = @import("std");
 const Tensor = @import("core").Tensor;
 const matmul = @import("matmul");
+const cublas = @import("cublas");
+const cudaz = @import("cudaz");
+const layer_kernels = @import("layer_kernels");
 const gguf = @import("gguf");
 const QuantWeight = @import("quant_weight").QuantWeight;
 
@@ -80,6 +83,9 @@ pub const SsmLayer = struct {
     // Estado recurrente
     conv_state: []f32, // [d_conv-1, qkv_dim] por secuencia
     s_state: []f32, // [d_state*d_state*dt_rank]  S[a][b][hv]
+
+    // Estado y buffers GPU para el forward residente (Path B).
+    gpu: ?GpuSsm = null,
 
     const Self = @This();
 
@@ -140,11 +146,13 @@ pub const SsmLayer = struct {
             .scratch_out = scratch_out,
             .conv_state = conv_state,
             .s_state = s_state,
+            .gpu = null,
         };
         return out_self;
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.gpu) |*g| g.deinit();
         self.matmul_engine.deinit();
         self.allocator.free(self.scratch_qkv);
         self.allocator.free(self.scratch_z);
@@ -167,7 +175,7 @@ pub const SsmLayer = struct {
     /// Carga los pesos desde el GGUF (nombres qwen35). Los grandes quedan
     /// como QuantWeight (bytes mmap, sin copia); los pequeños se dequantizan
     /// a f32.
-    pub fn loadWeightsFromGguf(self: *Self, g: *const gguf.GgufFile) !void {
+    pub fn loadWeightsFromGguf(self: *SsmLayer, g: *const gguf.GgufFile) !void {
         const prefix = try std.fmt.allocPrint(self.allocator, "blk.{d}.", .{self.layer_idx});
         defer self.allocator.free(prefix);
 
@@ -201,7 +209,7 @@ pub const SsmLayer = struct {
     /// `x`: Tensor(f16) [1, N, n_embd] position-major.
     /// `out`: Tensor(f16) [1, N, n_embd].
     /// `n`: tokens a procesar (prefill en bloque o 1 token de generación).
-    pub fn forward(self: *Self, x: Tensor(f32), out: *Tensor(f32), n: usize) !void {
+    pub fn forward(self: *SsmLayer, x: Tensor(f32), out: *Tensor(f32), n: usize) !void {
         const p = self.params;
         const qkv_dim = p.qkvDim();
         const key_dim = p.keyDim();
@@ -330,7 +338,7 @@ pub const SsmLayer = struct {
 
     /// L2-normaliza cada head de Q y K en conv_out (fiel a ggml_l2_norm).
     fn l2NormQK(
-        self: *Self,
+        self: *SsmLayer,
         conv_out: Tensor(f32),
         N: usize,
         key_dim: usize,
@@ -359,7 +367,7 @@ pub const SsmLayer = struct {
     /// Recurrencia DeltaNet (fiel al kernel `gated_delta_net_one_chunk`).
     /// `conv_out`: [N, qkv_dim] → q en [0,key_dim), k en [key_dim,2*key_dim), v en [2*key_dim,qkv_dim).
     fn deltaNetRecurrence(
-        self: *Self,
+        self: *SsmLayer,
         conv_out: Tensor(f32),
         gate: Tensor(f32),
         beta: Tensor(f32),
@@ -415,6 +423,178 @@ pub const SsmLayer = struct {
             }
         }
     }
+
+    // ─── Forward SSM residente en GPU (Path B) ─────────────────────────────────
+    // Toda la activación vive en device: matmuls device→device (pesos cacheados en
+// GPU) + kernels elementwise. El estado recurrente (s_state, conv_state) también
+// vive en GPU y persiste entre tokens. El llamador sincroniza el stream.
+pub const GpuSsm = struct {
+    d_dt_bias: cublas.GpuBuffer(f32),
+    d_ssm_a: cublas.GpuBuffer(f32),
+    d_conv1d: cublas.GpuBuffer(f32),
+    d_ssm_norm: cublas.GpuBuffer(f32),
+    d_s_state: cublas.GpuBuffer(f32),
+    d_conv_state: cublas.GpuBuffer(f32),
+    qkv: cublas.GpuTensor(f32),
+    z: cublas.GpuTensor(f32),
+    beta: cublas.GpuTensor(f32),
+    gate: cublas.GpuTensor(f32),
+    conv_in: cublas.GpuTensor(f32),
+    conv_out: cublas.GpuTensor(f32),
+    attn_out: cublas.GpuTensor(f32),
+    cap_n: usize,
+    params: SsmParams,
+
+    fn alloc(p: SsmParams, dt_bias: []f32, ssm_a: []f32, conv1d: []f32, ssm_norm: []f32) !GpuSsm {
+        const d_dt_bias = try cublas.GpuBuffer(f32).alloc(dt_bias.len);
+        try d_dt_bias.upload(dt_bias);
+        const d_ssm_a = try cublas.GpuBuffer(f32).alloc(ssm_a.len);
+        try d_ssm_a.upload(ssm_a);
+        const d_conv1d = try cublas.GpuBuffer(f32).alloc(conv1d.len);
+        try d_conv1d.upload(conv1d);
+        const d_ssm_norm = try cublas.GpuBuffer(f32).alloc(ssm_norm.len);
+        try d_ssm_norm.upload(ssm_norm);
+        const d_s_state = try cublas.GpuBuffer(f32).alloc(p.d_state * p.d_state * p.dt_rank);
+        try cudaz.cuMemsetD8(@intFromPtr(d_s_state.dev_ptr), 0, p.d_state * p.d_state * p.dt_rank * @sizeOf(f32));
+        const d_conv_state = try cublas.GpuBuffer(f32).alloc((p.d_conv - 1) * p.qkvDim());
+        try cudaz.cuMemsetD8(@intFromPtr(d_conv_state.dev_ptr), 0, (p.d_conv - 1) * p.qkvDim() * @sizeOf(f32));
+        return .{
+            .d_dt_bias = d_dt_bias,
+            .d_ssm_a = d_ssm_a,
+            .d_conv1d = d_conv1d,
+            .d_ssm_norm = d_ssm_norm,
+            .d_s_state = d_s_state,
+            .d_conv_state = d_conv_state,
+            .qkv = undefined,
+            .z = undefined,
+            .beta = undefined,
+            .gate = undefined,
+            .conv_in = undefined,
+            .conv_out = undefined,
+            .attn_out = undefined,
+            .cap_n = 0,
+            .params = p,
+        };
+    }
+
+    fn ensureN(self: *GpuSsm, n: usize) !void {
+        if (self.cap_n >= n) return;
+        const p = self.params;
+        const qkv_dim = p.qkvDim();
+        if (self.cap_n > 0) {
+            self.qkv.deinit();
+            self.z.deinit();
+            self.beta.deinit();
+            self.gate.deinit();
+            self.conv_in.deinit();
+            self.conv_out.deinit();
+            self.attn_out.deinit();
+        }
+        self.qkv = try cublas.GpuTensor(f32).alloc(n * qkv_dim);
+        self.z = try cublas.GpuTensor(f32).alloc(n * p.d_inner);
+        self.beta = try cublas.GpuTensor(f32).alloc(n * p.dt_rank);
+        self.gate = try cublas.GpuTensor(f32).alloc(n * p.dt_rank);
+        self.conv_in = try cublas.GpuTensor(f32).alloc((p.d_conv - 1 + n) * qkv_dim);
+        self.conv_out = try cublas.GpuTensor(f32).alloc(n * qkv_dim);
+        self.attn_out = try cublas.GpuTensor(f32).alloc(n * p.d_inner);
+        self.cap_n = n;
+    }
+
+    fn deinit(self: *GpuSsm) void {
+        self.d_dt_bias.free();
+        self.d_ssm_a.free();
+        self.d_conv1d.free();
+        self.d_ssm_norm.free();
+        self.d_s_state.free();
+        self.d_conv_state.free();
+        if (self.cap_n > 0) {
+            self.qkv.deinit();
+            self.z.deinit();
+            self.beta.deinit();
+            self.gate.deinit();
+            self.conv_in.deinit();
+            self.conv_out.deinit();
+            self.attn_out.deinit();
+        }
+    }
+};
+
+pub fn ensureGpu(self: *SsmLayer) !void {
+    if (self.gpu != null) return;
+    self.gpu = try GpuSsm.alloc(self.params, self.dt_bias.data, self.ssm_a.data, self.conv1d.data, self.ssm_norm.data);
+}
+
+pub fn forwardGPU(
+    self: *SsmLayer,
+    lk: *layer_kernels.LayerKernels,
+    x: cublas.GpuTensor(f32),
+    out: *cublas.GpuTensor(f32),
+    n: usize,
+) !void {
+    const p = self.params;
+    const qkv_dim = p.qkvDim();
+    const key_dim = p.keyDim();
+    const n_k_heads = p.n_group;
+    const n_v_heads = p.dt_rank;
+    const head_v_dim = p.d_state;
+    const d_inner = p.d_inner;
+    const dt_rank = p.dt_rank;
+
+    try SsmLayer.ensureGpu(self);
+    const g = &self.gpu.?;
+    try g.ensureN(n);
+
+    // Pesos qkv/z/out como Tensor(f32) sobre los scratch dequantizados.
+    var w_qkv_shape = [_]usize{ qkv_dim, p.n_embd };
+    var w_qkv_strides = [_]usize{ p.n_embd, 1 };
+    const w_qkv32 = Tensor(f32){ .data = self.scratch_qkv, .shape = &w_qkv_shape, .strides = &w_qkv_strides, .offset = 0, .allocator = null, .owns_data = false };
+    var w_z_shape = [_]usize{ d_inner, p.n_embd };
+    var w_z_strides = [_]usize{ p.n_embd, 1 };
+    const w_z32 = Tensor(f32){ .data = self.scratch_z, .shape = &w_z_shape, .strides = &w_z_strides, .offset = 0, .allocator = null, .owns_data = false };
+    var w_out_shape = [_]usize{ p.n_embd, d_inner };
+    var w_out_strides = [_]usize{ d_inner, 1 };
+    const w_out32 = Tensor(f32){ .data = self.scratch_out, .shape = &w_out_shape, .strides = &w_out_strides, .offset = 0, .allocator = null, .owns_data = false };
+
+    try self.matmul_engine.linearProjectionDevice(x, w_qkv32, &g.qkv, n, p.n_embd, qkv_dim);
+    try self.matmul_engine.linearProjectionDevice(x, w_z32, &g.z, n, p.n_embd, d_inner);
+    try self.matmul_engine.linearProjectionDevice(x, self.w_beta, &g.beta, n, p.n_embd, dt_rank);
+    try lk.sigmoid(g.beta.ptr(), n * dt_rank);
+    try self.matmul_engine.linearProjectionDevice(x, self.w_alpha, &g.gate, n, p.n_embd, dt_rank);
+    try lk.gateCompute(g.gate.ptr(), @intFromPtr(g.d_dt_bias.dev_ptr), @intFromPtr(g.d_ssm_a.dev_ptr), n * dt_rank, dt_rank);
+
+    // conv_in = [conv_state(history) ; qkv] en device.
+    const conv_qkv_off = (p.d_conv - 1) * qkv_dim * @sizeOf(f32);
+    try cudaz.cuMemcpyDtoD(g.conv_in.ptr(), @intFromPtr(g.d_conv_state.dev_ptr), conv_qkv_off);
+    try cudaz.cuMemcpyDtoD(g.conv_in.ptr() + conv_qkv_off, g.qkv.ptr(), n * qkv_dim * @sizeOf(f32));
+    try lk.conv1dSilu(g.conv_in.ptr(), @intFromPtr(g.d_conv1d.dev_ptr), g.conv_out.ptr(), n, qkv_dim, p.d_conv);
+    // actualizar conv_state con las últimas d_conv-1 filas de conv_in.
+    const hist_off = n * qkv_dim * @sizeOf(f32);
+    try cudaz.cuMemcpyDtoD(@intFromPtr(g.d_conv_state.dev_ptr), g.conv_in.ptr() + hist_off, (p.d_conv - 1) * qkv_dim * @sizeOf(f32));
+
+    try lk.l2NormHeads(g.conv_out.ptr(), n, qkv_dim, key_dim, n_k_heads, head_v_dim, p.rms_eps);
+
+    // DeltaNet: recurrencia secuencial por token (estado persiste en d_s_state).
+    var t: usize = 0;
+    while (t < n) : (t += 1) {
+        const co = g.conv_out.ptr() + t * qkv_dim * @sizeOf(f32);
+        const ga = g.gate.ptr() + t * dt_rank * @sizeOf(f32);
+        const be = g.beta.ptr() + t * dt_rank * @sizeOf(f32);
+        const ao = g.attn_out.ptr() + t * d_inner * @sizeOf(f32);
+        try lk.deltaNet(co, ga, be, ao, @intFromPtr(g.d_s_state.dev_ptr), 1, qkv_dim, key_dim, n_k_heads, n_v_heads, head_v_dim, dt_rank, p.rms_eps);
+    }
+
+    try lk.rmsNormGateMul(g.attn_out.ptr(), g.z.ptr(), @intFromPtr(g.d_ssm_norm.dev_ptr), n, d_inner, n_v_heads, head_v_dim, p.rms_eps);
+    try self.matmul_engine.linearProjectionDevice(g.attn_out, w_out32, out, n, d_inner, p.n_embd);
+}
+
+/// Copia el estado recurrente host (s_state, conv_state) — resultante del prefill
+/// CPU — a los buffers GPU persistentes. Necesario porque decode corre por GPU.
+pub fn seedGpuFromHost(self: *SsmLayer) !void {
+    try SsmLayer.ensureGpu(self);
+    const g = &self.gpu.?;
+    try cudaz.cuMemcpyHtoD(@intFromPtr(g.d_s_state.dev_ptr), @intFromPtr(self.s_state.ptr), self.s_state.len * @sizeOf(f32));
+    try cudaz.cuMemcpyHtoD(@intFromPtr(g.d_conv_state.dev_ptr), @intFromPtr(self.conv_state.ptr), self.conv_state.len * @sizeOf(f32));
+}
 };
 
 fn loadQuantWeight(g: *const gguf.GgufFile, prefix: []const u8, name: []const u8) !QuantWeight {

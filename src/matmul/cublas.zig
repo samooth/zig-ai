@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Tensor = @import("core").Tensor;
+const time = @import("time");
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Declaraciones externas CUDA / cuBLAS
@@ -254,6 +255,25 @@ pub fn GpuBuffer(comptime T: type) type {
     };
 }
 
+/// Tensor que vive íntegramente en GPU (sin ida/vuelta a host por matmul).
+/// Usado por la ruta fused GPU-resident de la capa híbrida.
+pub fn GpuTensor(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        buf: GpuBuffer(T),
+
+        pub fn alloc(n: usize) !Self {
+            return .{ .buf = try GpuBuffer(T).alloc(n) };
+        }
+        pub fn ptr(self: Self) usize {
+            return @intFromPtr(self.buf.dev_ptr);
+        }
+        pub fn deinit(self: Self) void {
+            self.buf.free();
+        }
+    };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // GpuMemoryPool — gestión persistente de memoria GPU
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -410,6 +430,20 @@ pub fn gemmCuBlasF32(
 /// GEMM f32 donde B (los pesos) YA está residente en el device (d_B). Solo se
 /// sube A (activación, pequeña) y se descarga C. Evita re-subir los pesos en
 /// cada token de generación (el cuello de botella original de este engine).
+// ─── Scratch GPU pool compartido (evita cudaMalloc/cudaFree por cada GEMM) ───
+var g_scratch_pool: GpuMemoryPool = undefined;
+var g_scratch_pool_init = false;
+
+fn scratchPool() !*GpuMemoryPool {
+    if (!g_scratch_pool_init) {
+        g_scratch_pool = GpuMemoryPool.init(std.heap.c_allocator);
+        g_scratch_pool_init = true;
+    }
+    return &g_scratch_pool;
+}
+
+// ─── Instrumentación de rendimiento (DBG) ───
+
 pub fn gemmCuBlasF32Resident(
     handle: CuBlasHandle,
     A: Tensor(f32),
@@ -425,14 +459,72 @@ pub fn gemmCuBlasF32Resident(
 ) !void {
     std.debug.assert(A.isContiguous() and C.isContiguous());
 
-    var d_A = try GpuBuffer(f32).alloc(A.data.len);
-    defer d_A.free();
-    try d_A.upload(A.data);
+    const pool = try scratchPool();
+    const bytes_a = A.data.len * @sizeOf(f32);
+    const bytes_c = C.data.len * @sizeOf(f32);
 
-    var d_C = try GpuBuffer(f32).alloc(C.data.len);
-    defer d_C.free();
-    try d_C.upload(C.data);
+    const d_A_ptr = try pool.acquire(bytes_a);
+    defer pool.release(d_A_ptr);
+    const d_C_ptr = try pool.acquire(bytes_c);
+    defer pool.release(d_C_ptr);
 
+    // Subir A (H2D). C solo se sube si beta != 0 (los callers pasan 0, así que
+    // el resultado es puramente alpha*A*B y la subida de C es desperdicio).
+    if (cudaMemcpy(d_A_ptr, A.data.ptr, bytes_a, cudaMemcpyHostToDevice) != 0) {
+        return error.CudaMemcpyFailed;
+    }
+    if (beta != 0) {
+        if (cudaMemcpy(d_C_ptr, C.data.ptr, bytes_c, cudaMemcpyHostToDevice) != 0) {
+            return error.CudaMemcpyFailed;
+        }
+    }
+
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
+    const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
+    const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
+    const ldc: i32 = @intCast(M);
+
+    const status = cublasSgemm_v2(
+        handle.raw,
+        op_a, op_b,
+        @intCast(M), @intCast(N), @intCast(K),
+        &alpha,
+        d_A_ptr, lda,
+        d_B.dev_ptr, ldb,
+        &beta,
+        d_C_ptr, ldc,
+    );
+
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        std.log.err("cublasSgemm (resident) failed: {}", .{status});
+        return error.CuBlasGemmFailed;
+    }
+
+    if (cudaMemcpy(C.data.ptr, d_C_ptr, bytes_c, cudaMemcpyDeviceToHost) != 0) {
+        return error.CudaMemcpyFailed;
+    }
+    // Para M==1 (decode) column-major == row-major: no hace falta transponer.
+    if (M != 1) try colMajorToRowMajor(C.data, M, N);
+    handle.sync();
+}
+
+/// GEMM device→device: A, B y C ya viven en GPU. NO hace H2D/D2H ni sincroniza;
+/// el llamador sincroniza el stream una sola vez por token. Devuelve al
+/// retornar la GEMM está encolada en el stream por defecto de cuBLAS.
+pub fn gemmCuBlasF32Device(
+    handle: CuBlasHandle,
+    d_A: GpuBuffer(f32),
+    d_B: GpuBuffer(f32),
+    d_C: GpuBuffer(f32),
+    M: usize,
+    N: usize,
+    K: usize,
+    trans_a: bool,
+    trans_b: bool,
+    alpha: f32,
+    beta: f32,
+) !void {
     const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
     const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
@@ -449,15 +541,10 @@ pub fn gemmCuBlasF32Resident(
         &beta,
         d_C.dev_ptr, ldc,
     );
-
     if (status != CUBLAS_STATUS_SUCCESS) {
-        std.log.err("cublasSgemm (resident) failed: {}", .{status});
+        std.log.err("cublasSgemm (device) failed: {}", .{status});
         return error.CuBlasGemmFailed;
     }
-
-    try d_C.download(C.data);
-    try colMajorToRowMajor(C.data, M, N);
-    handle.sync();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

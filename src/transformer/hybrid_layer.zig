@@ -3,6 +3,9 @@
 const std = @import("std");
 const Tensor = @import("core").Tensor;
 const matmul = @import("matmul");
+const cublas = @import("cublas");
+const cudaz = @import("cudaz");
+const layer_kernels = @import("layer_kernels");
 const QuantWeight = @import("quant_weight").QuantWeight;
 const gguf = @import("gguf");
 const norm = @import("norm");
@@ -98,6 +101,9 @@ pub const HybridLayer = struct {
     paged_kv: ?*paged.PagedKVCache = null,
     block_table: ?*paged.BlockTable = null,
     paged_gpu: ?*paged.PagedAttentionGpu = null,
+
+    // Buffers GPU para el forward residente (Path B).
+    gpu: ?HybridGpu = null,
 
     const Self = @This();
 
@@ -203,7 +209,7 @@ pub const HybridLayer = struct {
     }
 
     /// Carga pesos desde GGUF (nombres qwen35)
-    pub fn loadWeightsFromGguf(self: *Self, g: *const gguf.GgufFile) !void {
+    pub fn loadWeightsFromGguf(self: *HybridLayer, g: *const gguf.GgufFile) !void {
         const prefix = try std.fmt.allocPrint(self.allocator, "blk.{d}.", .{self.layer_idx});
         defer self.allocator.free(prefix);
 
@@ -233,7 +239,7 @@ pub const HybridLayer = struct {
 
     /// Forward del bloque híbrido:
     /// x → attn_norm → (SSM | Attention) → +residual → attn_post_norm → FFN → +residual → out
-    pub fn forward(self: *Self, x: Tensor(f32), out: *Tensor(f32), start_pos: usize, n: usize) !void {
+    pub fn forward(self: *HybridLayer, x: Tensor(f32), out: *Tensor(f32), start_pos: usize, n: usize) !void {
         const p = self.params;
         const N = n;
 
@@ -322,6 +328,128 @@ pub const HybridLayer = struct {
             o.* += f;
         }
     }
+
+    // ─── Forward híbrido residente en GPU (Path B) ──────────────────────────────
+    // Activa, mixer, residual, FFN y normas viven íntegramente en device; solo hay
+    // UNA sincronización de stream por token (en el llamador). Para capas de atención
+    // el mixer se calcula en host con transferencias diminutas (6 capas).
+    pub const HybridGpu = struct {
+    g_norm: cublas.GpuTensor(f32),
+    g_mixer: cublas.GpuTensor(f32),
+    g_post: cublas.GpuTensor(f32),
+    g_gate: cublas.GpuTensor(f32),
+    g_up: cublas.GpuTensor(f32),
+    g_ffn: cublas.GpuTensor(f32),
+    g_attn_norm: cublas.GpuBuffer(f32),
+    g_attn_post_norm: cublas.GpuBuffer(f32),
+    // Host fallback para capas de atención.
+    h_x: []f32,
+    h_out: []f32,
+    cap_n: usize,
+
+    fn alloc(p: HybridLayerParams) !HybridGpu {
+        const g_attn_norm = try cublas.GpuBuffer(f32).alloc(p.n_embd);
+        const g_attn_post_norm = try cublas.GpuBuffer(f32).alloc(p.n_embd);
+        return .{
+            .g_norm = try cublas.GpuTensor(f32).alloc(p.n_embd),
+            .g_mixer = try cublas.GpuTensor(f32).alloc(p.n_embd),
+            .g_post = try cublas.GpuTensor(f32).alloc(p.n_embd),
+            .g_gate = try cublas.GpuTensor(f32).alloc(p.intermediate_dim),
+            .g_up = try cublas.GpuTensor(f32).alloc(p.intermediate_dim),
+            .g_ffn = try cublas.GpuTensor(f32).alloc(p.n_embd),
+            .g_attn_norm = g_attn_norm,
+            .g_attn_post_norm = g_attn_post_norm,
+            .h_x = try std.heap.page_allocator.alloc(f32, p.n_embd),
+            .h_out = try std.heap.page_allocator.alloc(f32, p.n_embd),
+            .cap_n = 1,
+        };
+    }
+
+    fn deinit(self: *HybridGpu) void {
+        self.g_norm.deinit();
+        self.g_mixer.deinit();
+        self.g_post.deinit();
+        self.g_gate.deinit();
+        self.g_up.deinit();
+        self.g_ffn.deinit();
+        self.g_attn_norm.free();
+        self.g_attn_post_norm.free();
+        std.heap.page_allocator.free(self.h_x);
+        std.heap.page_allocator.free(self.h_out);
+    }
+};
+
+/// Copia el estado recurrente del prefill CPU al GPU para capas SSM.
+pub fn seedGpuFromHost(self: *HybridLayer) !void {
+    if (self.ssm_layer) |*l| try SsmLayer.seedGpuFromHost(l);
+}
+
+pub fn ensureGpu(self: *HybridLayer) !void {
+    if (self.gpu != null) return;
+    var g = try HybridGpu.alloc(self.params);
+    try g.g_attn_norm.upload(self.attn_norm.data);
+    try g.g_attn_post_norm.upload(self.attn_post_norm.data);
+    self.gpu = g;
+}
+
+pub fn forwardGPU(
+    self: *HybridLayer,
+    lk: *layer_kernels.LayerKernels,
+    x: cublas.GpuTensor(f32),
+    out: *cublas.GpuTensor(f32),
+    start_pos: usize,
+    n: usize,
+) !void {
+    const p = self.params;
+    try HybridLayer.ensureGpu(self);
+    const g = &self.gpu.?;
+
+    try lk.rmsNorm(x.ptr(), @intFromPtr(g.g_attn_norm.dev_ptr), g.g_norm.ptr(), n, p.n_embd, p.rms_eps);
+
+    if (self.is_attention) {
+        // Fallback host: D2H de x, forward CPU, H2D del mixer.
+        if (g.cap_n < n) {
+            std.heap.page_allocator.free(g.h_x);
+            std.heap.page_allocator.free(g.h_out);
+            g.h_x = try std.heap.page_allocator.alloc(f32, n * p.n_embd);
+            g.h_out = try std.heap.page_allocator.alloc(f32, n * p.n_embd);
+            g.cap_n = n;
+        }
+        try cudaz.cuMemcpyDtoH(@intFromPtr(g.h_x.ptr), g.g_norm.ptr(), n * p.n_embd * @sizeOf(f32));
+        try cudaz.cuStreamSynchronize(lk.stream);
+        var hx_shape = [_]usize{ n, p.n_embd };
+        var hx_strides = [_]usize{ p.n_embd, 1 };
+        var hout_shape = [_]usize{ n, p.n_embd };
+        var hout_strides = [_]usize{ p.n_embd, 1 };
+        const hx = Tensor(f32){ .data = g.h_x, .shape = &hx_shape, .strides = &hx_strides, .offset = 0, .allocator = null, .owns_data = false };
+        var hout = Tensor(f32){ .data = g.h_out, .shape = &hout_shape, .strides = &hout_strides, .offset = 0, .allocator = null, .owns_data = false };
+        if (self.attn_layer) |*l| try l.forward(hx, &hout, start_pos, n);
+        try cudaz.cuMemcpyHtoD(out.ptr(), @intFromPtr(g.h_out.ptr), n * p.n_embd * @sizeOf(f32));
+        // out = x + mixer (en GPU)
+        try lk.add(x.ptr(), out.ptr(), out.ptr(), n * p.n_embd);
+    } else {
+        if (self.ssm_layer) |*l| try SsmLayer.forwardGPU(l, lk, g.g_norm, &g.g_mixer, n);
+        try lk.add(x.ptr(), g.g_mixer.ptr(), out.ptr(), n * p.n_embd);
+    }
+
+    try lk.rmsNorm(out.ptr(), @intFromPtr(g.g_attn_post_norm.dev_ptr), g.g_post.ptr(), n, p.n_embd, p.rms_eps);
+
+    var w_gate_shape = [_]usize{ p.intermediate_dim, p.n_embd };
+    var w_gate_strides = [_]usize{ p.n_embd, 1 };
+    const w_gate32 = Tensor(f32){ .data = self.scratch_gate, .shape = &w_gate_shape, .strides = &w_gate_strides, .offset = 0, .allocator = null, .owns_data = false };
+    var w_up_shape = [_]usize{ p.intermediate_dim, p.n_embd };
+    var w_up_strides = [_]usize{ p.n_embd, 1 };
+    const w_up32 = Tensor(f32){ .data = self.scratch_up, .shape = &w_up_shape, .strides = &w_up_strides, .offset = 0, .allocator = null, .owns_data = false };
+    var w_down_shape = [_]usize{ p.n_embd, p.intermediate_dim };
+    var w_down_strides = [_]usize{ p.intermediate_dim, 1 };
+    const w_down32 = Tensor(f32){ .data = self.scratch_down, .shape = &w_down_shape, .strides = &w_down_strides, .offset = 0, .allocator = null, .owns_data = false };
+
+    try self.matmul_engine.linearProjectionDevice(g.g_post, w_gate32, &g.g_gate, n, p.n_embd, p.intermediate_dim);
+    try self.matmul_engine.linearProjectionDevice(g.g_post, w_up32, &g.g_up, n, p.n_embd, p.intermediate_dim);
+    try lk.swiglu(g.g_gate.ptr(), g.g_up.ptr(), n * p.intermediate_dim);
+    try self.matmul_engine.linearProjectionDevice(g.g_gate, w_down32, &g.g_ffn, n, p.intermediate_dim, p.n_embd);
+    try lk.addInplace(out.ptr(), g.g_ffn.ptr(), n * p.n_embd);
+}
 };
 
 fn loadQuantWeight(g: *const gguf.GgufFile, prefix: []const u8, name: []const u8) !QuantWeight {

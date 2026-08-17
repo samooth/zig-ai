@@ -18,6 +18,8 @@ const gguf_model = @import("gguf_model");
 const gguf_tokenizer = @import("gguf_tokenizer");
 const bpe = @import("tokenizer");
 const cudaz = @import("cudaz");
+const cublas = @import("cublas");
+const layer_kernels = @import("layer_kernels");
 const embedding = @import("embedding");
 const hybrid_layer = @import("transformer");
 const norm = @import("norm");
@@ -100,7 +102,13 @@ pub fn main(init: std.process.Init) !void {
         if (backend == .cublas) {
             try @import("cudaz").ensureContext();
         }
-        try runInference(io, allocator, path, params, backend, stdout);
+        runInference(io, allocator, path, params, backend, stdout) catch |err| {
+            if (@errorReturnTrace()) |trace| {
+                std.debug.print("TRACE: {s}\n", .{@errorName(err)});
+                std.debug.dumpStackTrace(trace);
+            }
+            return err;
+        };
         return;
     }
 
@@ -577,6 +585,9 @@ fn runHybridInference(
     }
     const prefill_ns = t_prefill.read();
 
+    // Sembrar el estado recurrente SSM en GPU a partir del prefill CPU.
+    for (layers) |*layer| try hybrid_layer.HybridLayer.seedGpuFromHost(layer);
+
     // LM head sobre el último token del prefill (con output_norm final)
     var last_shape = [_]usize{ 1, n_embd };
     var last_strides = [_]usize{ n_embd, 1 };
@@ -616,6 +627,23 @@ fn runHybridInference(
 
      var current_pos: usize = seq_len;
      const t_gen = @import("time").Timer.start();
+
+     // Activaciones residentes en GPU (Path B): un solo H2D (embedding) y un
+     // solo D2H (norma final) por token; todo lo demás queda en device.
+     var lk = try layer_kernels.LayerKernels.init(@ptrCast((try matmul.MatmulEngine.sharedCudaStream()).raw));
+     defer lk.deinit();
+     var g_cur = try cublas.GpuTensor(f32).alloc(n_embd);
+     defer g_cur.deinit();
+     var g_nxt = try cublas.GpuTensor(f32).alloc(n_embd);
+     defer g_nxt.deinit();
+     var g_normed = try cublas.GpuTensor(f32).alloc(n_embd);
+     defer g_normed.deinit();
+     var g_logits = try cublas.GpuTensor(f32).alloc(vocab);
+     defer g_logits.deinit();
+     var g_out_norm = try cublas.GpuBuffer(f32).alloc(n_embd);
+     defer g_out_norm.free();
+     try g_out_norm.upload(out_norm.data);
+
      for (0..params.max_new_tokens) |_| {
          const last = gen_tokens.items[gen_tokens.items.len - 1];
 
@@ -636,32 +664,27 @@ fn runHybridInference(
 
         var ca = try Tensor(f32).alloc(allocator, &.{ 1, n_embd });
         defer ca.deinit();
-        var cb = try Tensor(f32).alloc(allocator, &.{ 1, n_embd });
-        defer cb.deinit();
         // La primera capa recibe el embedding del token actual (f16 → f32)
         for (ca.data, h2d.data) |*d, s| d.* = @as(f32, @floatCast(s));
-        var cur2 = &ca;
-        var nxt2 = &cb;
+
+        // Subir embedding a GPU (única H2D por token).
+        try cudaz.cuMemcpyHtoD(g_cur.ptr(), @intFromPtr(ca.data.ptr), n_embd * @sizeOf(f32));
+
+        var cur2gpu = g_cur;
+        var nxt2gpu = g_nxt;
         for (layers) |*layer| {
-            try layer.forward(cur2.*, nxt2, current_pos, 1);
-            const t2 = cur2;
-            cur2 = nxt2;
-            nxt2 = t2;
+            try hybrid_layer.HybridLayer.forwardGPU(layer, &lk, cur2gpu, &nxt2gpu, current_pos, 1);
+            const t2 = cur2gpu;
+            cur2gpu = nxt2gpu;
+            nxt2gpu = t2;
         }
 
-        var normed2 = try Tensor(f32).alloc(allocator, &.{ 1, n_embd });
-        defer normed2.deinit();
-        norm.rmsNorm(f32, f32, cur2.*, out_norm, rms_eps, &normed2);
-
-        var normed2_16 = try Tensor(f16).alloc(allocator, &.{ 1, n_embd });
-        defer normed2_16.deinit();
-        for (normed2.data, normed2_16.data) |s, *d| d.* = @floatCast(s);
-
-        var logits2 = try Tensor(f16).alloc(allocator, &.{ 1, vocab });
-        defer logits2.deinit();
-        try embedding.lmHeadForward(&engine, normed2_16, lm_head, &logits2);
-
-        for (logits2.data, 0..) |v, i| logits_f32[i] = @as(f32, @floatCast(v));
+        // Norma final en GPU, lm_head device→device (peso cacheado en GPU), y un
+        // único D2H de los logits para el sampleo.
+        try lk.rmsNorm(cur2gpu.ptr(), @intFromPtr(g_out_norm.dev_ptr), g_normed.ptr(), 1, n_embd, rms_eps);
+        try engine.linearProjectionDeviceF16(g_normed, lm_head, &g_logits, 1, n_embd, vocab);
+        try cudaz.cuStreamSynchronize(lk.stream);
+        try cudaz.cuMemcpyDtoH(@intFromPtr(logits_f32.ptr), g_logits.ptr(), vocab * @sizeOf(f32));
         if (std.c.getenv("DUMP_LOGITS") != null) {
             for (logits_f32, 0..) |v, i| std.debug.print("LG {d} {d}\n", .{ i, v });
         }

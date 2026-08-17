@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
     var cubin_output: ?std.Build.LazyPath = null;
     var dequant_ptx: ?std.Build.LazyPath = null;
     var paged_cubin: ?std.Build.LazyPath = null;
+    var layer_cubin: ?std.Build.LazyPath = null;
 
     if (has_cuda) {
         const nvcc_path = b.findProgram(&.{"nvcc"}, &.{cuda_bin_path}) catch unreachable;
@@ -73,6 +74,14 @@ pub fn build(b: *std.Build) void {
         });
         paged_cubin = compile_pa.addOutputFileArg("paged_attention_sm86.cubin");
         compile_pa.addFileArg(b.path("src/cuda/paged_attention.cu"));
+
+        const compile_layer = b.addSystemCommand(&.{
+            nvcc_path,
+            "-arch=compute_86", "-code=sm_86",
+            "-cubin", "-o",
+        });
+        layer_cubin = compile_layer.addOutputFileArg("layer_kernels_sm86.cubin");
+        compile_layer.addFileArg(b.path("src/cuda/layer_kernels.cu"));
     }
 
     // === Módulo core ===
@@ -88,6 +97,7 @@ pub fn build(b: *std.Build) void {
     var ptx_install: ?*std.Build.Step.InstallFile = null;
     if (dequant_ptx) |ptx| {
         ptx_install = b.addInstallFileWithDir(ptx, .{ .custom = "lib" }, "dequantize_kernels.ptx");
+        b.getInstallStep().dependOn(&ptx_install.?.step);
         dequant_options.addOption([]const u8, "dequant_ptx", b.getInstallPath(.{ .custom = "lib" }, "dequantize_kernels.ptx"));
     } else {
         dequant_options.addOption([]const u8, "dequant_ptx", "");
@@ -98,9 +108,20 @@ pub fn build(b: *std.Build) void {
     var paged_cubin_install: ?*std.Build.Step.InstallFile = null;
     if (paged_cubin) |cb| {
         paged_cubin_install = b.addInstallFileWithDir(cb, .{ .custom = "lib" }, "paged_attention_sm86.cubin");
+        b.getInstallStep().dependOn(&paged_cubin_install.?.step);
         paged_options.addOption([]const u8, "paged_cubin", b.getInstallPath(.{ .custom = "lib" }, "paged_attention_sm86.cubin"));
     } else {
         paged_options.addOption([]const u8, "paged_cubin", "");
+    }
+
+    // === Options: ruta al cubin de layer_kernels ===
+    const layer_options = b.addOptions();
+    if (layer_cubin) |cb| {
+        const layer_install = b.addInstallFileWithDir(cb, .{ .custom = "lib" }, "layer_kernels_sm86.cubin");
+        b.getInstallStep().dependOn(&layer_install.step);
+        layer_options.addOption([]const u8, "layer_cubin", b.getInstallPath(.{ .custom = "lib" }, "layer_kernels_sm86.cubin"));
+    } else {
+        layer_options.addOption([]const u8, "layer_cubin", "");
     }
 
     // === Módulo time ===
@@ -114,6 +135,22 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(bool, "has_cuda", has_cuda);
     options.addOption(bool, "has_openblas", has_openblas);
+
+    // === Módulo cudaz stub ===
+    const cudaz_mod = b.createModule(.{
+        .root_source_file = b.path("src/cuda/cudaz_stub.zig"),
+    });
+
+    // === Módulo cublas (host) ===
+    const cublas_mod = b.createModule(.{
+        .root_source_file = b.path("src/matmul/cublas.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cublas_mod.addImport("core", core_mod);
+    cublas_mod.addImport("cudaz", cudaz_mod);
+    cublas_mod.addImport("time", time_mod);
+
     const matmul_mod = b.createModule(.{
         .root_source_file = b.path("src/matmul/root.zig"),
         .target = target,
@@ -121,12 +158,9 @@ pub fn build(b: *std.Build) void {
     });
     matmul_mod.addImport("core", core_mod);
     matmul_mod.addImport("time", time_mod);
+    matmul_mod.addImport("cudaz", cudaz_mod);
+    matmul_mod.addImport("cublas", cublas_mod);
     matmul_mod.addOptions("build_options", options);
-
-    // === Módulo cudaz stub ===
-    const cudaz_mod = b.createModule(.{
-        .root_source_file = b.path("src/cuda/cudaz_stub.zig"),
-    });
 
     // === Módulo dequant GPU de tensores GGUF ===
     const gguf_dequant_mod = b.createModule(.{
@@ -240,6 +274,15 @@ pub fn build(b: *std.Build) void {
     });
     quant_weight_mod.addImport("gguf", gguf_mod);
 
+    // === Módulo layer_kernels (elementwise GPU para capa híbrida residente) ===
+    const layer_kernels_mod = b.createModule(.{
+        .root_source_file = b.path("src/cuda/layer_kernels.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    layer_kernels_mod.addImport("cudaz", cudaz_mod);
+    layer_kernels_mod.addOptions("build_options", layer_options);
+
     // === Módulo ssm ===
     const ssm_mod = b.createModule(.{
         .root_source_file = b.path("src/transformer/ssm.zig"),
@@ -248,6 +291,9 @@ pub fn build(b: *std.Build) void {
     });
     ssm_mod.addImport("core", core_mod);
     ssm_mod.addImport("matmul", matmul_mod);
+    ssm_mod.addImport("cublas", cublas_mod);
+    ssm_mod.addImport("cudaz", cudaz_mod);
+    ssm_mod.addImport("layer_kernels", layer_kernels_mod);
     ssm_mod.addImport("quant_weight", quant_weight_mod);
     ssm_mod.addImport("gguf", gguf_mod);
 
@@ -282,6 +328,9 @@ pub fn build(b: *std.Build) void {
     hybrid_layer_mod.addImport("model_config", model_config_mod);
     hybrid_layer_mod.addImport("hybrid_attn", hybrid_attn_mod);
     hybrid_layer_mod.addImport("ssm", ssm_mod);
+    hybrid_layer_mod.addImport("cublas", cublas_mod);
+    hybrid_layer_mod.addImport("cudaz", cudaz_mod);
+    hybrid_layer_mod.addImport("layer_kernels", layer_kernels_mod);
 
     // === Módulo gguf_tokenizer ===
     const gguf_tokenizer_mod = b.createModule(.{
@@ -389,6 +438,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("gguf_tokenizer", gguf_tokenizer_mod);
     exe_mod.addImport("pipeline", pipeline_mod);
     exe_mod.addImport("paged_attention", paged_attention_mod);
+    exe_mod.addImport("layer_kernels", layer_kernels_mod);
+    exe_mod.addImport("cublas", cublas_mod);
     exe_mod.addImport("time", time_mod);
 
     if (ptx_output) |ptx| {
