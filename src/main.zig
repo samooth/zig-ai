@@ -27,6 +27,7 @@ const norm = @import("norm");
 const paged_attn = @import("paged_attention");
 const decode_graph = @import("decode_graph");
 const layer_streamer = @import("layer_streamer");
+const vram_budget = @import("vram_budget");
 const debugz = @import("debug");
 
 /// Parámetros de runtime parseados de la línea de comandos.
@@ -714,14 +715,22 @@ fn runHybridInference(
 
     // LayerStreamer: async prefetch + LRU eviction (AirLLM-style)
     var streamer: ?layer_streamer.LayerStreamer = null;
+    var vram: ?vram_budget.VramBudget = null;
     if (params.layer_stream) {
+        const total_vram = if (backend == .cublas) cudaz.getDeviceTotalMem(cudaz.cuDeviceGet(0) catch return) catch 0 else 0;
+        var vb = vram_budget.VramBudget.init(total_vram);
+        if (debugz.dbg.at(.info)) vb.reportMetrics();
+        vram = vb;
+
+        // Adjust max_resident based on VRAM budget
+        const max_res = params.layer_stream_max;
         var s = try layer_streamer.LayerStreamer.init(
             allocator, layers, &model.file, cfg,
-            params.layer_stream_max, 2,
+            max_res, 2,
         );
         if (debugz.dbg.at(.info)) s.enableDebug();
         streamer = s;
-        try stdout.print("[+] LayerStreamer activado: max_resident={d}\n", .{params.layer_stream_max});
+        try stdout.print("[+] LayerStreamer activado: max_resident={d} vram={d}MB\n", .{max_res, total_vram / (1024*1024)});
         try stdout.flush();
     } else {
         // Eager load: load all weights up front (original behavior)

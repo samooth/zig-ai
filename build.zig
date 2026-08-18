@@ -518,6 +518,7 @@ pub fn build(b: *std.Build) void {
     activation_pool_mod.addImport("debug", debug_mod);
     transformer_mod.addImport("activation_pool", activation_pool_mod);
     exe_mod.addImport("activation_pool", activation_pool_mod);
+    hybrid_layer_mod.addImport("activation_pool", activation_pool_mod);
 
     // === Módulo vram_budget (AirLLM VRAM budgeting) ===
     const vram_budget_mod = b.createModule(.{
@@ -527,6 +528,8 @@ pub fn build(b: *std.Build) void {
     });
     vram_budget_mod.addImport("debug", debug_mod);
     transformer_mod.addImport("vram_budget", vram_budget_mod);
+    exe_mod.addImport("vram_budget", vram_budget_mod);
+    hybrid_layer_mod.addImport("vram_budget", vram_budget_mod);
     exe_mod.addImport("vram_budget", vram_budget_mod);
 
     exe_mod.addImport("cublas", cublas_mod);

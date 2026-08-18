@@ -17,6 +17,7 @@ const AttentionLayer = @import("hybrid_attn").AttentionLayer;
 const SsmLayer = @import("ssm").SsmLayer;
 const paged = @import("paged_attention");
 const debugz = @import("debug");
+const activation_pool = @import("activation_pool");
 
 pub const HybridLayerError = error{
     WeightFileNotFound,
@@ -109,6 +110,9 @@ pub const HybridLayer = struct {
     // Buffers GPU para el forward residente (Path B).
     gpu: ?HybridGpu = null,
 
+    // Activation pool (CPU path): reutiliza buffers de activaciones intermedias
+    act_pool: activation_pool.ActivationPool = undefined,
+
     const Self = @This();
 
     pub fn init(
@@ -155,6 +159,7 @@ pub const HybridLayer = struct {
             .paged_kv = paged_kv,
             .block_table = block_table,
             .paged_gpu = paged_gpu,
+            .act_pool = activation_pool.ActivationPool.init(allocator, 256 * 1024 * 1024),
         };
 
         if (is_attention) {
@@ -203,6 +208,7 @@ pub const HybridLayer = struct {
         self.allocator.free(self.scratch_down);
         self.attn_norm.deinit();
         self.attn_post_norm.deinit();
+        self.act_pool.deinit();
         if (self.attn_layer) |*l| l.deinit();
         if (self.ssm_layer) |*l| l.deinit();
     }
@@ -277,14 +283,21 @@ pub const HybridLayer = struct {
         const p = self.params;
         const N = n;
 
-        // === 1. Pre-Attention/SSM RMSNorm ===
-        var norm_buf = try Tensor(f32).alloc(self.allocator, &.{ N, p.n_embd });
-        defer norm_buf.deinit();
+        // === 1. Pre-Attention/SSM RMSNorm (pool: reuse [N, n_embd] buffer) ===
+        const buf_numel = N * p.n_embd;
+        const norm_buf_data = try self.act_pool.alloc(buf_numel);
+        defer self.act_pool.release(norm_buf_data);
+        var norm_buf_shape = [_]usize{ N, p.n_embd };
+        var norm_buf_strides = [_]usize{ p.n_embd, 1 };
+        var norm_buf = Tensor(f32){ .data = norm_buf_data, .shape = &norm_buf_shape, .strides = &norm_buf_strides, .offset = 0, .allocator = null, .owns_data = false };
         norm.rmsNorm(f32, f32, x, self.attn_norm, p.rms_eps, &norm_buf);
 
-        // === 2. SSM o Attention ===
-        var mixer_out = try Tensor(f32).alloc(self.allocator, &.{ N, p.n_embd });
-        defer mixer_out.deinit();
+        // === 2. SSM o Attention (pool: reuse [N, n_embd]) ===
+        const mixer_data = try self.act_pool.alloc(buf_numel);
+        defer self.act_pool.release(mixer_data);
+        var mixer_shape = [_]usize{ N, p.n_embd };
+        var mixer_strides = [_]usize{ p.n_embd, 1 };
+        var mixer_out = Tensor(f32){ .data = mixer_data, .shape = &mixer_shape, .strides = &mixer_strides, .offset = 0, .allocator = null, .owns_data = false };
 
         if (self.is_attention) {
             if (self.attn_layer) |*l| {
@@ -301,9 +314,12 @@ pub const HybridLayer = struct {
             o.* = m + xv;
         }
 
-        // === 4. Post-Attention/SSM RMSNorm ===
-        var post_norm_buf = try Tensor(f32).alloc(self.allocator, &.{ N, p.n_embd });
-        defer post_norm_buf.deinit();
+        // === 4. Post-Attention/SSM RMSNorm (pool: reuse [N, n_embd]) ===
+        const post_norm_data = try self.act_pool.alloc(buf_numel);
+        defer self.act_pool.release(post_norm_data);
+        var post_norm_shape = [_]usize{ N, p.n_embd };
+        var post_norm_strides = [_]usize{ p.n_embd, 1 };
+        var post_norm_buf = Tensor(f32){ .data = post_norm_data, .shape = &post_norm_shape, .strides = &post_norm_strides, .offset = 0, .allocator = null, .owns_data = false };
         norm.rmsNorm(f32, f32, out.*, self.attn_post_norm, p.rms_eps, &post_norm_buf);
 
         // === 5. FFN SwiGLU ===
@@ -340,12 +356,25 @@ pub const HybridLayer = struct {
             .owns_data = false,
         };
 
-        var gate_buf = try Tensor(f32).alloc(self.allocator, &.{ N, p.intermediate_dim });
-        defer gate_buf.deinit();
-        var up_buf = try Tensor(f32).alloc(self.allocator, &.{ N, p.intermediate_dim });
-        defer up_buf.deinit();
-        var ffn_out = try Tensor(f32).alloc(self.allocator, &.{ N, p.n_embd });
-        defer ffn_out.deinit();
+        // Pool: reuse [N, intermediate_dim] buffers for gate/up/ffn_out
+        const ff_in_numel = N * p.intermediate_dim;
+        const gate_data = try self.act_pool.alloc(ff_in_numel);
+        defer self.act_pool.release(gate_data);
+        var gate_shape = [_]usize{ N, p.intermediate_dim };
+        var gate_strides = [_]usize{ p.intermediate_dim, 1 };
+        var gate_buf = Tensor(f32){ .data = gate_data, .shape = &gate_shape, .strides = &gate_strides, .offset = 0, .allocator = null, .owns_data = false };
+
+        const up_data = try self.act_pool.alloc(ff_in_numel);
+        defer self.act_pool.release(up_data);
+        var up_shape = [_]usize{ N, p.intermediate_dim };
+        var up_strides = [_]usize{ p.intermediate_dim, 1 };
+        var up_buf = Tensor(f32){ .data = up_data, .shape = &up_shape, .strides = &up_strides, .offset = 0, .allocator = null, .owns_data = false };
+
+        const ffn_out_data = try self.act_pool.alloc(buf_numel);
+        defer self.act_pool.release(ffn_out_data);
+        var ffn_shape = [_]usize{ N, p.n_embd };
+        var ffn_strides = [_]usize{ p.n_embd, 1 };
+        var ffn_out = Tensor(f32){ .data = ffn_out_data, .shape = &ffn_shape, .strides = &ffn_strides, .offset = 0, .allocator = null, .owns_data = false };
 
         const post_norm_2d = try post_norm_buf.reshape(&[_]usize{ N, p.n_embd });
         defer { if (post_norm_2d.allocator) |a| { a.free(post_norm_2d.shape); a.free(post_norm_2d.strides); } }

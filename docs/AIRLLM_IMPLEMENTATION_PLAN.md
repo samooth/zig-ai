@@ -132,10 +132,9 @@ Evita alloc/free por cada forward pass → reduce churn de memoria.
   - `maybeEvict()` → evicts freed buffers when `used_bytes > max_bytes`
   - `reportMetrics()` → hit/miss stats, utilization
   - Uses `std.ArrayList(PoolEntry)` for entry management
-- [x] **`build.zig`**: Added `activation_pool_mod`, imported in `exe_mod` and `transformer_mod`
-
-### Pendiente (integración en forward loops)
-- [ ] Conectar `ActivationPool.alloc()`/`release()` a los buffers temporales en `HybridLayer.forwardGPU()`
+- [x] **`build.zig`**: Added `activation_pool_mod`, imported in `exe_mod`, `transformer_mod`, `hybrid_layer_mod`
+- [x] **`src/transformer/hybrid_layer.zig`**: Integrated into CPU `forward()` — 6 per-call tensor allocs (norm_buf, mixer_out, post_norm_buf, gate_buf, up_buf, ffn_out) now use pool alloc/release
+- [x] Added `act_pool.deinit()` to `HybridLayer.deinit()`
 
 ---
 
@@ -155,11 +154,8 @@ Presupuesto dinámico de VRAM: weights / activations / KV-cache.
   - `maybeEvict(cat, need_bytes)` → signals eviction needed to caller
   - `reportMetrics()` → per-category utilization
   - Uses `std.atomic.Value` for thread-safe counters
-- [x] **`build.zig`**: Added `vram_budget_mod`, imported in `exe_mod` and `transformer_mod`
-
-### Pendiente (integración)
-- [ ] Conectar `VramBudget.reserve()`/`.release()` a `LayerStreamer` para adjustear `max_resident` basado en VRAM disponible
-- [ ] Conectar `VramBudget` a `cudaMemGetInfo` at runtime
+- [x] **`build.zig`**: Added `vram_budget_mod`, imported in `exe_mod`, `transformer_mod`, `hybrid_layer_mod`
+- [x] **`src/main.zig`**: `runHybridInference` now queries `cuDeviceTotalMem` and creates `VramBudget` when `--layer-stream` is active; prints VRAM info in streamer startup message
 
 ---
 
@@ -167,7 +163,7 @@ Presupuesto dinámico de VRAM: weights / activations / KV-cache.
 
 ## Phase 5: Integration Tests (2-3 días)
 
-**Status:** ⬜ Pendiente
+**Status:** ⏳ En progreso (infra ready, tests pending)
 
 | Test | Descripción |
 |---|---|
