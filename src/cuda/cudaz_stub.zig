@@ -424,7 +424,13 @@ pub fn cuLaunchKernel(
 ) !void {
     const res = cudalib.cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ,
         blockDimX, blockDimY, blockDimZ, sharedMemBytes, hStream, kernelParams, extra);
-    if (res != .SUCCESS) return error.CudaError;
+    if (res != .SUCCESS) {
+        var err_str: [256]u8 = undefined;
+        const err_ptr: *[*:0]const u8 = @ptrCast(@alignCast(&err_str));
+        _ = cudalib.cuGetErrorString(res, err_ptr);
+        std.debug.print("cuLaunchKernel failed: {d} ({s})\n", .{res, &err_str});
+        return error.CudaError;
+    }
 }
 
 pub fn cuFuncSetAttribute(hfunc: CUfunction, attrib: c_int, value: i64) !void {

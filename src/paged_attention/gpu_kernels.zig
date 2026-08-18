@@ -6,6 +6,7 @@
 //! bloque físico), el mismo que lee `PagedAttention.decode`.
 const std = @import("std");
 const cudaz = @import("cudaz");
+const debug = @import("debug");
 const build_options = @import("build_options");
 const BlockTable = @import("block_table.zig").BlockTable;
 const BlockAllocator = @import("allocator.zig").BlockAllocator;
@@ -98,8 +99,13 @@ pub const GpuBlockPool = struct {
     }
 
     pub fn stageTable(self: *Self, block_alloc: *BlockAllocator, block_table: *const BlockTable) !void {
+        debug.dbg.printLevel(.detail, "GpuBlockPool: stageTable numBlocks={}\n", .{block_table.numBlocks()});
         for (0..block_table.numBlocks()) |i| {
-            if (block_table.getPhysical(i)) |phys| try self.stageBlock(block_alloc, phys);
+            if (block_table.getPhysical(i)) |phys| {
+                debug.dbg.printLevel(.detail, "GpuBlockPool: staging block {} -> phys {}\n", .{i, phys});
+                try self.stageBlock(block_alloc, phys);
+                debug.dbg.printLevel(.detail, "GpuBlockPool: staged block {} -> phys {}\n", .{i, phys});
+            }
         }
     }
 
@@ -320,11 +326,17 @@ pub const PagedAttentionGpu = struct {
     }
 
     fn stageBlocks(self: *Self, block_alloc: *BlockAllocator, block_table: *const BlockTable) !void {
+        debug.dbg.printLevel(.detail, "gpu_kernels: stageBlocks called\n", .{});
         try self.ensurePool(block_alloc);
+        debug.dbg.printLevel(.detail, "gpu_kernels: ensurePool done\n", .{});
         if (self.paged_pool) |*pp| {
+            debug.dbg.printLevel(.detail, "gpu_kernels: using paged_pool\n", .{});
             try pp.stageTable(block_alloc, block_table);
+            debug.dbg.printLevel(.detail, "gpu_kernels: paged_pool.stageTable done\n", .{});
         } else {
+            debug.dbg.printLevel(.detail, "gpu_kernels: using pool\n", .{});
             try self.pool.?.stageTable(block_alloc, block_table);
+            debug.dbg.printLevel(.detail, "gpu_kernels: pool.stageTable done\n", .{});
         }
     }
 
@@ -391,21 +403,35 @@ pub const PagedAttentionGpu = struct {
         for (0..max_num_blocks) |i| {
             bt_host[i] = if (block_table.getPhysical(i)) |phys| @intCast(phys) else -1;
         }
-
-        // Subir solo los bloques referenciados por la block table.
+// Subir solo los bloques referenciados por la block table.
+        debug.dbg.printLevel(.detail, "decode: calling stageBlocks\n", .{});
         try self.stageBlocks(block_alloc, block_table);
+        debug.dbg.printLevel(.detail, "decode: stageBlocks done\n", .{});
 
+        debug.dbg.printLevel(.detail, "decode: ensureDecodeBuffers\n", .{});
         try self.ensureDecodeBuffers(q_stride);
+        debug.dbg.printLevel(.detail, "decode: ensureDecodeBuffers done\n", .{});
+
+        debug.dbg.printLevel(.detail, "decode: ensureLayerDecodeScratch\n", .{});
         try self.ensureLayerDecodeScratch(0, max_num_blocks);
+        debug.dbg.printLevel(.detail, "decode: ensureLayerDecodeScratch done\n", .{});
         var d_bt = self.d_bts.items[0];
 
         var seq_len_c: c_int = @intCast(seq_len);
 
+        debug.dbg.printLevel(.detail, "decode: cuMemcpyHtoD q16\n", .{});
         try cudaz.cuMemcpyHtoD(self.d_q16, @intFromPtr(q_f16.ptr), q_stride * @sizeOf(f16));
+        debug.dbg.printLevel(.detail, "decode: cuMemcpyHtoD q16 done\n", .{});
+        debug.dbg.printLevel(.detail, "decode: cuMemcpyHtoD d_bt\n", .{});
         try cudaz.cuMemcpyHtoD(d_bt, @intFromPtr(bt_host.ptr), max_num_blocks * @sizeOf(c_int));
+        debug.dbg.printLevel(.detail, "decode: cuMemcpyHtoD d_bt done\n", .{});
+        debug.dbg.printLevel(.detail, "decode: cuMemcpyHtoD seq_lens\n", .{});
         try cudaz.cuMemcpyHtoD(self.d_seq_lens, @intFromPtr(&seq_len_c), @sizeOf(c_int));
+        debug.dbg.printLevel(.detail, "decode: cuMemcpyHtoD seq_lens done\n", .{});
 
         const func = cudaz.cuModuleGetFunction(self.module, "paged_attention_decode_f16_kernel") catch return error.KernelNotFound;
+
+        debug.dbg.printLevel(.detail, "decode: kernel found, preparing launch\n", .{});
 
         // Scalar params: kernel recibe int por valor; el driver los lee del host.
         var num_seqs_c: c_int = 1;
@@ -423,12 +449,18 @@ pub const PagedAttentionGpu = struct {
             &num_kv_c,   &head_dim_c, &block_size_c,
         };
         const shared_bytes: c_uint = @intCast(2 * head_dim * @sizeOf(f32));
+        debug.dbg.printLevel(.detail, "decode: cuLaunchKernel grid=(1,{},1) block=(32,1,1) shared={}\n", .{num_q_heads, shared_bytes});
         try cudaz.cuLaunchKernel(func, 1, @intCast(num_q_heads), 1, 32, 1, 1, shared_bytes, self.stream, @ptrCast(&kp), null);
+        debug.dbg.printLevel(.detail, "decode: cuLaunchKernel done\n", .{});
+        debug.dbg.printLevel(.detail, "decode: cuStreamSynchronize\n", .{});
         try cudaz.cuStreamSynchronize(self.stream);
+        debug.dbg.printLevel(.detail, "decode: cuStreamSynchronize done\n", .{});
 
         const out_f16 = try self.allocator.alloc(f16, q_stride);
         defer self.allocator.free(out_f16);
+        debug.dbg.printLevel(.detail, "decode: cuMemcpyDtoH\n", .{});
         try cudaz.cuMemcpyDtoH(@intFromPtr(out_f16.ptr), self.d_out16, q_stride * @sizeOf(f16));
+        debug.dbg.printLevel(.detail, "decode: cuMemcpyDtoH done\n", .{});
 
         for (out_f16, 0..) |v, i| out[i] = @floatCast(v);
     }

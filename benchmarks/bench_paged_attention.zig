@@ -6,6 +6,7 @@
 const std = @import("std");
 const pa = @import("paged_attention");
 const cudaz = @import("cudaz");
+const debug = @import("debug");
 
 /// Config sintética de decode (head_dim=128, 32Q/8KV, f16).
 fn benchConfig(num_blocks: usize, max_batch: usize) pa.PagedConfig {
@@ -17,8 +18,8 @@ fn benchConfig(num_blocks: usize, max_batch: usize) pa.PagedConfig {
         .num_q_heads = 32,
         .dtype = .f16,
         .enable_prefix_cache = true,
-        .enable_cpu_offload = true,
-        .max_seq_len = 8192,
+        .enable_cpu_offload = false,
+        .max_seq_len = 2048,
         .max_batch_size = max_batch,
     };
 }
@@ -48,15 +49,28 @@ fn randomQueries(allocator: std.mem.Allocator, n: usize, stride: usize, seed: u6
 
 /// Latencia decode (ms/token) y throughput (tok/s) de un batch.
 fn benchDecodeBatch(allocator: std.mem.Allocator, batch: usize, seq_len: usize, iters: usize) !struct { cpu_ms: f64, cpu_toks: f64, gpu_ms: f64, gpu_toks: f64 } {
-    const config = benchConfig(4096, batch);
+    const config = benchConfig(1024, batch);
+    debug.dbg.printLevel(.info, "benchDecodeBatch: creating KV cache with {} blocks\n", .{config.num_blocks});
     var kv = try pa.PagedKVCache.init(allocator, config);
     defer kv.deinit();
+    debug.dbg.printLevel(.info, "benchDecodeBatch: KV cache created\n", .{});
 
     const attn = pa.PagedAttention.init(allocator, config);
     var engine: ?pa.PagedAttentionGpu = null;
+    var gpu_stream: cudaz.CUstream = undefined;
+    var has_cuda = false;
     defer if (engine) |*e| e.deinit();
+    defer if (has_cuda) cudaz.cuStreamDestroy(gpu_stream);
     if (cudaz.isCudaAvailable()) {
-        engine = try pa.PagedAttentionGpu.init(allocator, config, try cudaz.cuStreamCreate(0));
+        debug.dbg.printLevel(.info, "benchDecodeBatch: CUDA available, ensuring context\n", .{});
+        try cudaz.ensureContext();
+        debug.dbg.printLevel(.info, "benchDecodeBatch: context ensured, creating stream\n", .{});
+        gpu_stream = try cudaz.cuStreamCreate(0);
+        debug.dbg.printLevel(.info, "benchDecodeBatch: stream created: {}\n", .{gpu_stream});
+        has_cuda = true;
+        debug.dbg.printLevel(.info, "benchDecodeBatch: initializing PagedAttentionGpu\n", .{});
+        engine = try pa.PagedAttentionGpu.init(allocator, config, gpu_stream);
+        debug.dbg.printLevel(.info, "benchDecodeBatch: PagedAttentionGpu initialized successfully\n", .{});
     }
 
     var seq_ids: [64]u64 = undefined;
@@ -75,21 +89,23 @@ fn benchDecodeBatch(allocator: std.mem.Allocator, batch: usize, seq_len: usize, 
     const outs = try allocator.alloc(f32, batch * q_stride);
     defer allocator.free(outs);
 
-    // warmup
-    try attn.decodeBatch(queries, outs, bts[0..batch], kv.block_alloc);
-
     var t = @import("time").Timer.start();
+    debug.dbg.printLevel(.info, "benchDecodeBatch: running CPU benchmark loop ({} iters)\n", .{iters});
     for (0..iters) |_| try attn.decodeBatch(queries, outs, bts[0..batch], kv.block_alloc);
     const cpu_ns = t.read();
+    debug.dbg.printLevel(.info, "benchDecodeBatch: CPU loop done\n", .{});
     const cpu_ms = @as(f64, @floatFromInt(@divTrunc(cpu_ns, std.time.ns_per_ms))) / @as(f64, @floatFromInt(iters));
     const cpu_toks = @as(f64, @floatFromInt(batch)) / (cpu_ms / 1000.0);
 
     var gpu_ms: f64 = 0;
     var gpu_toks: f64 = 0;
     if (engine) |*e| {
+        debug.dbg.printLevel(.info, "benchDecodeBatch: running GPU benchmark loop ({} iters)\n", .{iters});
         var tg = @import("time").Timer.start();
         for (0..iters) |it| {
+            debug.dbg.printLevel(.detail, "benchDecodeBatch: GPU iter {}\n", .{it});
             for (0..batch) |b| {
+                debug.dbg.printLevel(.detail, "benchDecodeBatch: GPU iter {} batch {}\n", .{it, b});
                 try e.decode(
                     queries[b * q_stride ..][0..q_stride],
                     outs[b * q_stride ..][0..q_stride],
@@ -97,8 +113,8 @@ fn benchDecodeBatch(allocator: std.mem.Allocator, batch: usize, seq_len: usize, 
                     kv.block_alloc,
                 );
             }
-            _ = it;
         }
+        debug.dbg.printLevel(.info, "benchDecodeBatch: GPU loop done\n", .{});
         const gpu_ns = tg.read();
         gpu_ms = @as(f64, @floatFromInt(@divTrunc(gpu_ns, std.time.ns_per_ms))) / @as(f64, @floatFromInt(iters));
         gpu_toks = @as(f64, @floatFromInt(batch)) / (gpu_ms / 1000.0);
@@ -108,6 +124,7 @@ fn benchDecodeBatch(allocator: std.mem.Allocator, batch: usize, seq_len: usize, 
 }
 
 pub fn main(init: std.process.Init) !void {
+    debug.init();
     const io = init.io;
     const allocator = init.gpa;
 
@@ -121,7 +138,8 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("=================================================\n", .{});
     try stdout.print("\n", .{});
 
-    const config = benchConfig(4096, 16);
+    debug.dbg.printLevel(.info, "main: starting benchmark\n", .{});
+    const config = benchConfig(512, 16);
     try stdout.print("Config: block_size={d}, head_dim={d}, {d}Q/{d}KV, f16, ctx={d}\n", .{
         config.block_size, config.head_dim, config.num_q_heads, config.num_kv_heads, config.max_seq_len,
     });
@@ -143,7 +161,7 @@ pub fn main(init: std.process.Init) !void {
     // 2. Memoria VRAM / host vs num_blocks
     try stdout.print("\n--- Memoria KV-cache (f16) vs num_blocks ---\n", .{});
     const bytes_per_block = config.block_size * config.num_kv_heads * config.head_dim * 2 * 2;
-    const num_blocks_vals = &[_]usize{ 1024, 4096, 16384, 65536 };
+    const num_blocks_vals = &[_]usize{ 256, 512, 1024, 2048 };
     for (num_blocks_vals) |nb| {
         const mem = nb * bytes_per_block;
         try stdout.print("num_blocks={d:>6}  {d:8.1} MB total  ({d} B/bloque)\n", .{ nb, @as(f64, @floatFromInt(mem)) / (1024.0 * 1024.0), bytes_per_block });
@@ -164,7 +182,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn benchPrefixHitRate(allocator: std.mem.Allocator, stdout: anytype) !void {
-    const config = benchConfig(4096, 16);
+    const config = benchConfig(512, 16);
     var kv = try pa.PagedKVCache.init(allocator, config);
     defer kv.deinit();
 
@@ -209,8 +227,8 @@ fn benchPrefixHitRate(allocator: std.mem.Allocator, stdout: anytype) !void {
 }
 
 fn benchCpuOffload(allocator: std.mem.Allocator, stdout: anytype) !void {
-    const config = benchConfig(4096, 16);
-    const num_blocks = 256;
+    const config = benchConfig(512, 16);
+    const num_blocks = 512;
     var ba = try pa.BlockAllocator.init(
         allocator, num_blocks, config.block_size,
         config.num_kv_heads, config.head_dim, .f16, true,

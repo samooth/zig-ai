@@ -421,6 +421,7 @@ pub fn build(b: *std.Build) void {
     });
     paged_attention_mod.addImport("cudaz", cudaz_mod);
     paged_attention_mod.addImport("kv_cache", kv_cache_mod);
+    paged_attention_mod.addImport("debug", debug_mod);
     paged_attention_mod.addOptions("build_options", paged_options);
 
     // hybrid_attn usa PagedKVCache para el KV-cache de atención
@@ -643,11 +644,12 @@ pub fn build(b: *std.Build) void {
     const bench_pa_mod = b.createModule(.{
         .root_source_file = b.path("benchmarks/bench_paged_attention.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = optimize,
     });
     bench_pa_mod.addImport("paged_attention", paged_attention_mod);
     bench_pa_mod.addImport("cudaz", cudaz_mod);
     bench_pa_mod.addImport("time", time_mod);
+    bench_pa_mod.addImport("debug", debug_mod);
     bench_pa_mod.link_libc = true;
     if (has_cuda) {
         bench_pa_mod.linkSystemLibrary("cuda", .{});

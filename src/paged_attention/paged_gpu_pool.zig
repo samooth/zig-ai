@@ -8,6 +8,7 @@
 //! para que el layout `phys * block_bytes` del kernel coincida con los
 //! mappings VMM. Si no encaja, usar `GpuBlockPool` contiguo.
 const std = @import("std");
+const debug = @import("debug");
 const cudaz = @import("cudaz");
 const BlockAllocator = @import("allocator.zig").BlockAllocator;
 const BlockTable = @import("block_table.zig").BlockTable;
@@ -96,6 +97,7 @@ pub const PagedGpuBlockPool = struct {
     }
 
     pub fn stageBlock(self: *Self, block_alloc: *BlockAllocator, phys_id: usize) !void {
+        debug.dbg.printLevel(.detail, "paged_gpu_pool: stageBlock phys_id={}\n", .{phys_id});
         if (phys_id >= self.num_blocks) return;
         if (self.resident[phys_id] and !self.dirty[phys_id]) return;
         if (!self.resident[phys_id]) {
@@ -117,7 +119,9 @@ pub const PagedGpuBlockPool = struct {
             self.resident[phys_id] = true;
         }
         const src = @intFromPtr(block_alloc.memory_pool.ptr) + phys_id * self.block_bytes;
+        debug.dbg.printLevel(.detail, "paged_gpu_pool: cuMemcpyHtoD phys_id={} src={} bytes={}\n", .{phys_id, src, self.block_bytes});
         try cudaz.cuMemcpyHtoD(self.blockAddr(phys_id), src, self.block_bytes);
+        debug.dbg.printLevel(.detail, "paged_gpu_pool: cuMemcpyHtoD done phys_id={}\n", .{phys_id});
         self.dirty[phys_id] = false;
     }
 
