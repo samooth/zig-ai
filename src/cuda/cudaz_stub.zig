@@ -28,7 +28,27 @@ pub const CUfunction = *opaque {};
 pub const CUstream = *opaque {};
 pub const CUdeviceptr = usize;
 pub const CUevent = *opaque {};
+pub const CUgraph = *opaque {};
+pub const CUgraphExec = *opaque {};
+pub const CUgraphNode = *opaque {};
+
+pub const CUgraphInstantiateParams = extern struct {
+    flags: u64,
+    hUploadStream: ?CUstream,
+    hErrNode_out: ?CUgraphNode,
+    result_out: c_int,
+};
+
 pub const CUmemGenericAllocationHandle = u64;
+
+pub const CUstreamCaptureMode = enum(c_int) {
+    THREAD_LOCAL = 0,
+    RELAXED = 1,
+    GLOBAL = 2,
+};
+
+pub const CUDA_GRAPH_INSTANTIATE_FLAG_DEFAULT: u64 = 0;
+pub const CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH: u64 = 0x00000001;
 
 pub const CUmemAllocationType = enum(c_int) {
     INVALID = 0,
@@ -198,6 +218,19 @@ pub fn cuMemAllocHost(bytes: usize) !*anyopaque {
 
 pub fn cuMemFreeHost(ptr: *anyopaque) void { _ = cudalib.cuMemFreeHost(ptr); }
 
+/// Aloca staging host PINNED (page-locked). Obligatorio para las fuentes de
+/// los cuMemcpyHtoDAsync que se capturan en CUDA graphs: una fuente pageable
+/// falla la captura ("operation failed due to a previous error during capture").
+pub fn pinnedAlloc(comptime T: type, n: usize) ![]T {
+    if (n == 0) return &.{};
+    const bytes = try cuMemAllocHost(n * @sizeOf(T));
+    return @as([*]T, @ptrCast(@alignCast(bytes)))[0..n];
+}
+
+pub fn pinnedFree(comptime T: type, buf: []T) void {
+    if (buf.len > 0) cuMemFreeHost(@ptrCast(buf.ptr));
+}
+
 pub fn cuMemAddressReserve(ptr: *CUdeviceptr, size: usize, alignment: usize, addr: CUdeviceptr, flags: u64) !void {
     const res = cudalib.cuMemAddressReserve(ptr, size, alignment, addr, flags);
     if (res != .SUCCESS) return error.CudaError;
@@ -280,6 +313,43 @@ pub fn cuStreamSynchronize(stream: CUstream) !void {
     if (res != .SUCCESS) return error.CudaError;
 }
 
+pub fn cuMemcpyDtoDAsync(dst: CUdeviceptr, src: CUdeviceptr, bytes: usize, stream: CUstream) !void {
+    const res = cudalib.cuMemcpyDtoDAsync_v2(dst, src, bytes, stream);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuStreamBeginCapture(stream: CUstream, mode: CUstreamCaptureMode) !void {
+    const res = cudalib.cuStreamBeginCapture(stream, mode);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuStreamEndCapture(stream: CUstream) !CUgraph {
+    var graph: CUgraph = undefined;
+    const res = cudalib.cuStreamEndCapture(stream, &graph);
+    if (res != .SUCCESS) return error.CudaError;
+    return graph;
+}
+
+pub fn cuGraphInstantiateWithParams(exec: *CUgraphExec, graph: CUgraph, flags: u64) !void {
+    var params: CUgraphInstantiateParams = .{
+        .flags = flags,
+        .hUploadStream = null,
+        .hErrNode_out = null,
+        .result_out = 0,
+    };
+    const res = cudalib.cuGraphInstantiateWithParams(exec, graph, &params);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuGraphLaunch(exec: CUgraphExec, stream: CUstream) !void {
+    const res = cudalib.cuGraphLaunch(exec, stream);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuGraphDestroy(graph: CUgraph) void { _ = cudalib.cuGraphDestroy(graph); }
+
+pub fn cuGraphExecDestroy(exec: CUgraphExec) void { _ = cudalib.cuGraphExecDestroy(exec); }
+
 pub fn cuEventCreate(flags: c_uint) !CUevent {
     var ev: CUevent = undefined;
     const res = cudalib.cuEventCreate(&ev, flags);
@@ -311,12 +381,7 @@ pub fn cuLaunchKernel(
 ) !void {
     const res = cudalib.cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ,
         blockDimX, blockDimY, blockDimZ, sharedMemBytes, hStream, kernelParams, extra);
-    if (res != .SUCCESS) {
-        var errbuf: [*:0]const u8 = "?";
-        _ = cudalib.cuGetErrorString(res, &errbuf);
-        std.debug.print("cuLaunchKernel FAILED: {s} (0x{x})\n", .{ errbuf, @intFromEnum(res) });
-        return error.CudaError;
-    }
+    if (res != .SUCCESS) return error.CudaError;
 }
 
 pub fn cuFuncSetAttribute(hfunc: CUfunction, attrib: c_int, value: i64) !void {
@@ -363,6 +428,13 @@ const cudalib = struct {
     extern "c" fn cuStreamCreate(phStream: *CUstream, flags: c_uint) CUresult;
     extern "c" fn cuStreamDestroy_v2(hStream: CUstream) CUresult;
     extern "c" fn cuStreamSynchronize(hStream: CUstream) CUresult;
+    extern "c" fn cuStreamBeginCapture(hStream: CUstream, mode: CUstreamCaptureMode) CUresult;
+extern "c" fn cuStreamEndCapture(hStream: CUstream, phGraph: *CUgraph) CUresult;
+    extern "c" fn cuGraphInstantiateWithParams(phGraphExec: *CUgraphExec, hGraph: CUgraph, instantiateParams: *CUgraphInstantiateParams) CUresult;
+    extern "c" fn cuGraphLaunch(hGraphExec: CUgraphExec, hStream: CUstream) CUresult;
+    extern "c" fn cuGraphDestroy(hGraph: CUgraph) CUresult;
+    extern "c" fn cuGraphExecDestroy(hGraphExec: CUgraphExec) CUresult;
+    extern "c" fn cuMemcpyDtoDAsync_v2(dst: CUdeviceptr, src: CUdeviceptr, bytes: usize, stream: CUstream) CUresult;
     extern "c" fn cuEventCreate(event: *CUevent, flags: c_uint) CUresult;
     extern "c" fn cuEventDestroy(event: CUevent) CUresult;
     extern "c" fn cuEventRecord(event: CUevent, stream: CUstream) CUresult;
@@ -395,8 +467,14 @@ pub fn ensureContext() !void {
 
 /// Re-asegura que el contexto CUDA está current en este thread.
 /// Algunas llamadas (p. ej. cuModuleLoad) pueden alterar el contexto actual.
+/// NO hace `cuCtxSetCurrent` si ya es el contexto actual: cambiar el contexto
+/// está prohibido durante una captura de stream (CUDA graphs) y rompería la
+/// captura ("operation failed due to a previous error during capture").
 pub fn ensureCurrent() !void {
     try ensureContext();
+    var cur: CUcontext = undefined;
+    if (cudalib.cuCtxGetCurrent(&cur) != .SUCCESS) return error.CudaError;
+    if (cur == g_cuda_ctx.?) return;
     if (cudalib.cuCtxSetCurrent(g_cuda_ctx.?) != .SUCCESS) return error.CudaError;
 }
 

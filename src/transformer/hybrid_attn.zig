@@ -603,6 +603,10 @@ pub const AttentionLayer = struct {
     // f16, decode paginado device→device, gate y proyección de salida. Un solo
     // sync por token en el llamador. Fiel al forward CPU (incluida la semántica
     // flat de MRoPE) para que decode GPU == prefill CPU.
+    // En modo grafo de decode, los valores por token (block table, start_pos,
+    // seq_len) se pintan en staging host (nodos HtoDAsync capturados); los
+    // kernels leen los buffers device fijos. La sincronización de bloques al
+    // host la hace el llamador vía `syncDecodeBlocks` tras lanzar el grafo.
     pub fn forwardGPU(
         self: *Self,
         lk: *layer_kernels.LayerKernels,
@@ -622,6 +626,18 @@ pub const AttentionLayer = struct {
         try AttentionLayer.ensureGpu(self);
         const g = &self.gpu.?;
         try g.ensureN(n);
+        const gpu = self.paged_gpu orelse return HybridAttnError.KvCacheNotSet;
+
+        // Decode (n == 1): staging persistente en host y HtoDAsync (nodos
+        // capturados por el grafo). Prefill (n > 1): solo el start_pos device
+        // (lo lee MRoPE vía puntero). Ambos subidos en stream order antes de
+        // los kernels que los consumen.
+        if (n == 1) {
+            try self.stageDecodeHost(start_pos, n);
+            try gpu.uploadScratch();
+        } else {
+            try gpu.uploadStartPos(start_pos);
+        }
 
         var w_q_shape = [_]usize{ qg_dim, p.n_embd };
         var w_q_strides = [_]usize{ p.n_embd, 1 };
@@ -655,42 +671,47 @@ pub const AttentionLayer = struct {
 
         // 3. Q/K RMSNorm per-head (reusa rmsNorm: rows = n*heads, cols = head_dim).
         try lk.rmsNorm(g.g_q.ptr(), @intFromPtr(g.g_q_norm.dev_ptr), g.g_q.ptr(), n * n_head, head_dim, p.rms_eps);
-        try lk.mrope(g.g_q.ptr(), n * n_head, n, head_dim, p.n_rot, p.rope_freq_base, start_pos);
+        try lk.mrope(g.g_q.ptr(), gpu.getDStartPos(), n * n_head, n, head_dim, p.n_rot, p.rope_freq_base);
 
         // K es [n, kv_dim] = [n, n_kv_head, head_dim] en el mismo layout flat.
         try lk.rmsNorm(g.g_k.ptr(), @intFromPtr(g.g_k_norm.dev_ptr), g.g_k.ptr(), n * n_kv_head, head_dim, p.rms_eps);
-        try lk.mrope(g.g_k.ptr(), n * n_kv_head, n, head_dim, p.n_rot, p.rope_freq_base, start_pos);
+        try lk.mrope(g.g_k.ptr(), gpu.getDStartPos(), n * n_kv_head, n, head_dim, p.n_rot, p.rope_freq_base);
 
-        // 4. KV-append f16 en device + decode paginado device→device.
-        const gpu = self.paged_gpu orelse return HybridAttnError.KvCacheNotSet;
+        // 4. KV-append f16 en device + decode/prefill paginado device→device.
         const block_size = self.paged_kv.config.block_size;
-        const max_num_blocks = self.block_table.numBlocks();
-        const bt_host = try self.allocator.alloc(c_int, max_num_blocks);
-        defer self.allocator.free(bt_host);
-        for (0..max_num_blocks) |i| {
-            bt_host[i] = if (self.block_table.getPhysical(i)) |phys| @intCast(phys) else -1;
-        }
-        try gpu.uploadBlockTable(bt_host);
-
-        // Comitear los bloques que escribirá kvAppendF16 (pueden cruzar límites
-        // de bloque en un chunk de prefill): se marcan residentes sin copiar.
-        const first_block = start_pos / block_size;
-        const last_block = (start_pos + n - 1) / block_size;
-        var bi = first_block;
-        while (bi <= last_block) : (bi += 1) {
-            const phys = self.block_table.getPhysical(bi) orelse return HybridAttnError.KvCacheNotSet;
-            try gpu.ensureBlockCommitted(self.paged_kv.block_alloc, phys);
-        }
-
         const d_cache = try gpu.cacheBase(self.paged_kv.block_alloc);
-        try lk.kvAppendF16(g.g_k.ptr(), g.g_v.ptr(), d_cache, gpu.getDbt(), n, start_pos, kv_dim, n_kv_head, head_dim, block_size);
+
+        // Prefill: la block table device (d_bt, la aloca uploadBlockTable) debe
+        // subirse ANTES de kvAppendF16, que la lee para el bloque destino.
+        var bt_host: []c_int = &.{};
+        if (n > 1) {
+            const max_num_blocks = self.block_table.numBlocks();
+            bt_host = try self.allocator.alloc(c_int, max_num_blocks);
+            for (0..max_num_blocks) |i| {
+                bt_host[i] = if (self.block_table.getPhysical(i)) |phys| @intCast(phys) else -1;
+            }
+            try gpu.uploadBlockTable(bt_host);
+
+            // Comitear los bloques que escribirá kvAppendF16 (pueden cruzar
+            // límites de bloque en un chunk de prefill): residentes sin copiar.
+            const first_block = start_pos / block_size;
+            const last_block = (start_pos + n - 1) / block_size;
+            var bi = first_block;
+            while (bi <= last_block) : (bi += 1) {
+                const phys = self.block_table.getPhysical(bi) orelse return HybridAttnError.KvCacheNotSet;
+                try gpu.ensureBlockCommitted(self.paged_kv.block_alloc, phys);
+            }
+        }
+        defer if (bt_host.len > 0) self.allocator.free(bt_host);
+        try lk.kvAppendF16(g.g_k.ptr(), g.g_v.ptr(), d_cache, gpu.getDbt(), gpu.getDStartPos(), n, kv_dim, n_kv_head, head_dim, block_size);
         try lk.copyF32toF16(g.g_q.ptr(), g.d_q16, n * q_dim);
         if (n > 1) {
             // Prefill causal en bloque (device→device): atiende los n queries
             // sobre todos los tokens ya escritos en el pool.
             try gpu.prefillDevice(g.d_q16, g.d_attn16, self.paged_kv.block_alloc, bt_host, n, start_pos);
         } else {
-            try gpu.decodeDevice(g.d_q16, g.d_attn16, self.paged_kv.block_alloc, bt_host, start_pos + n);
+            // Decode de un token: block table/start_pos/seq_len ya en device.
+            try gpu.decodeDevice(g.d_q16, g.d_attn16, self.paged_kv.block_alloc);
         }
         try lk.copyF16toF32(g.d_attn16, g.g_attn.ptr(), n * q_dim);
 
@@ -704,12 +725,61 @@ pub const AttentionLayer = struct {
             try self.matmul_engine.linearProjectionDevice(g.g_attn, w_o32, out, n, q_dim, p.n_embd);
         }
 
-        // 7. Sincronizar los bloques escritos al pool host (D2H async): el pool host
-        // sigue siendo autoritativo para scheduler/COW.
-        bi = first_block;
+        // 7. Prefill: sincronizar los bloques escritos al pool host (D2H async);
+        // el pool host sigue siendo autoritativo para scheduler/COW. El decode
+        // (n == 1) lo hace el llamador vía `syncDecodeBlocks` tras el grafo.
+        if (n > 1) {
+            const first_block = start_pos / block_size;
+            const last_block = (start_pos + n - 1) / block_size;
+            var bi = first_block;
+            while (bi <= last_block) : (bi += 1) {
+                const phys2 = self.block_table.getPhysical(bi) orelse return HybridAttnError.KvCacheNotSet;
+                try gpu.syncBlockToHost(self.paged_kv.block_alloc, phys2);
+            }
+        }
+    }
+
+    /// Staging host del decode de un token (n == 1): block table, start_pos y
+    /// seq_len pintados en buffers host persistentes (los copia el grafo con
+    /// nodos HtoDAsync) y commit de los bloques que escribirá kvAppendF16.
+    /// No lanza nada al device.
+    pub fn stageDecodeHost(self: *Self, start_pos: usize, n: usize) !void {
+        const gpu = self.paged_gpu orelse return HybridAttnError.KvCacheNotSet;
+        const p = self.params;
+        const block_size = self.paged_kv.config.block_size;
+        const max_num_blocks = self.block_table.numBlocks();
+        try gpu.setupDecodeScratch(p.n_head * p.head_dim, max_num_blocks);
+        gpu.fillStaging(self.block_table, start_pos, start_pos + n);
+        const first_block = start_pos / block_size;
+        const last_block = (start_pos + n - 1) / block_size;
+        var bi = first_block;
         while (bi <= last_block) : (bi += 1) {
-            const phys2 = self.block_table.getPhysical(bi) orelse return HybridAttnError.KvCacheNotSet;
-            try gpu.syncBlockToHost(self.paged_kv.block_alloc, phys2);
+            const phys = self.block_table.getPhysical(bi) orelse return HybridAttnError.KvCacheNotSet;
+            try gpu.ensureBlockCommitted(self.paged_kv.block_alloc, phys);
+        }
+    }
+
+    /// Pre-dimensiona el staging de decode al presupuesto completo de bloques
+    /// (budget de generación). En modo grafo esto fija los punteros host y el
+    /// tamaño de d_bt ANTES de capturar: nunca se reasignan en replay.
+    pub fn presizeDecodeScratch(self: *Self, budget_blocks: usize) !void {
+        const gpu = self.paged_gpu orelse return HybridAttnError.KvCacheNotSet;
+        const p = self.params;
+        try gpu.setupDecodeScratch(p.n_head * p.head_dim, budget_blocks);
+    }
+
+    /// D2H async (stream-ordered, tras el grafo) de los bloques escritos por el
+    /// decode del token en [start_pos, start_pos + n). Mantiene el pool host
+    /// autoritativo para scheduler/COW.
+    pub fn syncDecodeBlocks(self: *Self, start_pos: usize, n: usize) !void {
+        const gpu = self.paged_gpu orelse return HybridAttnError.KvCacheNotSet;
+        const block_size = self.paged_kv.config.block_size;
+        const first_block = start_pos / block_size;
+        const last_block = (start_pos + n - 1) / block_size;
+        var bi = first_block;
+        while (bi <= last_block) : (bi += 1) {
+            const phys = self.block_table.getPhysical(bi) orelse return HybridAttnError.KvCacheNotSet;
+            try gpu.syncBlockToHost(self.paged_kv.block_alloc, phys);
         }
     }
 

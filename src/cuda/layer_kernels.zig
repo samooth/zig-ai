@@ -240,32 +240,32 @@ pub fn copyF32toF16(self: *LayerKernels, src: usize, dst: usize, n: usize) !void
         try cudaz.cuLaunchKernel(func, n_u((N * n_head * head_dim + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
     }
 
-    pub fn mrope(self: *LayerKernels, data: usize, rows: usize, N: usize, head_dim: usize, n_rot: usize, base: f32, start_pos: usize) !void {
+    pub fn mrope(self: *LayerKernels, data: usize, start_pos: usize, rows: usize, N: usize, head_dim: usize, n_rot: usize, base: f32) !void {
         var dv = data;
+        var spv = start_pos;
         var r1: c_int = n_c(rows);
         var N1: c_int = n_c(N);
         var hd1: c_int = n_c(head_dim);
         var nr1: c_int = n_c(n_rot);
         var bc: f32 = base;
-        var sp: c_longlong = @intCast(start_pos);
         const func = try self.get("mropeKernel");
-        var kp = [_]?*anyopaque{ &dv, &r1, &N1, &hd1, &nr1, &bc, &sp };
+        var kp = [_]?*anyopaque{ &dv, &spv, &r1, &N1, &hd1, &nr1, &bc };
         try cudaz.cuLaunchKernel(func, n_u((rows + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
     }
 
-    pub fn kvAppendF16(self: *LayerKernels, k: usize, v: usize, cache: usize, bt: usize, n: usize, start_pos: usize, kv_dim: usize, n_kv_head: usize, head_dim: usize, block_size: usize) !void {
+    pub fn kvAppendF16(self: *LayerKernels, k: usize, v: usize, cache: usize, bt: usize, start_pos: usize, n: usize, kv_dim: usize, n_kv_head: usize, head_dim: usize, block_size: usize) !void {
         var kv = k;
         var vv = v;
         var cv = cache;
         var btv = bt;
+        var spv = start_pos;
         var n1: c_int = n_c(n);
-        var sp: c_int = n_c(start_pos);
         var kvd1: c_int = n_c(kv_dim);
         var nkh1: c_int = n_c(n_kv_head);
         var hd1: c_int = n_c(head_dim);
         var bs1: c_int = n_c(block_size);
         const func = try self.get("kvAppendF16Kernel");
-        var kp = [_]?*anyopaque{ &kv, &vv, &cv, &btv, &n1, &sp, &kvd1, &nkh1, &hd1, &bs1 };
+        var kp = [_]?*anyopaque{ &kv, &vv, &cv, &btv, &spv, &n1, &kvd1, &nkh1, &hd1, &bs1 };
         try cudaz.cuLaunchKernel(func, n_u((n * kv_dim + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
     }
 

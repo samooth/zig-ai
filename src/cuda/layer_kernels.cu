@@ -342,13 +342,14 @@ extern "C" __global__ void splitQGKernel(
 // data: [N, n_head, head_dim] flat; rows = n_head (o n_kv_head) * N.
 extern "C" __global__ void mropeKernel(
     float* __restrict__ data,
+    const int* __restrict__ start_pos,
     int rows, int N, int head_dim, int n_rot,
-    float base, long long start_pos)
+    float base)
 {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= rows) return;
     int pos = row % N;
-    float global_pos = (float)(start_pos + pos);
+    float global_pos = (float)(*start_pos + pos);
     int half_rot = n_rot / 2;
     float scale = powf(base, -2.0f / (float)n_rot);
     float* d = data + (size_t)row * head_dim;
@@ -373,7 +374,8 @@ extern "C" __global__ void kvAppendF16Kernel(
     const float* __restrict__ v,
     half* __restrict__ cache,
     const int* __restrict__ bt,
-    int n, int start_pos,
+    const int* __restrict__ start_pos,
+    int n,
     int kv_dim, int n_kv_head, int head_dim, int block_size)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -383,7 +385,7 @@ extern "C" __global__ void kvAppendF16Kernel(
     int c = i % kv_dim;
     int h = c / head_dim;
     int d = c % head_dim;
-    long long global_pos = (long long)start_pos + t;
+    long long global_pos = (long long)*start_pos + t;
     int block_idx = (int)(global_pos / block_size);
     int off = (int)(global_pos % block_size);
     int phys = bt[block_idx];

@@ -294,6 +294,14 @@ pub fn build(b: *std.Build) void {
     layer_kernels_mod.addImport("cudaz", cudaz_mod);
     layer_kernels_mod.addOptions("build_options", layer_options);
 
+    // === Módulo decode_graph (CUDA Graphs para el decode por token) ===
+    const decode_graph_mod = b.createModule(.{
+        .root_source_file = b.path("src/cuda/decode_graph.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    decode_graph_mod.addImport("cudaz", cudaz_mod);
+
     // === Módulo ssm ===
     const ssm_mod = b.createModule(.{
         .root_source_file = b.path("src/transformer/ssm.zig"),
@@ -453,6 +461,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("pipeline", pipeline_mod);
     exe_mod.addImport("paged_attention", paged_attention_mod);
     exe_mod.addImport("layer_kernels", layer_kernels_mod);
+    exe_mod.addImport("decode_graph", decode_graph_mod);
     exe_mod.addImport("cublas", cublas_mod);
     exe_mod.addImport("time", time_mod);
 

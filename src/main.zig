@@ -25,6 +25,7 @@ const embedding = @import("embedding");
 const hybrid_layer = @import("transformer");
 const norm = @import("norm");
 const paged_attn = @import("paged_attention");
+const decode_graph = @import("decode_graph");
 
 /// Parámetros de runtime parseados de la línea de comandos.
 const CliParams = struct {
@@ -55,6 +56,10 @@ const CliParams = struct {
     // en sub-lotes físicos de `ubatch_size` tokens por llamada GPU.
     batch_size: usize = 2048,
     ubatch_size: usize = 512,
+    // --- Offload de capas a GPU (llama.cpp -ngl/--n-gpu-layers/--gpu-layers).
+    // null = auto (GPU si disponible); 0 = CPU; >0 = offload completo a GPU
+    // (este motor no soporta offload parcial).
+    n_gpu_layers: ?usize = null,
 };
 
 const SpecType = enum { none, draft_mtp };
@@ -167,8 +172,8 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args, stdout: anyty
     _ = it.next();
 
     while (it.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--model")) {
-            params.model_path = try nextValue(&it, "--model");
+        if (std.mem.eql(u8, arg, "--model") or std.mem.eql(u8, arg, "-m")) {
+            params.model_path = try nextValue(&it, arg);
         } else if (std.mem.eql(u8, arg, "--prompt")) {
             params.prompt = try nextValue(&it, "--prompt");
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--max-tokens")) {
@@ -237,6 +242,9 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args, stdout: anyty
             } else {
                 try stdout.print("[!] --quant inválido: {s} (auto|off)\n", .{v});
             }
+        } else if (std.mem.eql(u8, arg, "-ngl") or std.mem.eql(u8, arg, "--n-gpu-layers") or std.mem.eql(u8, arg, "--gpu-layers")) {
+            const v = try nextValue(&it, "--n-gpu-layers");
+            params.n_gpu_layers = std.fmt.parseInt(usize, v, 10) catch 0;
         } else if (std.mem.eql(u8, arg, "-jinja") or std.mem.eql(u8, arg, "--jinja")) {
             params.use_jinja = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -267,29 +275,115 @@ fn parseQuant(it: *std.process.Args.Iterator, flag: []const u8) !QuantFormat {
 fn printHelp(stdout: anytype) !void {
     try stdout.print(
         \\Uso: zig-ai-engine [opciones]
-        \\  --model <ruta>            Ruta a un modelo GGUF (activa inferencia)
-        \\  --prompt <texto>          Prompt de entrada
-        \\  -n, --max-tokens <n>      Máximo de tokens a generar (def: 128)
-        \\  --temperature <f>         Temperatura (def: 1.0; <=0 = greedy)
-        \\  --top-k <n>               Top-k (def: 0 = desactivado)
-        \\  --top-p <f>               Top-p / nucleus (def: 1.0 = desactivado)
-        \\  --repetition-penalty <f>  Repetition penalty (def: 1.0 = desactivado)
-        \\  --seed <n>                Semilla del RNG (def: 42)
-        \\  --backend <auto|cpu|gpu>  Backend matmul (def: auto → GPU si disponible)
-        \\  -ctk, --cache-type-k <fmt> Cuantización cache K (q8_0|q4_0|q4_1|fp16|...)
-        \\  -ctv, --cache-type-v <fmt> Cuantización cache V (q8_0|q4_0|q4_1|fp16|...)
-        \\  --spec-draft-type-k <fmt> Cuantización cache K del draft (def: fp16)
-        \\  --spec-draft-type-v <fmt> Cuantización cache V del draft (def: fp16)
-        \\  -np <n>                   Secuencias paralelas / prefillo (def: 1)
-        \\  -b, --batch-size <n>      Batch lógico de prefill en tokens (def: 2048)
-        \\  -ub, --ubatch-size <n>    Batch físico por llamada GPU (def: 512)
-        \\  --spec-type <draft-mtp>   Decodificación especulativa (def: none)
-        \\  --spec-draft-n-max <n>    Tokens draft por round (def: 16)
-        \\  --quant <auto|off>         GEMM de pesos cuantizados Q4_0 (def: auto)
-        \\  -jinja                    Usar plantilla chat jinja del tokenizer
-        \\  -h, --help                Muestra esta ayuda
+        \\  -m, --model <ruta>          Ruta a un modelo GGUF (activa inferencia)
+        \\  --prompt <texto>            Prompt de entrada
+        \\  -n, --max-tokens <n>        Máximo de tokens a generar (def: 128)
+        \\  -ngl, --n-gpu-layers <n>    Capas a offload a GPU (def: auto; 0 = CPU,
+        \\                              >0 = todas las capas a GPU)
+        \\  --temperature <f>           Temperatura (def: 1.0; <=0 = greedy)
+        \\  --top-k <n>                 Top-k (def: 0 = desactivado)
+        \\  --top-p <f>                 Top-p / nucleus (def: 1.0 = desactivado)
+        \\  --repetition-penalty <f>    Repetition penalty (def: 1.0 = desactivado)
+        \\  --seed <n>                  Semilla del RNG (def: 42)
+        \\  --backend <auto|cpu|gpu>    Backend matmul (def: auto → GPU si disponible)
+        \\  -ctk, --cache-type-k <fmt>  Cuantización cache K (q8_0|q4_0|q4_1|fp16|...)
+        \\  -ctv, --cache-type-v <fmt>  Cuantización cache V (q8_0|q4_0|q4_1|fp16|...)
+        \\  --spec-draft-type-k <fmt>   Cuantización cache K del draft (def: fp16)
+        \\  --spec-draft-type-v <fmt>   Cuantización cache V del draft (def: fp16)
+        \\  -np <n>                     Secuencias paralelas / prefillo (def: 1)
+        \\  -b, --batch-size <n>        Batch lógico de prefill en tokens (def: 2048)
+        \\  -ub, --ubatch-size <n>      Batch físico por llamada GPU (def: 512)
+        \\  --spec-type <draft-mtp>     Decodificación especulativa (def: none)
+        \\  --spec-draft-n-max <n>      Tokens draft por round (def: 16)
+        \\  --quant <auto|off>          GEMM de pesos cuantizados Q4_0 (def: auto)
+        \\  -jinja                     Usar plantilla chat jinja del tokenizer
+        \\  -h, --help                  Muestra esta ayuda
         \\
     , .{});
+}
+
+/// Captura la secuencia GPU completa de un token de decode (embed H2D + capas
+/// híbridas + rmsNorm final + lm_head) en un CUDA graph. Devuelve `false` en
+/// cualquier error (auto-fallback al camino normal); en `true` el grafo queda
+/// instanciado en `g.exec` y el estado ssm restaurado. La captura SIEMPRE se
+/// termina (o aborta) aunque un nodo falle, para que el stream vuelva a modo
+/// normal y el fallback pueda lanzar async ops.
+fn captureDecodeGraph(
+    g: *decode_graph.DecodeGraph,
+    lk: *layer_kernels.LayerKernels,
+    layers: []hybrid_layer.HybridLayer,
+    g_cur: *cublas.GpuTensor(f32),
+    g_nxt: *cublas.GpuTensor(f32),
+    g_normed: *cublas.GpuTensor(f32),
+    g_logits: *cublas.GpuTensor(f32),
+    g_out_norm: *cublas.GpuBuffer(f32),
+    engine: *matmul.MatmulEngine,
+    allocator: std.mem.Allocator,
+    n_embd: usize,
+    vocab: usize,
+    rms_eps: f32,
+    current_pos: usize,
+    state_parts: []const decode_graph.StatePart,
+    lm_head_q4: bool,
+    lm_head_q6k: bool,
+    lm_head_q: anytype,
+    lm_head: anytype,
+) bool {
+    g.backupState(state_parts) catch return false;
+    g.beginCapture() catch return false;
+
+    var ok = true;
+    cudaz.cuMemcpyHtoDAsync(g_cur.*.ptr(), @intFromPtr(g.embed_staging.ptr), n_embd * @sizeOf(f32), lk.stream) catch {
+        std.debug.print("CAPTURE FAIL: embed H2D: {s}\n", .{@errorName(error.CudaError)});
+        ok = false;
+    };
+    var c2g = g_cur.*;
+    var n2g = g_nxt.*;
+    if (ok) {
+        for (layers, 0..) |*layer, i| {
+            hybrid_layer.HybridLayer.forwardGPU(layer, lk, c2g, &n2g, current_pos, 1) catch |e| {
+                std.debug.print("CAPTURE FAIL: layer {d}: {s}\n", .{ i, @errorName(e) });
+                ok = false;
+            };
+            const tmp = c2g;
+            c2g = n2g;
+            n2g = tmp;
+        }
+    }
+    if (ok) {
+        lk.rmsNorm(c2g.ptr(), @intFromPtr(g_out_norm.*.dev_ptr), g_normed.*.ptr(), 1, n_embd, rms_eps) catch |e| {
+            std.debug.print("CAPTURE FAIL: rmsNorm: {s}\n", .{@errorName(e)});
+            ok = false;
+        };
+        if (ok) {
+            if (lm_head_q4) {
+                lk.q4gemmLinear(allocator, g_normed.*.ptr(), lm_head_q.bytes, g_logits.*.ptr(), n_embd, vocab) catch |e| {
+                    std.debug.print("CAPTURE FAIL: lm_head q4: {s}\n", .{@errorName(e)});
+                    ok = false;
+                };
+            } else if (lm_head_q6k) {
+                lk.qgemmLinear(allocator, g_normed.*.ptr(), lm_head_q.bytes, g_logits.*.ptr(), 1, n_embd, vocab, 3) catch |e| {
+                    std.debug.print("CAPTURE FAIL: lm_head q6k: {s}\n", .{@errorName(e)});
+                    ok = false;
+                };
+            } else {
+                engine.linearProjectionDeviceF16(g_normed.*, lm_head, g_logits, 1, n_embd, vocab) catch |e| {
+                    std.debug.print("CAPTURE FAIL: lm_head f16: {s}\n", .{@errorName(e)});
+                    ok = false;
+                };
+            }
+        }
+    }
+
+    if (!ok) {
+        // Nodo fallido dentro de la captura: terminarla/abortarla para volver
+        // el stream a modo normal (auto-fallback).
+        _ = g.endCapture();
+        return false;
+    }
+    g.endCaptureAndInstantiate() catch return false;
+    g.restoreState(state_parts) catch return false;
+    return true;
 }
 
 /// Inferencia autoregresiva end-to-end con un modelo GGUF.
@@ -307,13 +401,43 @@ fn runInference(
     defer model.deinit();
     const cfg = model.config;
 
+    // --n-gpu-layers/-ngl/--gpu-layers (semántica llama.cpp): este motor no
+    // soporta offload parcial de capas — el path híbrido offloadea todas las
+    // capas a GPU (requerido) y el legacy corre en CPU. Por tanto:
+    //   -ngl 0    → CPU (legacy); en híbrido se advierte y se usa GPU.
+    //   -ngl > 0  → GPU con todas las capas offloadadas (si hay CUDA).
+    //   sin -ngl  → auto (GPU si disponible).
+    var eff_backend = backend;
+    if (params.n_gpu_layers) |ngl| {
+        if (ngl == 0) {
+            if (cfg.is_hybrid) {
+                try stdout.print("[!] Modelo híbrido requiere offload GPU: ignorando -ngl 0 (todas las capas a GPU)\n", .{});
+                eff_backend = .cublas;
+            } else {
+                try stdout.print("[+] -ngl 0: offload desactivado, inferencia CPU\n", .{});
+                eff_backend = .parallel;
+            }
+        } else {
+            if (@import("cudaz").isCudaAvailable()) {
+                try stdout.print("[+] -ngl {d}: offload completo de {d} capas a GPU\n", .{ ngl, cfg.block_count });
+                eff_backend = .cublas;
+            } else {
+                try stdout.print("[!] -ngl {d}: CUDA no disponible, usando CPU\n", .{ngl});
+                eff_backend = .parallel;
+            }
+        }
+    }
+    if (eff_backend != backend) {
+        try stdout.print("Backend efectivo: {s}\n", .{backendName(eff_backend)});
+    }
+
     // Detección automática del path según la arquitectura GGUF:
     //   - híbrido (qwen35/qwen35moe, cfg.is_hybrid) → path paged/híbrido
     //     (PagedKVCache + Scheduler + HybridLayer).
     //   - clásico (llama/gemma/mistral, ...) → path legacy contiguo
     //     (TransformerLayer + KVCacheManager).
     if (cfg.is_hybrid) {
-        try runHybridInference(allocator, &model, params, backend, stdout);
+        try runHybridInference(allocator, &model, params, eff_backend, stdout);
         return;
     }
 
@@ -398,8 +522,8 @@ fn runInference(
     try stdout.print("[+] prompt ({d} tokens): {s}\n", .{ prompt_ids.len, prompt });
 
     // Motor matmul
-    if (backend == .cublas) cudaz.ensureCurrent() catch {};
-    var engine = try matmul.MatmulEngine.init(allocator, backend, .f32);
+    if (eff_backend == .cublas) cudaz.ensureCurrent() catch {};
+    var engine = try matmul.MatmulEngine.init(allocator, eff_backend, .f32);
     defer engine.deinit();
 
     const seq_id: u64 = 1;
@@ -441,7 +565,6 @@ fn runHybridInference(
     const n_embd = cfg.embedding_length;
     const vocab = cfg.vocab_size;
     const max_seq_len = cfg.context_length;
-
     try stdout.print("[+] arch={s} capas={d} heads={d} kv={d} emb={d} ffn={d} vocab={d} ctx={d} (path paged)\n", .{
         cfg.architecture, cfg.block_count, cfg.head_count, cfg.head_count_kv,
         cfg.embedding_length, cfg.feed_forward_length, cfg.vocab_size, cfg.context_length,
@@ -619,7 +742,6 @@ fn runHybridInference(
         }
         _ = i;
     }
-
     const use_gpu_prefill = std.c.getenv("NOGPU_PREFILL") == null;
     var logits_f32 = try allocator.alloc(f32, vocab);
     defer allocator.free(logits_f32);
@@ -809,15 +931,10 @@ fn runHybridInference(
     }
     const prefill_ns = t_prefill.read();
 
-    if (std.c.getenv("DUMP_LOGITS") != null) {
-        for (logits_f32, 0..) |v, i| std.debug.print("LG {d} {d}\n", .{ i, v });
-    }
-
     var gen_tokens: std.ArrayList(u32) = .empty;
     defer gen_tokens.deinit(allocator);
     const first_token = params.sampler.sample(logits_f32, &rng, &[_]u32{});
     try gen_tokens.append(allocator, first_token);
-
      var current_pos: usize = seq_len;
      const t_gen = @import("time").Timer.start();
 
@@ -837,6 +954,108 @@ fn runHybridInference(
      defer g_out_norm.free();
      try g_out_norm.upload(out_norm.data);
 
+// Staging persistente del embedding (f32, PINNED): fuente del H2D normal y
+    // de los nodos HtoDAsync capturados por el grafo de decode. Pinneado porque
+    // los HtoDAsync con fuente pageable no son capturables por CUDA graphs.
+    var embed_staging = try cudaz.pinnedAlloc(f32, n_embd);
+    defer cudaz.pinnedFree(f32, embed_staging);
+
+     // ─── CUDA Graphs para el decode (una captura, replay por token) ───────
+     // El grafo cubre: embed H2D + 24 capas híbridas + rmsNorm final + lm_head
+     // (~290 kernels). Los valores que cambian por token (embedding, block
+     // table, start_pos, seq_len) se pintan en staging host persistente y los
+     // nodos capturados (HtoDAsync) los copian a buffers device fijos. NOGRAPH=1
+     // desactiva; ante error de captura/instanciación se cae al camino normal.
+     var decode_g: ?decode_graph.DecodeGraph = null;
+     const graph_ok = std.c.getenv("NOGRAPH") == null;
+     if (graph_ok) {
+         // Bloques para el token de la captura (el decode real los re-usa).
+         for (layer_block_tables) |bt_opt| {
+             if (bt_opt) |bt| {
+                 if (bt.num_tokens < current_pos + 1) {
+                     try bt.appendToken(paged_kv.block_alloc);
+                 }
+             }
+         }
+         // Commit de TODOS los bloques de la tabla ANTES de capturar: el run de
+         // captura llama `ensureBlockCommitted` (cuMemMap/cuMemCreate), que NO
+         // es capturable; si encuentra el bloque ya residente no toca el device.
+         for (layers) |*layer| {
+             if (layer.is_attention) {
+                 const attn = layer.attn_layer.?;
+                 if (attn.paged_gpu) |gpu| {
+                     for (0..attn.block_table.numBlocks()) |bi| {
+                         if (attn.block_table.getPhysical(bi)) |phys| {
+                             try gpu.ensureBlockCommitted(paged_kv.block_alloc, phys);
+                         }
+                     }
+                 }
+             }
+         }
+         // Staging pre-dimensionado al presupuesto completo de generación: los
+         // punteros host y d_bt quedan fijos antes de capturar.
+         const budget_seq = seq_len + params.max_new_tokens;
+         const budget_blocks = (budget_seq + block_size - 1) / block_size;
+         for (layers) |*layer| {
+             if (layer.is_attention) {
+                 try layer.attn_layer.?.presizeDecodeScratch(budget_blocks);
+             }
+         }
+         // Respaldo del estado recurrente ssm (d_s_state + d_conv_state): el
+         // run de captura lo corrompe; se restaura tras instanciar el grafo.
+         var state_parts: std.ArrayList(decode_graph.StatePart) = .empty;
+         defer state_parts.deinit(allocator);
+         for (layers) |*layer| {
+             if (!layer.is_attention) {
+                 const ssm = layer.ssm_layer.?;
+                 if (ssm.gpu) |gpu| {
+                     try state_parts.append(allocator, .{ .dev = @intFromPtr(gpu.d_s_state.dev_ptr), .bytes = gpu.d_s_state.len * @sizeOf(f32) });
+                     try state_parts.append(allocator, .{ .dev = @intFromPtr(gpu.d_conv_state.dev_ptr), .bytes = gpu.d_conv_state.len * @sizeOf(f32) });
+                 }
+             }
+         }
+         var dg: ?decode_graph.DecodeGraph = decode_graph.DecodeGraph{
+             .allocator = allocator,
+             .stream = lk.stream,
+             .n_embd = n_embd,
+         };
+         if (std.c.getenv("CHKSTATE") != null) {
+             try cudaz.cuCtxSynchronize();
+             for (state_parts.items) |p| {
+                 const nf32 = p.bytes / @sizeOf(f32);
+                 const buf = try allocator.alloc(f32, nf32);
+                 defer allocator.free(buf);
+                 try cudaz.cuMemcpyDtoH(@intFromPtr(buf.ptr), p.dev, p.bytes);
+                 var s: f64 = 0;
+                 var mx: f32 = 0;
+                 for (buf) |v| { s += @abs(@as(f64, v)); if (@abs(v) > mx) mx = @abs(v); }
+                 std.debug.print("CHKSTATE_BEFORE dev={x} bytes={d} sum|v|={d:.6} max={d:.6}\n", .{ p.dev, p.bytes, s, mx });
+             }
+         }
+         if (dg) |*g| {
+             g.setEmbedStaging(embed_staging);
+             if (captureDecodeGraph(g, &lk, layers, &g_cur, &g_nxt, &g_normed, &g_logits, &g_out_norm, &engine, allocator, n_embd, vocab, rms_eps, current_pos, state_parts.items, lm_head_q4, lm_head_q6k, lm_head_q, lm_head)) {
+                 decode_g = dg;
+                 if (std.c.getenv("CHKSTATE") != null) {
+                     try cudaz.cuCtxSynchronize();
+                     for (state_parts.items) |p| {
+                         const nf32 = p.bytes / @sizeOf(f32);
+                         const buf = try allocator.alloc(f32, nf32);
+                         defer allocator.free(buf);
+                         try cudaz.cuMemcpyDtoH(@intFromPtr(buf.ptr), p.dev, p.bytes);
+                         var s: f64 = 0;
+                         var mx: f32 = 0;
+                         for (buf) |v| { s += @abs(@as(f64, v)); if (@abs(v) > mx) mx = @abs(v); }
+                         std.debug.print("CHKSTATE dev={x} bytes={d} sum|v|={d:.6} max={d:.6}\n", .{ p.dev, p.bytes, s, mx });
+                     }
+                 }
+                 try stdout.print("[+] decode: CUDA graph capturado (modo replay)\n", .{});
+             } else {
+                 g.deinit();
+             }
+         }
+     }
+
      const perf_stage = std.c.getenv("PERF_STAGE") != null;
      var ev: []cudaz.CUevent = undefined;
      var layer_gpu_ns: []i128 = undefined;
@@ -854,7 +1073,6 @@ fn runHybridInference(
          for (ev) |*e| e.* = try cudaz.cuEventCreate(0);
      }
      const perf_t = @import("time").Timer.start();
-
      for (0..params.max_new_tokens) |_| {
          const last = gen_tokens.items[gen_tokens.items.len - 1];
 
@@ -876,40 +1094,67 @@ fn runHybridInference(
         const h2d = try h1.reshape(&[_]usize{ 1, n_embd });
         defer { if (h2d.allocator) |a| { a.free(h2d.shape); a.free(h2d.strides); } }
 
-        var ca = try Tensor(f32).alloc(allocator, &.{ 1, n_embd });
-        defer ca.deinit();
-        // La primera capa recibe el embedding del token actual (f16 → f32)
-        for (ca.data, h2d.data) |*d, s| d.* = @as(f32, @floatCast(s));
-
-        // Subir embedding a GPU (única H2D por token).
-        try cudaz.cuMemcpyHtoD(g_cur.ptr(), @intFromPtr(ca.data.ptr), n_embd * @sizeOf(f32));
+        // La primera capa recibe el embedding del token actual (f16 → f32).
+        // Staging persistente: fuente del H2D normal y de los nodos capturados.
+        for (embed_staging, h2d.data) |*d, s| d.* = @as(f32, @floatCast(s));
         t_embed_ns += perf_t.read() - t_embed0;
-        if (perf_stage) try cudaz.cuEventRecord(ev[0], lk.stream);
 
         const t_enq0 = perf_t.read();
-        var cur2gpu = g_cur;
-        var nxt2gpu = g_nxt;
-        for (layers, 0..) |*layer, li| {
-            try hybrid_layer.HybridLayer.forwardGPU(layer, &lk, cur2gpu, &nxt2gpu, current_pos, 1);
-            if (perf_stage) try cudaz.cuEventRecord(ev[li + 1], lk.stream);
-            const t2 = cur2gpu;
-            cur2gpu = nxt2gpu;
-            nxt2gpu = t2;
+        if (decode_g) |*g| {
+            // Modo replay: staging host del decode (block table/start_pos/seq_len)
+            // + commit de bloques, luego un único cuGraphLaunch con todo el token
+            // (embed H2D + capas + rmsNorm + lm_head) en nodos capturados.
+            for (layers) |*layer| {
+                if (layer.is_attention) try layer.attn_layer.?.stageDecodeHost(current_pos, 1);
+            }
+            if (perf_stage) try cudaz.cuEventRecord(ev[0], lk.stream);
+            try g.launch();
+            if (perf_stage) try cudaz.cuEventRecord(ev[layers.len + 1], lk.stream);
+        } else {
+            // Camino normal: subir embedding (única H2D por token) y lanzar la
+            // secuencia capa a capa.
+            if (perf_stage) try cudaz.cuEventRecord(ev[0], lk.stream);
+            try cudaz.cuMemcpyHtoDAsync(g_cur.ptr(), @intFromPtr(embed_staging.ptr), n_embd * @sizeOf(f32), lk.stream);
+            var cur2gpu = g_cur;
+            var nxt2gpu = g_nxt;
+            for (layers, 0..) |*layer, li| {
+                try hybrid_layer.HybridLayer.forwardGPU(layer, &lk, cur2gpu, &nxt2gpu, current_pos, 1);
+                if (perf_stage) try cudaz.cuEventRecord(ev[li + 1], lk.stream);
+                const t2 = cur2gpu;
+                cur2gpu = nxt2gpu;
+                nxt2gpu = t2;
+            }
+            // Norma final en GPU, lm_head device→device (peso cacheado en GPU).
+            try lk.rmsNorm(cur2gpu.ptr(), @intFromPtr(g_out_norm.dev_ptr), g_normed.ptr(), 1, n_embd, rms_eps);
+            // lm_head M=1: Q4_0/Q6_K device→device si el peso está cuantizado.
+            if (lm_head_q4) {
+                try lk.q4gemmLinear(allocator, g_normed.ptr(), lm_head_q.bytes, g_logits.ptr(), n_embd, vocab);
+            } else if (lm_head_q6k) {
+                try lk.qgemmLinear(allocator, g_normed.ptr(), lm_head_q.bytes, g_logits.ptr(), 1, n_embd, vocab, 3);
+            } else {
+                try engine.linearProjectionDeviceF16(g_normed, lm_head, &g_logits, 1, n_embd, vocab);
+            }
+            if (perf_stage) try cudaz.cuEventRecord(ev[layers.len + 1], lk.stream);
         }
         t_enqueue_ns += perf_t.read() - t_enq0;
 
-        // Norma final en GPU, lm_head device→device (peso cacheado en GPU), y un
-        // único D2H de los logits para el sampleo.
-        try lk.rmsNorm(cur2gpu.ptr(), @intFromPtr(g_out_norm.dev_ptr), g_normed.ptr(), 1, n_embd, rms_eps);
-        // lm_head M=1: Q4_0 device→device si el peso es Q4_0 (8× menos tráfico).
-        if (lm_head_q4) {
-            try lk.q4gemmLinear(allocator, g_normed.ptr(), lm_head_q.bytes, g_logits.ptr(), n_embd, vocab);
-        } else if (lm_head_q6k) {
-            try lk.qgemmLinear(allocator, g_normed.ptr(), lm_head_q.bytes, g_logits.ptr(), 1, n_embd, vocab, 3);
-        } else {
-            try engine.linearProjectionDeviceF16(g_normed, lm_head, &g_logits, 1, n_embd, vocab);
+        if (std.c.getenv("DUMPNORM") != null and current_pos == seq_len) {
+            try cudaz.cuStreamSynchronize(lk.stream);
+            const nb = try allocator.alloc(f32, n_embd);
+            defer allocator.free(nb);
+            try cudaz.cuMemcpyDtoH(@intFromPtr(nb.ptr), g_normed.ptr(), n_embd * @sizeOf(f32));
+            var s: f64 = 0;
+            var mx: f32 = 0;
+            for (nb) |v| { s += @abs(@as(f64, v)); if (@abs(v) > mx) mx = @abs(v); }
+            std.debug.print("DUMPNORM pos={d} sum|v|={d:.6} max={d:.6} first3={d:.4},{d:.4},{d:.4}\n", .{ current_pos, s, mx, nb[0], nb[1], nb[2] });
         }
-        if (perf_stage) try cudaz.cuEventRecord(ev[layers.len + 1], lk.stream);
+
+        // D2H async (stream-ordered tras los kernels/grafo que los escribieron)
+        // de los bloques KV del token; mantiene el pool host autoritativo.
+        for (layers) |*layer| {
+            if (layer.is_attention) try layer.attn_layer.?.syncDecodeBlocks(current_pos, 1);
+        }
+
         try cudaz.cuStreamSynchronize(lk.stream);
         if (perf_stage) {
             var ms: f32 = 0;
@@ -925,6 +1170,27 @@ fn runHybridInference(
         }
         const t_d2h0 = perf_t.read();
         try cudaz.cuMemcpyDtoH(@intFromPtr(logits_f32.ptr), g_logits.ptr(), vocab * @sizeOf(f32));
+
+        if (std.c.getenv("DUMPKV") != null) {
+            for (layers, 0..) |*layer, li| {
+                if (!layer.is_attention) continue;
+                const bt_opt = layer_block_tables[li] orelse continue;
+                const phys = bt_opt.getPhysical(0) orelse continue;
+                const ba = paged_kv.block_alloc;
+                const blk = ba.memory_pool[phys * ba.block_bytes ..][0..ba.block_bytes];
+                const hb = std.mem.bytesAsSlice(u16, blk);
+                const nkv = ba.num_kv_heads;
+                const hd = ba.head_dim;
+                const stride = nkv * hd;
+                for ([_]usize{ 5, current_pos % ba.block_size }) |tpos| {
+                    const base = tpos * stride;
+                    var sp: f64 = 0;
+                    for (0..stride) |i| sp += @abs(@as(f64, @as(f32, @floatFromInt(hb[base + i]))));
+                    std.debug.print("DUMPKV pos={d} layer={d} sum={d:.4}\n", .{ current_pos, li, sp });
+                }
+                break;
+            }
+        }
         if (std.c.getenv("DUMP_LOGITS") != null) {
             for (logits_f32, 0..) |v, i| std.debug.print("LG {d} {d}\n", .{ i, v });
         }

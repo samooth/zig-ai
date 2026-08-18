@@ -126,6 +126,20 @@ pub const GpuBlockPool = struct {
     }
 };
 
+const DecodePersistentParams = struct {
+    num_seqs_c: c_int = 0,
+    max_blocks_c: c_int = 0,
+    num_q_c: c_int = 0,
+    num_kv_c: c_int = 0,
+    head_dim_c: c_int = 0,
+    block_size_c: c_int = 0,
+    d_cache_v: cudaz.CUdeviceptr = 0,
+    q16v: cudaz.CUdeviceptr = 0,
+    out16v: cudaz.CUdeviceptr = 0,
+    kp: [11]?*anyopaque = undefined,
+};
+var g_decode_persistent: DecodePersistentParams = .{};
+
 pub const PagedAttentionGpu = struct {
     allocator: std.mem.Allocator,
     config: PagedConfig,
@@ -140,6 +154,14 @@ pub const PagedAttentionGpu = struct {
     d_out16: cudaz.CUdeviceptr = 0,
     d_bt: cudaz.CUdeviceptr = 0,
     d_seq_lens: cudaz.CUdeviceptr = 0,
+    d_start_pos: cudaz.CUdeviceptr = 0,
+    // Staging host persistentes (fuentes de los HtoDAsync capturados por el
+    // grafo de decode): se rellenan por token; el grafo los copia a device.
+    // PINNED (cuMemAllocHost): los HtoDAsync con fuente pageable no son
+    // capturables por CUDA graphs.
+    bt_staging: []c_int = &.{},
+    start_pos_staging: []c_int = &.{},
+    seq_len_staging: []c_int = &.{},
     q_buf_cap: usize = 0,
     bt_cap: usize = 0,
 
@@ -161,6 +183,10 @@ pub const PagedAttentionGpu = struct {
         if (self.d_out16 != 0) cudaz.cuMemFree(self.d_out16);
         if (self.d_bt != 0) cudaz.cuMemFree(self.d_bt);
         if (self.d_seq_lens != 0) cudaz.cuMemFree(self.d_seq_lens);
+        if (self.d_start_pos != 0) cudaz.cuMemFree(self.d_start_pos);
+        if (self.bt_staging.len > 0) cudaz.pinnedFree(c_int, self.bt_staging);
+        if (self.start_pos_staging.len > 0) cudaz.pinnedFree(c_int, self.start_pos_staging);
+        if (self.seq_len_staging.len > 0) cudaz.pinnedFree(c_int, self.seq_len_staging);
         cudaz.cuModuleUnload(self.module);
     }
 
@@ -216,6 +242,52 @@ pub const PagedAttentionGpu = struct {
             self.bt_cap = max_num_blocks;
         }
         if (self.d_seq_lens == 0) self.d_seq_lens = try cudaz.cuMemAlloc(@sizeOf(c_int));
+        if (self.d_start_pos == 0) self.d_start_pos = try cudaz.cuMemAlloc(@sizeOf(c_int));
+    }
+
+    /// Asegura el scratch de decode (staging host + buffers device). En modo
+    /// grafo el staging se dimensiona al presupuesto completo (budget) en el
+    /// build, de modo que los punteros host capturados nunca se reasignan.
+    pub fn setupDecodeScratch(self: *Self, q_stride: usize, max_num_blocks: usize) !void {
+        try self.ensureDecodeBuffers(q_stride, max_num_blocks);
+        if (self.bt_staging.len < max_num_blocks) {
+            if (self.bt_staging.len > 0) cudaz.pinnedFree(c_int, self.bt_staging);
+            self.bt_staging = try cudaz.pinnedAlloc(c_int, max_num_blocks);
+        }
+        if (self.start_pos_staging.len == 0) self.start_pos_staging = try cudaz.pinnedAlloc(c_int, 1);
+        if (self.seq_len_staging.len == 0) self.seq_len_staging = try cudaz.pinnedAlloc(c_int, 1);
+    }
+
+    /// Rellena el staging host del decode (block table + start_pos + seq_len).
+    /// No toca el device: solo pinta el staging que el grafo copia.
+    pub fn fillStaging(self: *Self, block_table: *const BlockTable, start_pos: usize, seq_len: usize) void {
+        self.start_pos_staging[0] = @intCast(start_pos);
+        self.seq_len_staging[0] = @intCast(seq_len);
+        for (self.bt_staging, 0..) |*d, i| {
+            d.* = if (block_table.getPhysical(i)) |phys| @intCast(phys) else -1;
+        }
+    }
+
+    /// HtoDAsync del staging host (bloqueable/grafo): d_bt, d_start_pos,
+    /// d_seq_lens. Ordenado en el stream compartido.
+    pub fn uploadScratch(self: *Self) !void {
+        try cudaz.ensureCurrent();
+        try cudaz.cuMemcpyHtoDAsync(self.d_bt, @intFromPtr(self.bt_staging.ptr), self.bt_staging.len * @sizeOf(c_int), self.stream);
+        try cudaz.cuMemcpyHtoDAsync(self.d_start_pos, @intFromPtr(self.start_pos_staging.ptr), @sizeOf(c_int), self.stream);
+        try cudaz.cuMemcpyHtoDAsync(self.d_seq_lens, @intFromPtr(self.seq_len_staging.ptr), @sizeOf(c_int), self.stream);
+    }
+
+    /// HtoDAsync del start_pos solo (path de prefill, no capturado).
+    pub fn uploadStartPos(self: *Self, start_pos: usize) !void {
+        try cudaz.ensureCurrent();
+        try self.ensureDecodeBuffers(0, 0);
+        if (self.start_pos_staging.len == 0) self.start_pos_staging = try cudaz.pinnedAlloc(c_int, 1);
+        self.start_pos_staging[0] = @intCast(start_pos);
+        try cudaz.cuMemcpyHtoDAsync(self.d_start_pos, @intFromPtr(self.start_pos_staging.ptr), @sizeOf(c_int), self.stream);
+    }
+
+    pub fn getDStartPos(self: *Self) cudaz.CUdeviceptr {
+        return self.d_start_pos;
     }
 
     fn stageBlocks(self: *Self, block_alloc: *BlockAllocator, block_table: *const BlockTable) !void {
@@ -365,51 +437,45 @@ pub const PagedAttentionGpu = struct {
         }
     }
 
-    /// Decode device→device: `q16`/`out16` son buffers f16 de GPU y `bt_host`
-    /// el block table host (se sube a d_bt). Sin staging de bloques y sin sync.
+    /// Decode device→device: `q16`/`out16` son buffers f16 de GPU. La block
+    /// table, start_pos y seq_len ya están en device (subidos por
+    /// `uploadScratch`, o por los nodos HtoDAsync capturados del grafo de
+    /// decode). Sin staging de bloques y sin sync.
     pub fn decodeDevice(
         self: *Self,
         q16: cudaz.CUdeviceptr,
         out16: cudaz.CUdeviceptr,
         block_alloc: *BlockAllocator,
-        bt_host: []const c_int,
-        seq_len: usize,
     ) !void {
         const config = self.config;
         const num_q_heads = config.num_q_heads;
         const num_kv_heads = config.num_kv_heads;
         const head_dim = config.head_dim;
         const block_size = config.block_size;
-        const q_stride = num_q_heads * head_dim;
-        const max_num_blocks = bt_host.len;
+        const max_num_blocks = self.bt_staging.len;
 
         try cudaz.ensureCurrent();
-        try self.ensureDecodeBuffers(q_stride, max_num_blocks);
-        try cudaz.cuMemcpyHtoDAsync(self.d_bt, @intFromPtr(bt_host.ptr), max_num_blocks * @sizeOf(c_int), self.stream);
-
-        var seq_len_c: c_int = @intCast(seq_len);
-        try cudaz.cuMemcpyHtoDAsync(self.d_seq_lens, @intFromPtr(&seq_len_c), @sizeOf(c_int), self.stream);
 
         const func = cudaz.cuModuleGetFunction(self.module, "paged_attention_decode_f16_kernel") catch return error.KernelNotFound;
 
-        var num_seqs_c: c_int = 1;
-        var max_blocks_c: c_int = @intCast(max_num_blocks);
-        var num_q_c: c_int = @intCast(num_q_heads);
-        var num_kv_c: c_int = @intCast(num_kv_heads);
-        var head_dim_c: c_int = @intCast(head_dim);
-        var block_size_c: c_int = @intCast(block_size);
+        g_decode_persistent.num_seqs_c = 1;
+        g_decode_persistent.max_blocks_c = @intCast(max_num_blocks);
+        g_decode_persistent.num_q_c = @intCast(num_q_heads);
+        g_decode_persistent.num_kv_c = @intCast(num_kv_heads);
+        g_decode_persistent.head_dim_c = @intCast(head_dim);
+        g_decode_persistent.block_size_c = @intCast(block_size);
 
-        var d_cache_v = try self.cacheBase(block_alloc);
-        var q16v = q16;
-        var out16v = out16;
+        g_decode_persistent.d_cache_v = try self.cacheBase(block_alloc);
+        g_decode_persistent.q16v = q16;
+        g_decode_persistent.out16v = out16;
 
-        var kp = [_]?*anyopaque{
-            &out16v, &q16v, &d_cache_v, &self.d_bt,
-            &self.d_seq_lens, &num_seqs_c, &max_blocks_c, &num_q_c,
-            &num_kv_c, &head_dim_c, &block_size_c,
+        g_decode_persistent.kp = [_]?*anyopaque{
+            &g_decode_persistent.out16v, &g_decode_persistent.q16v, &g_decode_persistent.d_cache_v, &self.d_bt,
+            &self.d_seq_lens, &g_decode_persistent.num_seqs_c, &g_decode_persistent.max_blocks_c, &g_decode_persistent.num_q_c,
+            &g_decode_persistent.num_kv_c, &g_decode_persistent.head_dim_c, &g_decode_persistent.block_size_c,
         };
 const shared_bytes: c_uint = @intCast(2 * head_dim * @sizeOf(f32));
-        try cudaz.cuLaunchKernel(func, 1, @intCast(num_q_heads), 1, 32, 1, 1, shared_bytes, self.stream, @ptrCast(&kp), null);
+        try cudaz.cuLaunchKernel(func, 1, @intCast(num_q_heads), 1, 32, 1, 1, shared_bytes, self.stream, @ptrCast(&g_decode_persistent.kp), null);
     }
 
     /// Prefill device→device causal (chunks): `q16`/`out16` son buffers f16 de

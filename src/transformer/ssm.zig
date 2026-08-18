@@ -576,7 +576,7 @@ pub fn forwardGPU(
     // conv1d causal + silu leyendo conv_state/qkv directo (sin staging); el
     // estado desplazado se escribe en conv_in (scratch) y se copia de vuelta.
     try lk.conv1dSilu(@intFromPtr(g.d_conv_state.dev_ptr), g.qkv.ptr(), @intFromPtr(g.d_conv1d.dev_ptr), g.conv_out.ptr(), g.conv_in.ptr(), n, qkv_dim, p.d_conv);
-    try cudaz.cuMemcpyDtoD(@intFromPtr(g.d_conv_state.dev_ptr), g.conv_in.ptr(), (p.d_conv - 1) * qkv_dim * @sizeOf(f32));
+    try cudaz.cuMemcpyDtoDAsync(@intFromPtr(g.d_conv_state.dev_ptr), g.conv_in.ptr(), (p.d_conv - 1) * qkv_dim * @sizeOf(f32), lk.stream);
 
     try lk.l2NormHeads(g.conv_out.ptr(), n, qkv_dim, key_dim, n_k_heads, head_v_dim, p.rms_eps);
 

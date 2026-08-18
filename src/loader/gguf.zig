@@ -1051,6 +1051,13 @@ pub fn dequantBlock(dtype: GgmlType, bytes: []const u8, out: []f32, elems: usize
 }
 
 /// Dequantizar un tensor GGUF completo a f32
+///
+/// Tipos soportados end-to-end (pesos cargables por el motor):
+///   no cuantizados:  f32, f16, bf16
+///   GGML estándar:   q8_0, q4_0, q4_1, q4_k, q5_k, q6_k
+///   IQ (unsloth):    iq4_xs, iq3_s
+/// Cualquier otro tipo (q2_k, q3_k, q8_k, iq4_nl, iq2_xxs, iq2_s, iq1_s,
+/// iq3_xxs, iq1_m, mxfp4, tq1_0, tq2_0, ...) devuelve `UnsupportedDtype`.
 pub fn dequantTensor(info: *const TensorInfo, bytes: []const u8, out: []f32) GgufError!void {
     if (out.len < info.numel()) return GgufError.InvalidData;
     switch (info.dtype) {
