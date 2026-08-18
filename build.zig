@@ -507,6 +507,28 @@ pub fn build(b: *std.Build) void {
     layer_streamer_mod.addImport("debug", debug_mod);
     transformer_mod.addImport("layer_streamer", layer_streamer_mod);
     exe_mod.addImport("layer_streamer", layer_streamer_mod);
+
+    // === Módulo activation_pool (AirLLM activation memory reuse) ===
+    const activation_pool_mod = b.createModule(.{
+        .root_source_file = b.path("src/transformer/activation_pool.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    activation_pool_mod.addImport("core", core_mod);
+    activation_pool_mod.addImport("debug", debug_mod);
+    transformer_mod.addImport("activation_pool", activation_pool_mod);
+    exe_mod.addImport("activation_pool", activation_pool_mod);
+
+    // === Módulo vram_budget (AirLLM VRAM budgeting) ===
+    const vram_budget_mod = b.createModule(.{
+        .root_source_file = b.path("src/transformer/vram_budget.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vram_budget_mod.addImport("debug", debug_mod);
+    transformer_mod.addImport("vram_budget", vram_budget_mod);
+    exe_mod.addImport("vram_budget", vram_budget_mod);
+
     exe_mod.addImport("cublas", cublas_mod);
     exe_mod.addImport("time", time_mod);
     exe_mod.addImport("debug", debug_mod);
@@ -572,6 +594,9 @@ pub fn build(b: *std.Build) void {
         "src/loader/model_config.zig",
         "src/loader/gguf_tokenizer.zig",
         "src/loader/gguf_model.zig",
+        "src/transformer/layer_streamer.zig",
+        "src/transformer/activation_pool.zig",
+        "src/transformer/vram_budget.zig",
         "tests/test_dequant_gpu.zig",
     };
 

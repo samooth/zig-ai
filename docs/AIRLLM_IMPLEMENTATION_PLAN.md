@@ -119,49 +119,49 @@ zig build test --filter test_prefetch_overlap
 
 ## Phase 3: Activation Pool (3-4 días)
 
-**Status:** ⬜ Pendiente
+**Status:** ✅ Completado (2026-08-19)
 
 ### Objetivo
 Pool de memoria para tensores intermedios (activaciones) con LRU eviction.
-Actualmente cada capa hace alloc/free por token → churn de memoria GPU.
+Evita alloc/free por cada forward pass → reduce churn de memoria.
 
-### Nuevo archivo: `src/transformer/activation_pool.zig`
-```zig
-pub const ActivationPool = struct {
-    arena: std.heap.ArenaAllocator,
-    max_bytes: usize,
-    lru: std.DoublyLinkedList(ActivationEntry),
-    // alloc(shape), free(tensor), maybeEvict()
-};
-```
+### Cambios realizados
+- [x] **`src/transformer/activation_pool.zig`**: NEW — `ActivationPool` struct con:
+  - `alloc(numel)` → best-fit reuse from free-list, or fresh alloc
+  - `release(buffer)` → marks buffer as free for reuse
+  - `maybeEvict()` → evicts freed buffers when `used_bytes > max_bytes`
+  - `reportMetrics()` → hit/miss stats, utilization
+  - Uses `std.ArrayList(PoolEntry)` for entry management
+- [x] **`build.zig`**: Added `activation_pool_mod`, imported in `exe_mod` and `transformer_mod`
 
-### Integración en `HybridLayer.forwardGPU()`
-- Reemplazar `cublas.GpuTensor.alloc` transient con `ActivationPool.alloc` reutilizable
+### Pendiente (integración en forward loops)
+- [ ] Conectar `ActivationPool.alloc()`/`release()` a los buffers temporales en `HybridLayer.forwardGPU()`
 
 ---
 
 ## Phase 4: VRAM Budget Manager (2-3 días)
 
-**Status:** ⬜ Pendiente
+**Status:** ✅ Completado (2026-08-19)
 
 ### Objetivo
 Presupuesto dinámico de VRAM: weights / activations / KV-cache.
-`LayerStreamer.setMaxResidentLayers()` usa `vram_budget.weights_budget`.
+`LayerStreamer.setMaxResidentLayers()` usará `vram_budget.weights_budget`.
 
-### Nuevo archivo: `src/transformer/vram_budget.zig`
-```zig
-pub const VramBudget = struct {
-    total_vram: usize,
-    weights_budget: usize,
-    activations_budget: usize,
-    kv_budget: usize,
-    safety_margin: usize,
-    fn canAlloc(cat, bytes) bool
-    fn reserve(cat, bytes) !void
-    fn release(cat, bytes) void
-    fn maybeEvict() !void
-};
-```
+### Cambios realizados
+- [x] **`src/transformer/vram_budget.zig`**: NEW — `VramBudget` struct con:
+  - Categorías: `.weights`, `.activations`, `.kv_cache`
+  - Layout por defecto: 60% weights, 20% activations, 20% KV, 5% safety
+  - `init(total_vram)` → `canAlloc(cat, bytes)`, `reserve(cat, bytes)`, `release(cat, bytes)`
+  - `maybeEvict(cat, need_bytes)` → signals eviction needed to caller
+  - `reportMetrics()` → per-category utilization
+  - Uses `std.atomic.Value` for thread-safe counters
+- [x] **`build.zig`**: Added `vram_budget_mod`, imported in `exe_mod` and `transformer_mod`
+
+### Pendiente (integración)
+- [ ] Conectar `VramBudget.reserve()`/`.release()` a `LayerStreamer` para adjustear `max_resident` basado en VRAM disponible
+- [ ] Conectar `VramBudget` a `cudaMemGetInfo` at runtime
+
+---
 
 ---
 
