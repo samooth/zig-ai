@@ -175,7 +175,7 @@ pub fn cuDeviceInfo(allocator: std.mem.Allocator, dev: CUdevice) !GpuInfo {
     var minor: c_int = 0;
     if (cudalib.cuDeviceComputeCapability(&major, &minor, dev) != .SUCCESS) return error.CudaError;
     var total_mem: usize = 0;
-    if (cudalib.cuDeviceTotalMem(&total_mem, dev) != .SUCCESS) return error.CudaError;
+    if (cudalib.cuDeviceTotalMem_v2(&total_mem, dev) != .SUCCESS) return error.CudaError;
     return .{
         .name = name,
         .major = major,
@@ -496,7 +496,7 @@ extern "c" fn cuStreamEndCapture(hStream: CUstream, phGraph: *CUgraph) CUresult;
     extern "c" fn cuEventElapsedTime(ms: *f32, start: CUevent, end: CUevent) CUresult;
     extern "c" fn cuLaunchKernel(f: CUfunction, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, by: c_uint, bz: c_uint, sm: c_uint, stream: CUstream, params: ?*anyopaque, extra: ?*anyopaque) CUresult;
     extern "c" fn cuDeviceGetName(name: [*]u8, len: c_int, dev: CUdevice) CUresult;
-    extern "c" fn cuDeviceTotalMem(mem: *usize, dev: CUdevice) CUresult;
+    extern "c" fn cuDeviceTotalMem_v2(mem: *usize, dev: CUdevice) CUresult;
     extern "c" fn cuDeviceComputeCapability(major: *c_int, minor: *c_int, dev: CUdevice) CUresult;
 };
 
@@ -558,7 +558,7 @@ pub fn getDeviceName(dev: CUdevice, allocator: std.mem.Allocator) ![]u8 {
 
 pub fn getDeviceTotalMem(dev: CUdevice) !usize {
     var mem: usize = undefined;
-    const res = cudalib.cuDeviceTotalMem(&mem, dev);
+    const res = cudalib.cuDeviceTotalMem_v2(&mem, dev);
     if (res != .SUCCESS) return error.CudaError;
     return mem;
 }
