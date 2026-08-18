@@ -16,6 +16,8 @@
 //! token 1 reescribe exactamente la posición que escribió la captura.
 const std = @import("std");
 const cudaz = @import("cudaz");
+const debugz = @import("debug");
+const layer_kernels = @import("layer_kernels");
 
 pub const Mode = enum { off, replay };
 
@@ -23,6 +25,20 @@ pub const Mode = enum { off, replay };
 pub const StatePart = struct {
     dev: cudaz.CUdeviceptr,
     bytes: usize,
+};
+
+/// CUDA_KERNEL_NODE_PARAMS (layout CUDA 12, campo a campo; ver /usr/include/cuda.h).
+const KernelNodeParams = extern struct {
+    func: cudaz.CUfunction,
+    gridDimX: c_uint,
+    gridDimY: c_uint,
+    gridDimZ: c_uint,
+    blockDimX: c_uint,
+    blockDimY: c_uint,
+    blockDimZ: c_uint,
+    sharedMemBytes: c_uint,
+    kernelParams: ?*anyopaque,
+    extra: ?*anyopaque,
 };
 
 pub const DecodeGraph = struct {
@@ -118,9 +134,52 @@ pub const DecodeGraph = struct {
     pub fn endCaptureAndInstantiate(self: *DecodeGraph) !void {
         const graph = self.endCapture() orelse return error.CaptureFailed;
         errdefer cudaz.cuGraphDestroy(graph);
+        if (debugz.dbg.dump_graph) dumpGraph(graph);
         var exec: cudaz.CUgraphExec = undefined;
         try cudaz.cuGraphInstantiateWithParams(&exec, graph, cudaz.CUDA_GRAPH_INSTANTIATE_FLAG_DEFAULT);
         cudaz.cuGraphDestroy(graph);
         self.exec = exec;
     }
 };
+
+/// Breadcrumb DUMP_GRAPH: recorre los nodos del grafo capturado e imprime cada
+/// kernel (función + grid/block). SIEMPRE presente; solo emite con DUMP_GRAPH=1.
+fn dumpGraph(graph: cudaz.CUgraph) void {
+    var n_nodes: usize = 0;
+    if (cudaz.cuGraphGetNodeCount(graph)) |n| {
+        n_nodes = n;
+    } else |_| {}
+    std.debug.print("DUMP_GRAPH nodes={d}\n", .{n_nodes});
+    const nodes = std.heap.page_allocator.alloc(cudaz.CUgraphNode, n_nodes) catch return;
+    defer std.heap.page_allocator.free(nodes);
+    cudaz.cuGraphGetNodes(graph, nodes) catch return;
+    for (nodes, 0..) |nd, i| {
+        const ty = cudaz.cuGraphNodeGetType(nd) catch continue;
+        switch (ty) {
+            .KERNEL => {
+                var p: KernelNodeParams = undefined;
+                cudaz.cuGraphKernelNodeGetParams(nd, &p) catch continue;
+                const kp = @as([*]const ?*anyopaque, @ptrCast(@alignCast(p.kernelParams orelse continue)));
+                if (layer_kernels.kvAppendFunc()) |kf| {
+                    if (p.func == kf) {
+                        const nv: [*]const ?*anyopaque = kp;
+                        const k = @as(*const usize, @ptrCast(@alignCast(nv[0].?))).*;
+                        const v = @as(*const usize, @ptrCast(@alignCast(nv[1].?))).*;
+                        const cache = @as(*const usize, @ptrCast(@alignCast(nv[2].?))).*;
+                        const bt = @as(*const usize, @ptrCast(@alignCast(nv[3].?))).*;
+                        const sp = @as(*const usize, @ptrCast(@alignCast(nv[4].?))).*;
+                        const n1: c_int = @as(*const c_int, @ptrCast(@alignCast(nv[5].?))).*;
+                        const kvd: c_int = @as(*const c_int, @ptrCast(@alignCast(nv[6].?))).*;
+                        const nkh: c_int = @as(*const c_int, @ptrCast(@alignCast(nv[7].?))).*;
+                        const hd: c_int = @as(*const c_int, @ptrCast(@alignCast(nv[8].?))).*;
+                        const bs: c_int = @as(*const c_int, @ptrCast(@alignCast(nv[9].?))).*;
+                        std.debug.print("DUMP_GRAPH {d}: KVAPPEND k={x} v={x} cache={x} bt={x} sp={x} n={d} kv_dim={d} n_kv_head={d} head_dim={d} bs={d}\n", .{ i, k, v, cache, bt, sp, n1, kvd, nkh, hd, bs });
+                        continue;
+                    }
+                }
+                std.debug.print("DUMP_GRAPH {d}: KERNEL func={x} grid={d}x{d}x{d} block={d}x{d}x{d}\n", .{ i, @intFromPtr(p.func), p.gridDimX, p.gridDimY, p.gridDimZ, p.blockDimX, p.blockDimY, p.blockDimZ });
+            },
+            else => std.debug.print("DUMP_GRAPH {d}: {s}\n", .{ i, @tagName(ty) }),
+        }
+    }
+}

@@ -50,6 +50,24 @@ pub const CUstreamCaptureMode = enum(c_int) {
 pub const CUDA_GRAPH_INSTANTIATE_FLAG_DEFAULT: u64 = 0;
 pub const CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH: u64 = 0x00000001;
 
+pub const CUgraphNodeType = enum(c_int) {
+    KERNEL = 0,
+    MEMCPY = 1,
+    MEMSET = 2,
+    HOST = 3,
+    GRAPH = 4,
+    EMPTY = 5,
+    EVENT_WAIT = 6,
+    EVENT_RECORD = 7,
+    EXTERNAL_SEMAPHORE_SIGNAL = 8,
+    EXTERNAL_SEMAPHORE_WAIT = 9,
+    MEM_ALLOC = 10,
+    MEM_FREE = 11,
+    BATCH_MEM_OP = 12,
+    CONDITIONAL = 13,
+    _,
+};
+
 pub const CUmemAllocationType = enum(c_int) {
     INVALID = 0,
     PINNED = 1,
@@ -350,6 +368,31 @@ pub fn cuGraphDestroy(graph: CUgraph) void { _ = cudalib.cuGraphDestroy(graph); 
 
 pub fn cuGraphExecDestroy(exec: CUgraphExec) void { _ = cudalib.cuGraphExecDestroy(exec); }
 
+pub fn cuGraphGetNodeCount(graph: CUgraph) !usize {
+    var n: usize = 0;
+    const res = cudalib.cuGraphGetNodes(graph, null, &n);
+    if (res != .SUCCESS) return error.CudaError;
+    return n;
+}
+
+pub fn cuGraphGetNodes(graph: CUgraph, nodes: []CUgraphNode) !void {
+    var n: usize = nodes.len;
+    const res = cudalib.cuGraphGetNodes(graph, @ptrCast(nodes.ptr), &n);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
+pub fn cuGraphNodeGetType(node: CUgraphNode) !CUgraphNodeType {
+    var ty: c_int = 0;
+    const res = cudalib.cuGraphNodeGetType(node, &ty);
+    if (res != .SUCCESS) return error.CudaError;
+    return @enumFromInt(ty);
+}
+
+pub fn cuGraphKernelNodeGetParams(node: CUgraphNode, params: *anyopaque) !void {
+    const res = cudalib.cuGraphKernelNodeGetParams(node, params);
+    if (res != .SUCCESS) return error.CudaError;
+}
+
 pub fn cuEventCreate(flags: c_uint) !CUevent {
     var ev: CUevent = undefined;
     const res = cudalib.cuEventCreate(&ev, flags);
@@ -432,6 +475,10 @@ const cudalib = struct {
 extern "c" fn cuStreamEndCapture(hStream: CUstream, phGraph: *CUgraph) CUresult;
     extern "c" fn cuGraphInstantiateWithParams(phGraphExec: *CUgraphExec, hGraph: CUgraph, instantiateParams: *CUgraphInstantiateParams) CUresult;
     extern "c" fn cuGraphLaunch(hGraphExec: CUgraphExec, hStream: CUstream) CUresult;
+    extern "c" fn cuGraphGetNodes(hGraph: CUgraph, nodes: ?*CUgraphNode, numNodes: *usize) CUresult;
+    extern "c" fn cuGraphNodeGetType(hNode: CUgraphNode, nodeType: *c_int) CUresult;
+    extern "c" fn cuGraphKernelNodeGetParams(hNode: CUgraphNode, nodeParams: *anyopaque) CUresult;
+    extern "c" fn cuGraphKernelNodeSetParams(hNode: CUgraphNode, nodeParams: *const anyopaque) CUresult;
     extern "c" fn cuGraphDestroy(hGraph: CUgraph) CUresult;
     extern "c" fn cuGraphExecDestroy(hGraphExec: CUgraphExec) CUresult;
     extern "c" fn cuMemcpyDtoDAsync_v2(dst: CUdeviceptr, src: CUdeviceptr, bytes: usize, stream: CUstream) CUresult;

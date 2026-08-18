@@ -15,6 +15,7 @@ const paged = @import("paged_attention");
 const kv_cache = @import("kv_cache");
 const kv_quant = kv_cache.kv_quant;
 const quantBytes = kv_quant.quantBytes;
+const debugz = @import("debug");
 
 pub const HybridAttnError = error{
     WeightFileNotFound,
@@ -634,7 +635,7 @@ pub const AttentionLayer = struct {
         // los kernels que los consumen.
         if (n == 1) {
             try self.stageDecodeHost(start_pos, n);
-            try gpu.uploadScratch();
+            try gpu.uploadScratch(self.layer_idx);
         } else {
             try gpu.uploadStartPos(start_pos);
         }
@@ -655,7 +656,7 @@ pub const AttentionLayer = struct {
         // 1. Proyecciones Q+G, K, V (device→device, pesos cacheados en GPU).
         // Pesos Q4_0 → GEMM cuantizado device (8× menos tráfico de VRAM),
         // también batched para prefill (n > 1).
-        const q4_ok = self.w_q.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4ATTN") == null;
+        const q4_ok = self.w_q.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and !debugz.dbg.no_q4_attn;
         if (q4_ok) {
             try lk.qgemmLinear(self.allocator, x.ptr(), self.w_q.bytes, g.g_qg.ptr(), n, p.n_embd, qg_dim, 0);
             try lk.qgemmLinear(self.allocator, x.ptr(), self.w_k.bytes, g.g_k.ptr(), n, p.n_embd, kv_dim, 0);
@@ -690,7 +691,7 @@ pub const AttentionLayer = struct {
             for (0..max_num_blocks) |i| {
                 bt_host[i] = if (self.block_table.getPhysical(i)) |phys| @intCast(phys) else -1;
             }
-            try gpu.uploadBlockTable(bt_host);
+            try gpu.uploadBlockTable(self.layer_idx, bt_host);
 
             // Comitear los bloques que escribirá kvAppendF16 (pueden cruzar
             // límites de bloque en un chunk de prefill): residentes sin copiar.
@@ -703,15 +704,18 @@ pub const AttentionLayer = struct {
             }
         }
         defer if (bt_host.len > 0) self.allocator.free(bt_host);
-        try lk.kvAppendF16(g.g_k.ptr(), g.g_v.ptr(), d_cache, gpu.getDbt(), gpu.getDStartPos(), n, kv_dim, n_kv_head, head_dim, block_size);
+        try lk.kvAppendF16(g.g_k.ptr(), g.g_v.ptr(), d_cache, gpu.getDbt(self.layer_idx), gpu.getDStartPos(), n, kv_dim, n_kv_head, head_dim, block_size);
+        if (debugz.dbg.dump_graph) {
+            std.debug.print("DUMP_GRAPH fwd kv={x} vv={x} cache={x} bt={x} sp={x} n={d} kv_dim={d}\n", .{ g.g_k.ptr(), g.g_v.ptr(), d_cache, gpu.getDbt(self.layer_idx), gpu.getDStartPos(), n, kv_dim });
+        }
         try lk.copyF32toF16(g.g_q.ptr(), g.d_q16, n * q_dim);
         if (n > 1) {
             // Prefill causal en bloque (device→device): atiende los n queries
             // sobre todos los tokens ya escritos en el pool.
-            try gpu.prefillDevice(g.d_q16, g.d_attn16, self.paged_kv.block_alloc, bt_host, n, start_pos);
+            try gpu.prefillDevice(self.layer_idx, g.d_q16, g.d_attn16, self.paged_kv.block_alloc, bt_host, n, start_pos);
         } else {
             // Decode de un token: block table/start_pos/seq_len ya en device.
-            try gpu.decodeDevice(g.d_q16, g.d_attn16, self.paged_kv.block_alloc);
+            try gpu.decodeDevice(self.layer_idx, g.d_q16, g.d_attn16, self.paged_kv.block_alloc);
         }
         try lk.copyF16toF32(g.d_attn16, g.g_attn.ptr(), n * q_dim);
 
@@ -748,8 +752,8 @@ pub const AttentionLayer = struct {
         const p = self.params;
         const block_size = self.paged_kv.config.block_size;
         const max_num_blocks = self.block_table.numBlocks();
-        try gpu.setupDecodeScratch(p.n_head * p.head_dim, max_num_blocks);
-        gpu.fillStaging(self.block_table, start_pos, start_pos + n);
+        try gpu.setupDecodeScratch(self.layer_idx, p.n_head * p.head_dim, max_num_blocks);
+        gpu.fillStaging(self.layer_idx, self.block_table, start_pos, start_pos + n);
         const first_block = start_pos / block_size;
         const last_block = (start_pos + n - 1) / block_size;
         var bi = first_block;
@@ -765,7 +769,7 @@ pub const AttentionLayer = struct {
     pub fn presizeDecodeScratch(self: *Self, budget_blocks: usize) !void {
         const gpu = self.paged_gpu orelse return HybridAttnError.KvCacheNotSet;
         const p = self.params;
-        try gpu.setupDecodeScratch(p.n_head * p.head_dim, budget_blocks);
+        try gpu.setupDecodeScratch(self.layer_idx, p.n_head * p.head_dim, budget_blocks);
     }
 
     /// D2H async (stream-ordered, tras el grafo) de los bloques escritos por el

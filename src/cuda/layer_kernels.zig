@@ -4,6 +4,7 @@
 const std = @import("std");
 const cudaz = @import("cudaz");
 const build_options = @import("build_options");
+const debugz = @import("debug");
 
 var g_module: ?cudaz.CUmodule = null;
 
@@ -12,7 +13,7 @@ var g_module: ?cudaz.CUmodule = null;
 pub var quant_enabled: bool = true;
 
 pub fn quantPath() bool {
-    return quant_enabled and std.c.getenv("NOQ4") == null;
+    return quant_enabled and !debugz.dbg.no_q4;
 }
 
 fn loadModule() !cudaz.CUmodule {
@@ -21,7 +22,18 @@ fn loadModule() !cudaz.CUmodule {
     if (cubin_path.len == 0) return error.CudaUnavailable;
     try cudaz.ensureContext();
     g_module = try cudaz.cuModuleLoad(cubin_path);
+    if (debugz.dbg.dump_graph) dumpFuncs();
     return g_module.?;
+}
+
+/// Breadcrumb DUMP_GRAPH: imprime la dirección de cada kernel del cubin para
+/// poder identificar qué nodo del grafo es cada función. SIEMPRE presente.
+fn dumpFuncs() void {
+    const mod = g_module.?;
+    for (kernel_names) |kn| {
+        const f = cudaz.cuModuleGetFunction(mod, kn) catch continue;
+        std.debug.print("DUMP_GRAPH func {x} = {s}\n", .{ @intFromPtr(f), kn });
+    }
 }
 
 const kernel_names = [_][:0]const u8{
@@ -48,6 +60,14 @@ const kernel_names = [_][:0]const u8{
     "swigluKernel",
 };
 var g_funcs: [kernel_names.len]?cudaz.CUfunction = .{null} ** kernel_names.len;
+
+/// Función `kvAppendF16Kernel` (para identificar sus nodos en el grafo).
+pub fn kvAppendFunc() ?cudaz.CUfunction {
+    for (kernel_names, 0..) |kn, i| {
+        if (std.mem.eql(u8, kn, "kvAppendF16Kernel")) return g_funcs[i];
+    }
+    return null;
+}
 
 pub const LayerKernels = struct {
     stream: cudaz.CUstream,

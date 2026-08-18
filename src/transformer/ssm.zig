@@ -34,6 +34,7 @@ const cudaz = @import("cudaz");
 const layer_kernels = @import("layer_kernels");
 const gguf = @import("gguf");
 const QuantWeight = @import("quant_weight").QuantWeight;
+const debugz = @import("debug");
 
 pub const SsmError = error{ WeightFileNotFound, ShapeMismatch };
 
@@ -558,7 +559,7 @@ pub fn forwardGPU(
     // M=1 con peso Q4_0 → GEMM cuantizado device (8× menos tráfico de VRAM).
     // Prefill (n > 1): GEMM cuantizado batched (qgemmKernel) evita subir los
     // pesos f32 dequantizados a VRAM. Fallback al camino f32 para otros dtypes.
-    const q4_ok = self.w_qkv.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4SSM") == null;
+    const q4_ok = self.w_qkv.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and !debugz.dbg.no_q4_ssm;
     if (q4_ok) {
         try lk.qgemmLinear(self.allocator, x.ptr(), self.w_qkv.bytes, g.qkv.ptr(), n, p.n_embd, qkv_dim, 0);
         try lk.qgemmLinear(self.allocator, x.ptr(), self.w_z.bytes, g.z.ptr(), n, p.n_embd, d_inner, 0);
@@ -591,10 +592,10 @@ pub fn forwardGPU(
     }
 
     try lk.rmsNormGateMul(g.attn_out.ptr(), g.z.ptr(), @intFromPtr(g.d_ssm_norm.dev_ptr), n, d_inner, n_v_heads, head_v_dim, p.rms_eps);
-    const w_out_q4 = self.w_out.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4SSM") == null;
+    const w_out_q4 = self.w_out.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and !debugz.dbg.no_q4_ssm;
     if (w_out_q4) {
         try lk.qgemmLinear(self.allocator, g.attn_out.ptr(), self.w_out.bytes, out.ptr(), n, d_inner, p.n_embd, 0);
-    } else if (self.w_out.dtype() == gguf.GgmlType.q5_k and layer_kernels.quantPath() and std.c.getenv("NOQ4SSM") == null) {
+    } else if (self.w_out.dtype() == gguf.GgmlType.q5_k and layer_kernels.quantPath() and !debugz.dbg.no_q4_ssm) {
         try lk.qgemmLinear(self.allocator, g.attn_out.ptr(), self.w_out.bytes, out.ptr(), n, d_inner, p.n_embd, 2);
     } else {
         try self.matmul_engine.linearProjectionDevice(g.attn_out, w_out32, out, n, d_inner, p.n_embd);

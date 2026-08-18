@@ -16,6 +16,7 @@ const model_config = @import("model_config");
 const AttentionLayer = @import("hybrid_attn").AttentionLayer;
 const SsmLayer = @import("ssm").SsmLayer;
 const paged = @import("paged_attention");
+const debugz = @import("debug");
 
 pub const HybridLayerError = error{
     WeightFileNotFound,
@@ -448,7 +449,7 @@ pub fn forwardGPU(
 
     // FFN con pesos Q4_0/Q4_1 → GEMM cuantizado device (8× menos tráfico VRAM),
     // también batched para prefill (n > 1).
-    const q4_ok = self.w_gate.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and std.c.getenv("NOQ4FFN") == null;
+    const q4_ok = self.w_gate.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and !debugz.dbg.no_q4_ffn;
     if (q4_ok) {
         try lk.qgemmLinear(self.allocator, g.g_post.ptr(), self.w_gate.bytes, g.g_gate.ptr(), n, p.n_embd, p.intermediate_dim, 0);
         try lk.qgemmLinear(self.allocator, g.g_post.ptr(), self.w_up.bytes, g.g_up.ptr(), n, p.n_embd, p.intermediate_dim, 0);
@@ -457,7 +458,7 @@ pub fn forwardGPU(
         try self.matmul_engine.linearProjectionDevice(g.g_post, w_up32, &g.g_up, n, p.n_embd, p.intermediate_dim);
     }
     try lk.swiglu(g.g_gate.ptr(), g.g_up.ptr(), n * p.intermediate_dim);
-    const w_down_q4 = self.w_down.dtype() == gguf.GgmlType.q4_1 and layer_kernels.quantPath() and std.c.getenv("NOQ4FFN") == null;
+    const w_down_q4 = self.w_down.dtype() == gguf.GgmlType.q4_1 and layer_kernels.quantPath() and !debugz.dbg.no_q4_ffn;
     if (w_down_q4) {
         try lk.qgemmLinear(self.allocator, g.g_gate.ptr(), self.w_down.bytes, g.g_ffn.ptr(), n, p.intermediate_dim, p.n_embd, 1);
     } else {

@@ -152,18 +152,22 @@ pub const PagedAttentionGpu = struct {
     // Buffers de decode persistentes (evitan cuMemAlloc/free por token).
     d_q16: cudaz.CUdeviceptr = 0,
     d_out16: cudaz.CUdeviceptr = 0,
-    d_bt: cudaz.CUdeviceptr = 0,
     d_seq_lens: cudaz.CUdeviceptr = 0,
     d_start_pos: cudaz.CUdeviceptr = 0,
     // Staging host persistentes (fuentes de los HtoDAsync capturados por el
     // grafo de decode): se rellenan por token; el grafo los copia a device.
     // PINNED (cuMemAllocHost): los HtoDAsync con fuente pageable no son
     // capturables por CUDA graphs.
-    bt_staging: []c_int = &.{},
+    // Cada capa de atención tiene SU PROPIA block table física (bloques
+    // distintos del pool compartido), así que staging y d_bt son por capa:
+    // indexados por layer_idx global. Los nodos HtoDAsync capturados copian
+    // bt_stagings[layer] → d_bts[layer].
+    d_bts: std.ArrayListUnmanaged(cudaz.CUdeviceptr) = .empty,
+    bt_stagings: std.ArrayListUnmanaged([]c_int) = .empty,
+    bt_caps: std.ArrayListUnmanaged(usize) = .empty,
     start_pos_staging: []c_int = &.{},
     seq_len_staging: []c_int = &.{},
     q_buf_cap: usize = 0,
-    bt_cap: usize = 0,
 
     const Self = @This();
 
@@ -181,10 +185,17 @@ pub const PagedAttentionGpu = struct {
         if (self.paged_pool) |*p| p.deinit();
         if (self.d_q16 != 0) cudaz.cuMemFree(self.d_q16);
         if (self.d_out16 != 0) cudaz.cuMemFree(self.d_out16);
-        if (self.d_bt != 0) cudaz.cuMemFree(self.d_bt);
         if (self.d_seq_lens != 0) cudaz.cuMemFree(self.d_seq_lens);
         if (self.d_start_pos != 0) cudaz.cuMemFree(self.d_start_pos);
-        if (self.bt_staging.len > 0) cudaz.pinnedFree(c_int, self.bt_staging);
+        for (self.d_bts.items) |p| {
+            if (p != 0) cudaz.cuMemFree(p);
+        }
+        self.d_bts.deinit(self.allocator);
+        for (self.bt_stagings.items) |s| {
+            if (s.len > 0) cudaz.pinnedFree(c_int, s);
+        }
+        self.bt_stagings.deinit(self.allocator);
+        self.bt_caps.deinit(self.allocator);
         if (self.start_pos_staging.len > 0) cudaz.pinnedFree(c_int, self.start_pos_staging);
         if (self.seq_len_staging.len > 0) cudaz.pinnedFree(c_int, self.seq_len_staging);
         cudaz.cuModuleUnload(self.module);
@@ -227,7 +238,7 @@ pub const PagedAttentionGpu = struct {
         }
     }
 
-    fn ensureDecodeBuffers(self: *Self, q_stride: usize, max_num_blocks: usize) !void {
+    fn ensureDecodeBuffers(self: *Self, q_stride: usize) !void {
         try cudaz.ensureCurrent();
         if (self.q_buf_cap < q_stride) {
             if (self.d_q16 != 0) cudaz.cuMemFree(self.d_q16);
@@ -236,43 +247,57 @@ pub const PagedAttentionGpu = struct {
             self.d_out16 = try cudaz.cuMemAlloc(q_stride * @sizeOf(f16));
             self.q_buf_cap = q_stride;
         }
-        if (self.bt_cap < max_num_blocks) {
-            if (self.d_bt != 0) cudaz.cuMemFree(self.d_bt);
-            self.d_bt = try cudaz.cuMemAlloc(max_num_blocks * @sizeOf(c_int));
-            self.bt_cap = max_num_blocks;
-        }
         if (self.d_seq_lens == 0) self.d_seq_lens = try cudaz.cuMemAlloc(@sizeOf(c_int));
         if (self.d_start_pos == 0) self.d_start_pos = try cudaz.cuMemAlloc(@sizeOf(c_int));
     }
 
-    /// Asegura el scratch de decode (staging host + buffers device). En modo
-    /// grafo el staging se dimensiona al presupuesto completo (budget) en el
-    /// build, de modo que los punteros host capturados nunca se reasignan.
-    pub fn setupDecodeScratch(self: *Self, q_stride: usize, max_num_blocks: usize) !void {
-        try self.ensureDecodeBuffers(q_stride, max_num_blocks);
-        if (self.bt_staging.len < max_num_blocks) {
-            if (self.bt_staging.len > 0) cudaz.pinnedFree(c_int, self.bt_staging);
-            self.bt_staging = try cudaz.pinnedAlloc(c_int, max_num_blocks);
+    /// Asegura los buffers device de la block table de una capa de atención
+    /// (d_bt) y su staging host pinned (bt_staging). Cada capa tiene su propio
+    /// par; el grafo captura nodos HtoDAsync por capa que copian
+    /// bt_stagings[layer] → d_bts[layer].
+    fn ensureLayerDecodeScratch(self: *Self, layer_idx: usize, max_num_blocks: usize) !void {
+        try cudaz.ensureCurrent();
+        while (self.d_bts.items.len <= layer_idx) {
+            try self.d_bts.append(self.allocator, 0);
+            try self.bt_stagings.append(self.allocator, &.{});
+            try self.bt_caps.append(self.allocator, 0);
         }
+        if (self.bt_caps.items[layer_idx] < max_num_blocks) {
+            if (self.d_bts.items[layer_idx] != 0) cudaz.cuMemFree(self.d_bts.items[layer_idx]);
+            self.d_bts.items[layer_idx] = try cudaz.cuMemAlloc(max_num_blocks * @sizeOf(c_int));
+            if (self.bt_stagings.items[layer_idx].len > 0) cudaz.pinnedFree(c_int, self.bt_stagings.items[layer_idx]);
+            self.bt_stagings.items[layer_idx] = try cudaz.pinnedAlloc(c_int, max_num_blocks);
+            self.bt_caps.items[layer_idx] = max_num_blocks;
+        }
+    }
+
+    /// Asegura el scratch de decode (staging host + buffers device) de la capa
+    /// de atención `layer_idx`. En modo grafo el staging se dimensiona al
+    /// presupuesto completo (budget) en el build, de modo que los punteros host
+    /// capturados nunca se reasignan.
+    pub fn setupDecodeScratch(self: *Self, layer_idx: usize, q_stride: usize, max_num_blocks: usize) !void {
+        try self.ensureDecodeBuffers(q_stride);
+        try self.ensureLayerDecodeScratch(layer_idx, max_num_blocks);
         if (self.start_pos_staging.len == 0) self.start_pos_staging = try cudaz.pinnedAlloc(c_int, 1);
         if (self.seq_len_staging.len == 0) self.seq_len_staging = try cudaz.pinnedAlloc(c_int, 1);
     }
 
-    /// Rellena el staging host del decode (block table + start_pos + seq_len).
-    /// No toca el device: solo pinta el staging que el grafo copia.
-    pub fn fillStaging(self: *Self, block_table: *const BlockTable, start_pos: usize, seq_len: usize) void {
+    /// Rellena el staging host del decode de la capa `layer_idx` (block table +
+    /// start_pos + seq_len). No toca el device: solo pinta el staging que el
+    /// grafo copia.
+    pub fn fillStaging(self: *Self, layer_idx: usize, block_table: *const BlockTable, start_pos: usize, seq_len: usize) void {
         self.start_pos_staging[0] = @intCast(start_pos);
         self.seq_len_staging[0] = @intCast(seq_len);
-        for (self.bt_staging, 0..) |*d, i| {
+        for (self.bt_stagings.items[layer_idx], 0..) |*d, i| {
             d.* = if (block_table.getPhysical(i)) |phys| @intCast(phys) else -1;
         }
     }
 
-    /// HtoDAsync del staging host (bloqueable/grafo): d_bt, d_start_pos,
-    /// d_seq_lens. Ordenado en el stream compartido.
-    pub fn uploadScratch(self: *Self) !void {
+    /// HtoDAsync del staging host de la capa `layer_idx` (bloqueable/grafo):
+    /// d_bt[layer], d_start_pos, d_seq_lens. Ordenado en el stream compartido.
+    pub fn uploadScratch(self: *Self, layer_idx: usize) !void {
         try cudaz.ensureCurrent();
-        try cudaz.cuMemcpyHtoDAsync(self.d_bt, @intFromPtr(self.bt_staging.ptr), self.bt_staging.len * @sizeOf(c_int), self.stream);
+        try cudaz.cuMemcpyHtoDAsync(self.d_bts.items[layer_idx], @intFromPtr(self.bt_stagings.items[layer_idx].ptr), self.bt_stagings.items[layer_idx].len * @sizeOf(c_int), self.stream);
         try cudaz.cuMemcpyHtoDAsync(self.d_start_pos, @intFromPtr(self.start_pos_staging.ptr), @sizeOf(c_int), self.stream);
         try cudaz.cuMemcpyHtoDAsync(self.d_seq_lens, @intFromPtr(self.seq_len_staging.ptr), @sizeOf(c_int), self.stream);
     }
@@ -280,7 +305,7 @@ pub const PagedAttentionGpu = struct {
     /// HtoDAsync del start_pos solo (path de prefill, no capturado).
     pub fn uploadStartPos(self: *Self, start_pos: usize) !void {
         try cudaz.ensureCurrent();
-        try self.ensureDecodeBuffers(0, 0);
+        try self.ensureDecodeBuffers(0);
         if (self.start_pos_staging.len == 0) self.start_pos_staging = try cudaz.pinnedAlloc(c_int, 1);
         self.start_pos_staging[0] = @intCast(start_pos);
         try cudaz.cuMemcpyHtoDAsync(self.d_start_pos, @intFromPtr(self.start_pos_staging.ptr), @sizeOf(c_int), self.stream);
@@ -288,6 +313,10 @@ pub const PagedAttentionGpu = struct {
 
     pub fn getDStartPos(self: *Self) cudaz.CUdeviceptr {
         return self.d_start_pos;
+    }
+
+    pub fn getDSeqLens(self: *Self) cudaz.CUdeviceptr {
+        return self.d_seq_lens;
     }
 
     fn stageBlocks(self: *Self, block_alloc: *BlockAllocator, block_table: *const BlockTable) !void {
@@ -366,12 +395,14 @@ pub const PagedAttentionGpu = struct {
         // Subir solo los bloques referenciados por la block table.
         try self.stageBlocks(block_alloc, block_table);
 
-        try self.ensureDecodeBuffers(q_stride, max_num_blocks);
+        try self.ensureDecodeBuffers(q_stride);
+        try self.ensureLayerDecodeScratch(0, max_num_blocks);
+        var d_bt = self.d_bts.items[0];
 
         var seq_len_c: c_int = @intCast(seq_len);
 
         try cudaz.cuMemcpyHtoD(self.d_q16, @intFromPtr(q_f16.ptr), q_stride * @sizeOf(f16));
-        try cudaz.cuMemcpyHtoD(self.d_bt, @intFromPtr(bt_host.ptr), max_num_blocks * @sizeOf(c_int));
+        try cudaz.cuMemcpyHtoD(d_bt, @intFromPtr(bt_host.ptr), max_num_blocks * @sizeOf(c_int));
         try cudaz.cuMemcpyHtoD(self.d_seq_lens, @intFromPtr(&seq_len_c), @sizeOf(c_int));
 
         const func = cudaz.cuModuleGetFunction(self.module, "paged_attention_decode_f16_kernel") catch return error.KernelNotFound;
@@ -387,7 +418,7 @@ pub const PagedAttentionGpu = struct {
         var d_cache_v = try self.cacheBase(block_alloc);
 
         var kp = [_]?*anyopaque{
-            &self.d_out16, &self.d_q16,   &d_cache_v, &self.d_bt,
+            &self.d_out16, &self.d_q16,   &d_cache_v, &d_bt,
             &self.d_seq_lens, &num_seqs_c, &max_blocks_c, &num_q_c,
             &num_kv_c,   &head_dim_c, &block_size_c,
         };
@@ -406,14 +437,15 @@ pub const PagedAttentionGpu = struct {
     // q16/out16 ya viven en GPU (AttentionGpu); el KV se escribe con
     // kvAppendF16 y el decode lee el pool sin staging ni sync. El llamador
     // sincroniza el stream una vez por token.
-    pub fn uploadBlockTable(self: *Self, bt_host: []const c_int) !void {
+    pub fn uploadBlockTable(self: *Self, layer_idx: usize, bt_host: []const c_int) !void {
         try cudaz.ensureCurrent();
-        try self.ensureDecodeBuffers(self.config.num_q_heads * self.config.head_dim, bt_host.len);
-        try cudaz.cuMemcpyHtoDAsync(self.d_bt, @intFromPtr(bt_host.ptr), bt_host.len * @sizeOf(c_int), self.stream);
+        try self.ensureDecodeBuffers(self.config.num_q_heads * self.config.head_dim);
+        try self.ensureLayerDecodeScratch(layer_idx, bt_host.len);
+        try cudaz.cuMemcpyHtoDAsync(self.d_bts.items[layer_idx], @intFromPtr(bt_host.ptr), bt_host.len * @sizeOf(c_int), self.stream);
     }
 
-    pub fn getDbt(self: *Self) cudaz.CUdeviceptr {
-        return self.d_bt;
+    pub fn getDbt(self: *Self, layer_idx: usize) cudaz.CUdeviceptr {
+        return self.d_bts.items[layer_idx];
     }
 
     /// El bloque será escrito por GPU (kvAppendF16) en lugar de H2D: lo marca
@@ -443,6 +475,7 @@ pub const PagedAttentionGpu = struct {
     /// decode). Sin staging de bloques y sin sync.
     pub fn decodeDevice(
         self: *Self,
+        layer_idx: usize,
         q16: cudaz.CUdeviceptr,
         out16: cudaz.CUdeviceptr,
         block_alloc: *BlockAllocator,
@@ -452,7 +485,7 @@ pub const PagedAttentionGpu = struct {
         const num_kv_heads = config.num_kv_heads;
         const head_dim = config.head_dim;
         const block_size = config.block_size;
-        const max_num_blocks = self.bt_staging.len;
+        const max_num_blocks = self.bt_stagings.items[layer_idx].len;
 
         try cudaz.ensureCurrent();
 
@@ -470,7 +503,7 @@ pub const PagedAttentionGpu = struct {
         g_decode_persistent.out16v = out16;
 
         g_decode_persistent.kp = [_]?*anyopaque{
-            &g_decode_persistent.out16v, &g_decode_persistent.q16v, &g_decode_persistent.d_cache_v, &self.d_bt,
+            &g_decode_persistent.out16v, &g_decode_persistent.q16v, &g_decode_persistent.d_cache_v, &self.d_bts.items[layer_idx],
             &self.d_seq_lens, &g_decode_persistent.num_seqs_c, &g_decode_persistent.max_blocks_c, &g_decode_persistent.num_q_c,
             &g_decode_persistent.num_kv_c, &g_decode_persistent.head_dim_c, &g_decode_persistent.block_size_c,
         };
@@ -484,6 +517,7 @@ const shared_bytes: c_uint = @intCast(2 * head_dim * @sizeOf(f32));
     /// es la posición absoluta del primer query. Sin staging de bloques ni sync.
     pub fn prefillDevice(
         self: *Self,
+        layer_idx: usize,
         q16: cudaz.CUdeviceptr,
         out16: cudaz.CUdeviceptr,
         block_alloc: *BlockAllocator,
@@ -500,8 +534,9 @@ const shared_bytes: c_uint = @intCast(2 * head_dim * @sizeOf(f32));
         const max_num_blocks = bt_host.len;
 
         try cudaz.ensureCurrent();
-        try self.ensureDecodeBuffers(q_stride, max_num_blocks);
-        try cudaz.cuMemcpyHtoDAsync(self.d_bt, @intFromPtr(bt_host.ptr), max_num_blocks * @sizeOf(c_int), self.stream);
+        try self.ensureDecodeBuffers(q_stride);
+        try self.ensureLayerDecodeScratch(layer_idx, max_num_blocks);
+        try cudaz.cuMemcpyHtoDAsync(self.d_bts.items[layer_idx], @intFromPtr(bt_host.ptr), max_num_blocks * @sizeOf(c_int), self.stream);
 
         const func = cudaz.cuModuleGetFunction(self.module, "paged_attention_prefill_f16_kernel") catch return error.KernelNotFound;
 
@@ -517,7 +552,7 @@ const shared_bytes: c_uint = @intCast(2 * head_dim * @sizeOf(f32));
         var out16v = out16;
 
         var kp = [_]?*anyopaque{
-            &out16v,    &q16v, &d_cache_v, &self.d_bt,
+            &out16v,    &q16v, &d_cache_v, &self.d_bts.items[layer_idx],
             &n_queries_c, &start_pos_c, &num_q_c, &num_kv_c, &head_dim_c,
             &block_size_c,
         };

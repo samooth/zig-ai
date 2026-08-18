@@ -26,6 +26,7 @@ const hybrid_layer = @import("transformer");
 const norm = @import("norm");
 const paged_attn = @import("paged_attention");
 const decode_graph = @import("decode_graph");
+const debugz = @import("debug");
 
 /// Parámetros de runtime parseados de la línea de comandos.
 const CliParams = struct {
@@ -104,6 +105,8 @@ fn printGpuInfo(stdout: anytype) !void {
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
+
+    debugz.init();
 
     var stdout_buffer: [0x200]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
@@ -742,7 +745,7 @@ fn runHybridInference(
         }
         _ = i;
     }
-    const use_gpu_prefill = std.c.getenv("NOGPU_PREFILL") == null;
+    const use_gpu_prefill = !debugz.dbg.no_gpu_prefill;
     var logits_f32 = try allocator.alloc(f32, vocab);
     defer allocator.free(logits_f32);
 
@@ -770,7 +773,7 @@ fn runHybridInference(
         defer allocator.free(stage);
 
         const perf_t = @import("time").Timer.start();
-        const perf_prefill = std.c.getenv("PERF_STAGE") != null;
+        const perf_prefill = debugz.dbg.perf_stage;
         var p_ev: []cudaz.CUevent = undefined;
         var p_layer_ns: []i128 = undefined;
         var p_t_embed_ns: i128 = 0;
@@ -967,7 +970,7 @@ fn runHybridInference(
      // nodos capturados (HtoDAsync) los copian a buffers device fijos. NOGRAPH=1
      // desactiva; ante error de captura/instanciación se cae al camino normal.
      var decode_g: ?decode_graph.DecodeGraph = null;
-     const graph_ok = std.c.getenv("NOGRAPH") == null;
+     const graph_ok = !debugz.dbg.no_graph;
      if (graph_ok) {
          // Bloques para el token de la captura (el decode real los re-usa).
          for (layer_block_tables) |bt_opt| {
@@ -1019,7 +1022,7 @@ fn runHybridInference(
              .stream = lk.stream,
              .n_embd = n_embd,
          };
-         if (std.c.getenv("CHKSTATE") != null) {
+         if (debugz.dbg.chk_state) {
              try cudaz.cuCtxSynchronize();
              for (state_parts.items) |p| {
                  const nf32 = p.bytes / @sizeOf(f32);
@@ -1036,7 +1039,7 @@ fn runHybridInference(
              g.setEmbedStaging(embed_staging);
              if (captureDecodeGraph(g, &lk, layers, &g_cur, &g_nxt, &g_normed, &g_logits, &g_out_norm, &engine, allocator, n_embd, vocab, rms_eps, current_pos, state_parts.items, lm_head_q4, lm_head_q6k, lm_head_q, lm_head)) {
                  decode_g = dg;
-                 if (std.c.getenv("CHKSTATE") != null) {
+if (debugz.dbg.chk_state) {
                      try cudaz.cuCtxSynchronize();
                      for (state_parts.items) |p| {
                          const nf32 = p.bytes / @sizeOf(f32);
@@ -1056,7 +1059,7 @@ fn runHybridInference(
          }
      }
 
-     const perf_stage = std.c.getenv("PERF_STAGE") != null;
+     const perf_stage = debugz.dbg.perf_stage;
      var ev: []cudaz.CUevent = undefined;
      var layer_gpu_ns: []i128 = undefined;
      var t_blocks_ns: i128 = 0;
@@ -1138,7 +1141,7 @@ fn runHybridInference(
         }
         t_enqueue_ns += perf_t.read() - t_enq0;
 
-        if (std.c.getenv("DUMPNORM") != null and current_pos == seq_len) {
+        if (debugz.dbg.dump_norm and current_pos == seq_len) {
             try cudaz.cuStreamSynchronize(lk.stream);
             const nb = try allocator.alloc(f32, n_embd);
             defer allocator.free(nb);
@@ -1171,27 +1174,68 @@ fn runHybridInference(
         const t_d2h0 = perf_t.read();
         try cudaz.cuMemcpyDtoH(@intFromPtr(logits_f32.ptr), g_logits.ptr(), vocab * @sizeOf(f32));
 
-        if (std.c.getenv("DUMPKV") != null) {
+        if (debugz.dbg.dump_kv) {
             for (layers, 0..) |*layer, li| {
                 if (!layer.is_attention) continue;
                 const bt_opt = layer_block_tables[li] orelse continue;
                 const phys = bt_opt.getPhysical(0) orelse continue;
                 const ba = paged_kv.block_alloc;
+                if (debugz.dbg.dump_kv) {
+                    for (layer_block_tables, 0..) |bt_opt2, li2| {
+                        if (bt_opt2) |bt2| {
+                            const hb2: ?usize = bt2.getPhysical(0);
+                            std.debug.print("DUMPKV pos={d} LAYERTAB li={d} bt[0]={?d} blocks={d}\n", .{ current_pos, li2, hb2, bt2.numBlocks() });
+                        }
+                    }
+                }
                 const blk = ba.memory_pool[phys * ba.block_bytes ..][0..ba.block_bytes];
                 const hb = std.mem.bytesAsSlice(u16, blk);
                 const nkv = ba.num_kv_heads;
                 const hd = ba.head_dim;
                 const stride = nkv * hd;
-                for ([_]usize{ 5, current_pos % ba.block_size }) |tpos| {
+                var all_h: [16]f64 = [_]f64{0} ** 16;
+                for (0..@min(16, ba.block_size)) |tpos| {
                     const base = tpos * stride;
                     var sp: f64 = 0;
                     for (0..stride) |i| sp += @abs(@as(f64, @as(f32, @floatFromInt(hb[base + i]))));
-                    std.debug.print("DUMPKV pos={d} layer={d} sum={d:.4}\n", .{ current_pos, li, sp });
+                    all_h[tpos] = sp;
+                }
+                std.debug.print("DUMPKV pos={d} layer={d} HOST phys={d} all=", .{ current_pos, li, phys });
+                for (all_h) |sp| std.debug.print("{d:.1},", .{sp});
+                std.debug.print("\n", .{});
+                if (layer.attn_layer.?.paged_gpu) |gpu| {
+                    const st0: c_int = if (li < gpu.bt_stagings.items.len and gpu.bt_stagings.items[li].len > 0) gpu.bt_stagings.items[li][0] else -999;
+                    const hbt0: ?usize = layer.attn_layer.?.block_table.getPhysical(0);
+                    var dbt0: c_int = 0;
+                    try cudaz.cuMemcpyDtoH(@intFromPtr(&dbt0), gpu.getDbt(li), @sizeOf(c_int));
+                    const stlen: usize = if (li < gpu.bt_stagings.items.len) gpu.bt_stagings.items[li].len else 0;
+                    std.debug.print("DUMPKV pos={d} layer={d} host_bt[0]={?d} staging[0]={d} staging_len={d} d_bt[0]={d}\n", .{ current_pos, li, hbt0, st0, stlen, dbt0 });
+                    const dv = try gpu.cacheBase(paged_kv.block_alloc);
+                    const dbuf = try allocator.alloc(u16, ba.block_bytes / 2);
+                    defer allocator.free(dbuf);
+                    try cudaz.cuMemcpyDtoH(@intFromPtr(dbuf.ptr), dv + phys * ba.block_bytes, ba.block_bytes);
+                    var all_d: [16]f64 = [_]f64{0} ** 16;
+                    for (0..@min(16, ba.block_size)) |tpos| {
+                        const base = tpos * stride;
+                        var sp: f64 = 0;
+                        for (0..stride) |i| sp += @abs(@as(f64, @as(f32, @floatFromInt(dbuf[base + i]))));
+                        all_d[tpos] = sp;
+                    }
+                    std.debug.print("DUMPKV pos={d} layer={d} DEV  phys={d} all=", .{ current_pos, li, phys });
+                    for (all_d) |sp| std.debug.print("{d:.1},", .{sp});
+                    std.debug.print("\n", .{});
+                    var dsp: c_int = 0;
+                    try cudaz.cuMemcpyDtoH(@intFromPtr(&dsp), gpu.getDStartPos(), @sizeOf(c_int));
+                    var dsq: c_int = 0;
+                    try cudaz.cuMemcpyDtoH(@intFromPtr(&dsq), gpu.getDSeqLens(), @sizeOf(c_int));
+                    var dbt: c_int = 0;
+                    try cudaz.cuMemcpyDtoH(@intFromPtr(&dbt), gpu.getDbt(li), @sizeOf(c_int));
+                    std.debug.print("DUMPKV pos={d} layer={d} d_start_pos={d} d_seq_len={d} d_bt[0]={d}\n", .{ current_pos, li, dsp, dsq, dbt });
                 }
                 break;
             }
         }
-        if (std.c.getenv("DUMP_LOGITS") != null) {
+        if (debugz.dbg.dump_logits) {
             for (logits_f32, 0..) |v, i| std.debug.print("LG {d} {d}\n", .{ i, v });
         }
          const t_samp0 = perf_t.read();

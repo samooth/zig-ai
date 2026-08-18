@@ -285,6 +285,13 @@ pub fn build(b: *std.Build) void {
     gguf_model_mod.addImport("core", core_mod);
     gguf_model_mod.addImport("quant_weight", quant_weight_mod);
 
+    // === Módulo debug (breadcrumbs de diagnóstico centralizados) ===
+    const debug_mod = b.createModule(.{
+        .root_source_file = b.path("src/debug.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // === Módulo layer_kernels (elementwise GPU para capa híbrida residente) ===
     const layer_kernels_mod = b.createModule(.{
         .root_source_file = b.path("src/cuda/layer_kernels.zig"),
@@ -293,6 +300,7 @@ pub fn build(b: *std.Build) void {
     });
     layer_kernels_mod.addImport("cudaz", cudaz_mod);
     layer_kernels_mod.addOptions("build_options", layer_options);
+    layer_kernels_mod.addImport("debug", debug_mod);
 
     // === Módulo decode_graph (CUDA Graphs para el decode por token) ===
     const decode_graph_mod = b.createModule(.{
@@ -301,6 +309,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     decode_graph_mod.addImport("cudaz", cudaz_mod);
+    decode_graph_mod.addImport("debug", debug_mod);
+    decode_graph_mod.addImport("layer_kernels", layer_kernels_mod);
 
     // === Módulo ssm ===
     const ssm_mod = b.createModule(.{
@@ -315,6 +325,7 @@ pub fn build(b: *std.Build) void {
     ssm_mod.addImport("layer_kernels", layer_kernels_mod);
     ssm_mod.addImport("quant_weight", quant_weight_mod);
     ssm_mod.addImport("gguf", gguf_mod);
+    ssm_mod.addImport("debug", debug_mod);
 
     // === Módulo hybrid_attn ===
     const hybrid_attn_mod = b.createModule(.{
@@ -333,6 +344,7 @@ pub fn build(b: *std.Build) void {
     hybrid_attn_mod.addImport("cublas", cublas_mod);
     hybrid_attn_mod.addImport("cudaz", cudaz_mod);
     hybrid_attn_mod.addImport("layer_kernels", layer_kernels_mod);
+    hybrid_attn_mod.addImport("debug", debug_mod);
 
     // === Módulo hybrid_layer ===
     const hybrid_layer_mod = b.createModule(.{
@@ -353,6 +365,7 @@ pub fn build(b: *std.Build) void {
     hybrid_layer_mod.addImport("cublas", cublas_mod);
     hybrid_layer_mod.addImport("cudaz", cudaz_mod);
     hybrid_layer_mod.addImport("layer_kernels", layer_kernels_mod);
+    hybrid_layer_mod.addImport("debug", debug_mod);
 
     // === Módulo gguf_tokenizer ===
     const gguf_tokenizer_mod = b.createModule(.{
@@ -464,6 +477,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("decode_graph", decode_graph_mod);
     exe_mod.addImport("cublas", cublas_mod);
     exe_mod.addImport("time", time_mod);
+    exe_mod.addImport("debug", debug_mod);
 
     if (ptx_output) |ptx| {
         exe_mod.addAnonymousImport("flash_attention_ptx", .{ .root_source_file = ptx });
