@@ -181,6 +181,18 @@ pub const AttentionLayer = struct {
         self.staged_block = -1;
         self.staged_tokens = 0;
     }
+
+    /// Libera scratch f32 dequantizados. Requiere re-alloc en loadWeightsFromGguf.
+    pub fn unloadWeights(self: *Self) void {
+        if (self.scratch_q.len > 0) self.allocator.free(self.scratch_q);
+        if (self.scratch_k.len > 0) self.allocator.free(self.scratch_k);
+        if (self.scratch_v.len > 0) self.allocator.free(self.scratch_v);
+        if (self.scratch_o.len > 0) self.allocator.free(self.scratch_o);
+        self.scratch_q = &[_]f32{};
+        self.scratch_k = &[_]f32{};
+        self.scratch_v = &[_]f32{};
+        self.scratch_o = &[_]f32{};
+    }
     /// Cuantiza el tile f16 acumulado (staging) al layout canónico GGUF en
     /// el bloque físico cuyo bloque lógico es `self.staged_block`. Se usa al
     /// sellar un bloque completo o al cambiar de bloque lógico.
@@ -213,8 +225,20 @@ pub const AttentionLayer = struct {
         self.staged_tokens = 0;
     }
 
-    /// Carga pesos desde GGUF (nombres qwen35).
+    /// Carga pesos desde GGUF (nombres qwen35). Si scratch está vacío
+    /// (después de unloadWeights), re-alloca antes de dequantizar.
     pub fn loadWeightsFromGguf(self: *Self, g: *const gguf.GgufFile) !void {
+        // Re-allocar scratch si fue liberado por unloadWeights
+        if (self.scratch_q.len == 0) {
+            const p = self.params;
+            const qg_dim = p.qg_dim();
+            const kv_dim = p.kv_dim();
+            self.scratch_q = try self.allocator.alloc(f32, qg_dim * p.n_embd);
+            self.scratch_k = try self.allocator.alloc(f32, kv_dim * p.n_embd);
+            self.scratch_v = try self.allocator.alloc(f32, kv_dim * p.n_embd);
+            self.scratch_o = try self.allocator.alloc(f32, p.n_embd * p.n_head * p.head_dim);
+        }
+
         const prefix = try std.fmt.allocPrint(self.allocator, "blk.{d}.", .{self.layer_idx});
         defer self.allocator.free(prefix);
 

@@ -287,6 +287,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     quant_weight_mod.addImport("gguf", gguf_mod);
+    quant_weight_mod.addImport("core", core_mod);
 
     // === Módulo gguf_model ===
     const gguf_model_mod = b.createModule(.{
@@ -490,6 +491,22 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("paged_attention", paged_attention_mod);
     exe_mod.addImport("layer_kernels", layer_kernels_mod);
     exe_mod.addImport("decode_graph", decode_graph_mod);
+
+    // === Módulo layer_streamer (AirLLM layer streaming) ===
+    const layer_streamer_mod = b.createModule(.{
+        .root_source_file = b.path("src/transformer/layer_streamer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    layer_streamer_mod.addImport("hybrid_layer", hybrid_layer_mod);
+    layer_streamer_mod.addImport("gguf", gguf_mod);
+    layer_streamer_mod.addImport("model_config", model_config_mod);
+    layer_streamer_mod.addImport("matmul", matmul_mod);
+    layer_streamer_mod.addImport("paged_attention", paged_attention_mod);
+    layer_streamer_mod.addImport("core", core_mod);
+    layer_streamer_mod.addImport("debug", debug_mod);
+    transformer_mod.addImport("layer_streamer", layer_streamer_mod);
+    exe_mod.addImport("layer_streamer", layer_streamer_mod);
     exe_mod.addImport("cublas", cublas_mod);
     exe_mod.addImport("time", time_mod);
     exe_mod.addImport("debug", debug_mod);
@@ -644,7 +661,7 @@ pub fn build(b: *std.Build) void {
     const bench_pa_mod = b.createModule(.{
         .root_source_file = b.path("benchmarks/bench_paged_attention.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = .ReleaseFast,
     });
     bench_pa_mod.addImport("paged_attention", paged_attention_mod);
     bench_pa_mod.addImport("cudaz", cudaz_mod);

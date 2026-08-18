@@ -103,6 +103,9 @@ pub const HybridLayer = struct {
     block_table: ?*paged.BlockTable = null,
     paged_gpu: ?*paged.PagedAttentionGpu = null,
 
+    // Track weight load state for layer streaming (AirLLM)
+    weights_loaded: bool = false,
+
     // Buffers GPU para el forward residente (Path B).
     gpu: ?HybridGpu = null,
 
@@ -209,8 +212,17 @@ pub const HybridLayer = struct {
         if (self.ssm_layer) |l| l.resetState();
     }
 
-    /// Carga pesos desde GGUF (nombres qwen35)
+    /// Carga pesos desde GGUF (nombres qwen35). Si weights_loaded es false,
+    /// re-alloca los scratch buffers antes de dequantizar.
     pub fn loadWeightsFromGguf(self: *HybridLayer, g: *const gguf.GgufFile) !void {
+        // If previously unloaded (scratch freed), re-allocate
+        if (self.weights_loaded == false and self.scratch_gate.len == 0) {
+            const p = self.params;
+            self.scratch_gate = try self.allocator.alloc(f32, p.intermediate_dim * p.n_embd);
+            self.scratch_up = try self.allocator.alloc(f32, p.intermediate_dim * p.n_embd);
+            self.scratch_down = try self.allocator.alloc(f32, p.n_embd * p.intermediate_dim);
+        }
+
         const prefix = try std.fmt.allocPrint(self.allocator, "blk.{d}.", .{self.layer_idx});
         defer self.allocator.free(prefix);
 
@@ -236,6 +248,27 @@ pub const HybridLayer = struct {
         } else {
             if (self.ssm_layer) |*l| try l.loadWeightsFromGguf(g);
         }
+        self.weights_loaded = true;
+    }
+
+    /// Libera los pesos dequantizados (scratch f32). Los QuantWeight (mmap
+    /// references) permanecen — pueden recargarse vía loadWeightsFromGguf.
+    /// El LayerStreamer llama esto en LRU eviction; reload es posible porque
+    /// loadWeightsFromGguf re-alloca los scratch si están vacíos.
+    pub fn unloadWeights(self: *HybridLayer) void {
+        if (!self.weights_loaded) return;
+        // Free scratch buffers (re-allocatables in loadWeightsFromGguf)
+        self.allocator.free(self.scratch_gate);
+        self.allocator.free(self.scratch_up);
+        self.allocator.free(self.scratch_down);
+        self.scratch_gate = &[_]f32{};
+        self.scratch_up = &[_]f32{};
+        self.scratch_down = &[_]f32{};
+        // Unload sub-layer weights (attention/SSM) — frees their scratch too
+        if (self.attn_layer) |*l| l.unloadWeights();
+        if (self.ssm_layer) |*l| l.unloadWeights();
+        // Norm weights remain resident (small: [n_embd] each)
+        self.weights_loaded = false;
     }
 
     /// Forward del bloque híbrido:

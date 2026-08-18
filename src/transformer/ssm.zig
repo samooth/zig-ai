@@ -173,10 +173,31 @@ pub const SsmLayer = struct {
         @memset(self.s_state, 0);
     }
 
+    /// Re-alloca scratch si fue liberado por unloadWeights.
+    fn ensureScratch(self: *Self) !void {
+        if (self.scratch_qkv.len > 0) return;
+        const p = self.params;
+        const qkv_dim = p.qkvDim();
+        self.scratch_qkv = try self.allocator.alloc(f32, qkv_dim * p.n_embd);
+        self.scratch_z = try self.allocator.alloc(f32, p.d_inner * p.n_embd);
+        self.scratch_out = try self.allocator.alloc(f32, p.n_embd * p.d_inner);
+    }
+
+    /// Libera scratch f32 dequantizados. Requiere dequantización en loadWeightsFromGguf.
+    pub fn unloadWeights(self: *Self) void {
+        if (self.scratch_qkv.len > 0) self.allocator.free(self.scratch_qkv);
+        if (self.scratch_z.len > 0) self.allocator.free(self.scratch_z);
+        if (self.scratch_out.len > 0) self.allocator.free(self.scratch_out);
+        self.scratch_qkv = &[_]f32{};
+        self.scratch_z = &[_]f32{};
+        self.scratch_out = &[_]f32{};
+    }
+
     /// Carga los pesos desde el GGUF (nombres qwen35). Los grandes quedan
     /// como QuantWeight (bytes mmap, sin copia); los pequeños se dequantizan
     /// a f32.
     pub fn loadWeightsFromGguf(self: *SsmLayer, g: *const gguf.GgufFile) !void {
+        try self.ensureScratch();
         const prefix = try std.fmt.allocPrint(self.allocator, "blk.{d}.", .{self.layer_idx});
         defer self.allocator.free(prefix);
 

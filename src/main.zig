@@ -26,6 +26,7 @@ const hybrid_layer = @import("transformer");
 const norm = @import("norm");
 const paged_attn = @import("paged_attention");
 const decode_graph = @import("decode_graph");
+const layer_streamer = @import("layer_streamer");
 const debugz = @import("debug");
 
 /// Parámetros de runtime parseados de la línea de comandos.
@@ -61,6 +62,9 @@ const CliParams = struct {
     // null = auto (GPU si disponible); 0 = CPU; >0 = offload completo a GPU
     // (este motor no soporta offload parcial).
     n_gpu_layers: ?usize = null,
+    /// AirLLM layer streaming: async prefetch + LRU eviction
+    layer_stream: bool = false,
+    layer_stream_max: usize = 2,
 };
 
 const SpecType = enum { none, draft_mtp };
@@ -245,6 +249,11 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args, stdout: anyty
             } else {
                 try stdout.print("[!] --quant inválido: {s} (auto|off)\n", .{v});
             }
+        } else if (std.mem.eql(u8, arg, "--layer-stream")) {
+            params.layer_stream = true;
+        } else if (std.mem.eql(u8, arg, "--layer-stream-max")) {
+            const v = try nextValue(&it, "--layer-stream-max");
+            params.layer_stream_max = std.fmt.parseInt(usize, v, 10) catch 2;
         } else if (std.mem.eql(u8, arg, "-ngl") or std.mem.eql(u8, arg, "--n-gpu-layers") or std.mem.eql(u8, arg, "--gpu-layers")) {
             const v = try nextValue(&it, "--n-gpu-layers");
             params.n_gpu_layers = std.fmt.parseInt(usize, v, 10) catch 0;
@@ -299,6 +308,8 @@ fn printHelp(stdout: anytype) !void {
         \\  --spec-type <draft-mtp>     Decodificación especulativa (def: none)
         \\  --spec-draft-n-max <n>      Tokens draft por round (def: 16)
         \\  --quant <auto|off>          GEMM de pesos cuantizados Q4_0 (def: auto)
+        \\  --layer-stream             Activar layer streaming (prefetch async + LRU)
+        \\  --layer-stream-max <n>      Max capas residentes en VRAM (def: 2)
         \\  -jinja                     Usar plantilla chat jinja del tokenizer
         \\  -h, --help                  Muestra esta ayuda
         \\
@@ -690,7 +701,6 @@ fn runHybridInference(
             if (layer_block_tables[i]) |bt| bt else null,
             shared_gpu_ptr,
         );
-        try layers[i].loadWeightsFromGguf(&model.file);
     }
     defer for (layers) |*l| l.deinit();
     defer {
@@ -700,6 +710,30 @@ fn runHybridInference(
                 allocator.destroy(bt);
             }
         }
+    }
+
+    // LayerStreamer: async prefetch + LRU eviction (AirLLM-style)
+    var streamer: ?layer_streamer.LayerStreamer = null;
+    if (params.layer_stream) {
+        var s = try layer_streamer.LayerStreamer.init(
+            allocator, layers, &model.file, cfg,
+            params.layer_stream_max, 2,
+        );
+        if (debugz.dbg.at(.info)) s.enableDebug();
+        streamer = s;
+        try stdout.print("[+] LayerStreamer activado: max_resident={d}\n", .{params.layer_stream_max});
+        try stdout.flush();
+    } else {
+        // Eager load: load all weights up front (original behavior)
+        for (0..cfg.block_count) |i| {
+            try layers[i].loadWeightsFromGguf(&model.file);
+        }
+    }
+    if (streamer) |*s| {
+        try s.prefetchLayer(0);
+    }
+    if (streamer) |*s| {
+        defer s.deinit();
     }
 
     // Tokenizer
@@ -802,7 +836,9 @@ fn runHybridInference(
             if (perf_prefill) try cudaz.cuEventRecord(p_ev[0], lk.stream);
             const t_enq0 = perf_t.read();
             for (layers, 0..) |*layer, li| {
+                if (streamer) |*s| try s.ensureLayerLoaded(li);
                 try hybrid_layer.HybridLayer.forwardGPU(layer, &lk, cur2gpu, &nxt2gpu, pos, n);
+                if (streamer) |*s| try s.prefetchNext(li);
                 if (perf_prefill) try cudaz.cuEventRecord(p_ev[li + 1], lk.stream);
                 const t2 = cur2gpu;
                 cur2gpu = nxt2gpu;
@@ -1121,7 +1157,9 @@ if (debugz.dbg.chk_state) {
             var cur2gpu = g_cur;
             var nxt2gpu = g_nxt;
             for (layers, 0..) |*layer, li| {
+                if (streamer) |*s| try s.ensureLayerLoaded(li);
                 try hybrid_layer.HybridLayer.forwardGPU(layer, &lk, cur2gpu, &nxt2gpu, current_pos, 1);
+                if (streamer) |*s| try s.prefetchNext(li);
                 if (perf_stage) try cudaz.cuEventRecord(ev[li + 1], lk.stream);
                 const t2 = cur2gpu;
                 cur2gpu = nxt2gpu;
