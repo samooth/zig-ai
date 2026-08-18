@@ -166,17 +166,18 @@ pub const GpuInfo = struct {
 
 /// Nombre + compute capability + memoria total de `dev` (para log/verificación
 /// de que los cubins compilados coinciden con la GPU).
-pub fn cuDeviceInfo(dev: CUdevice) !GpuInfo {
+pub fn cuDeviceInfo(allocator: std.mem.Allocator, dev: CUdevice) !GpuInfo {
     var name_buf: [256]u8 = undefined;
     if (cudalib.cuDeviceGetName(&name_buf, @intCast(name_buf.len), dev) != .SUCCESS) return error.CudaError;
     const name_len = std.mem.indexOfScalar(u8, &name_buf, 0) orelse name_buf.len;
+    const name = try allocator.dupe(u8, name_buf[0..name_len]);
     var major: c_int = 0;
     var minor: c_int = 0;
     if (cudalib.cuDeviceComputeCapability(&major, &minor, dev) != .SUCCESS) return error.CudaError;
     var total_mem: usize = 0;
     if (cudalib.cuDeviceTotalMem(&total_mem, dev) != .SUCCESS) return error.CudaError;
     return .{
-        .name = name_buf[0..name_len],
+        .name = name,
         .major = major,
         .minor = minor,
         .total_mem_bytes = total_mem,

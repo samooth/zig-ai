@@ -109,3 +109,51 @@ pub const ActivationPool = struct {
             .{ self.entries.items.len, self.used_bytes / (1024*1024), self.hits, self.misses, ratio });
     }
 };
+
+const testing = std.testing;
+
+test "ActivationPool: alloc and reuse" {
+    var pool = ActivationPool.init(testing.allocator, 1024);
+    defer pool.deinit();
+
+    const buf1 = try pool.alloc(100);
+    try testing.expectEqual(buf1.len, 100);
+
+    pool.release(buf1);
+
+    // Second alloc of same size should reuse
+    const buf2 = try pool.alloc(100);
+    try testing.expectEqual(buf2.ptr, buf1.ptr);
+
+    pool.release(buf2);
+}
+
+test "ActivationPool: best-fit selection" {
+    var pool = ActivationPool.init(testing.allocator, 1024 * 1024);
+    defer pool.deinit();
+
+    const big = try pool.alloc(200);
+    pool.release(big);
+
+    const small = try pool.alloc(50);
+    pool.release(small);
+
+    // Alloc 48 bytes — should get the 50-byte buffer (best-fit), not the 200-byte one
+    const reused = try pool.alloc(48);
+    try testing.expectEqual(reused.ptr, small.ptr);
+    pool.release(reused);
+    pool.release(big);
+}
+
+test "ActivationPool: eviction when over max_bytes" {
+    var pool = ActivationPool.init(testing.allocator, 400);
+    defer pool.deinit();
+
+    const buf1 = try pool.alloc(200);
+    pool.release(buf1);
+
+    const buf2 = try pool.alloc(200);
+    pool.release(buf2);
+
+    _ = try pool.alloc(1); // pushes to 600, triggers eviction
+}

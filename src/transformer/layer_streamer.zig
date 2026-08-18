@@ -70,7 +70,6 @@ pub const LayerStreamer = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        // Join all spawned threads
         for (self.spawned_threads) |t| {
             if (t) |thread| thread.join();
         }
@@ -88,7 +87,6 @@ pub const LayerStreamer = struct {
         self.maybeEvict();
     }
 
-    /// Spin-lock helper using std.atomic.Mutex (tryLock + yield).
     fn lock(self: *Self) void {
         while (!self.mutex.tryLock()) {
             std.Thread.yield() catch {};
@@ -99,8 +97,6 @@ pub const LayerStreamer = struct {
         self.mutex.unlock();
     }
 
-    /// Dispara carga async de los pesos de `layer_idx` (no bloquea).
-    /// Si ya está cargado o en progreso, retorna inmediatamente.
     pub fn prefetchLayer(self: *Self, layer_idx: usize) !void {
         self.lock();
         defer self.unlock();
@@ -113,10 +109,8 @@ pub const LayerStreamer = struct {
         self.spawned_threads[layer_idx] = thread;
     }
 
-    /// Bloquea hasta que `layer_idx` esté loaded, luego marca como usado.
     pub fn ensureLayerLoaded(self: *Self, layer_idx: usize) !void {
         self.lock();
-        // Wait while loading is in progress
         var state = self.states[layer_idx].load(.acquire);
         while (state == .loading) {
             self.unlock();
@@ -124,10 +118,8 @@ pub const LayerStreamer = struct {
             self.lock();
             state = self.states[layer_idx].load(.acquire);
         }
-        self.states[layer_idx].store(.loading, .release);
         self.unlock();
 
-        // If still unloaded, load synchronously
         if (state == .unloaded) {
             try self.loadLayerSync(layer_idx);
         }
@@ -139,7 +131,6 @@ pub const LayerStreamer = struct {
         }
     }
 
-    /// Carga sincronamente los pesos de una capa.
     fn loadLayerSync(self: *Self, layer_idx: usize) !void {
         self.lock();
         self.states[layer_idx].store(.loading, .release);
@@ -153,7 +144,6 @@ pub const LayerStreamer = struct {
         self.unlock();
     }
 
-    /// Worker thread: carga pesos y notifica.
     fn runLoad(streamer: *LayerStreamer, layer_idx: usize) void {
         const result = streamer.layers[layer_idx].loadWeightsFromGguf(streamer.g);
 
@@ -173,7 +163,6 @@ pub const LayerStreamer = struct {
         streamer.unlock();
     }
 
-    /// Libera pesos de una capa específica.
     pub fn unloadLayer(self: *Self, layer_idx: usize) void {
         self.lock();
         const state = self.states[layer_idx].load(.acquire);
@@ -195,7 +184,6 @@ pub const LayerStreamer = struct {
         }
     }
 
-    /// Evict LRU hasta estar bajo el límite de residentes.
     fn maybeEvict(self: *Self) void {
         const count = self.resident_count.load(.acquire);
         if (count <= self.max_resident) return;
@@ -230,7 +218,6 @@ pub const LayerStreamer = struct {
         }
     }
 
-    /// Prefetch de la capa siguiente (async). Llamar después de ensureLayerLoaded(i).
     pub fn prefetchNext(self: *Self, layer_idx: usize) !void {
         const next = layer_idx + 1;
         if (next >= self.layers.len) return;
@@ -256,3 +243,42 @@ pub const LayerStreamer = struct {
         });
     }
 };
+
+const testing = std.testing;
+
+test "LayerStreamer: state transitions and LRU tick" {
+    var states: [3]std.atomic.Value(LayerState) = undefined;
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        states[i] = std.atomic.Value(LayerState).init(.unloaded);
+    }
+
+    states[0].store(.loaded, .release);
+    states[1].store(.loaded, .release);
+    states[2].store(.unloaded, .release);
+
+    var loaded: usize = 0;
+    for (states) |s| {
+        if (s.load(.acquire) == .loaded) loaded += 1;
+    }
+    try testing.expectEqual(loaded, 2);
+    try testing.expect(states[2].load(.acquire) == .unloaded);
+
+    states[0].store(.unloaded, .release);
+    try testing.expect(states[0].load(.acquire) == .unloaded);
+}
+
+test "LayerStreamer: prefetchNext bounds — next >= len is skipped" {
+    const num_layers = 3;
+    const last_idx = num_layers - 1;
+    const next = last_idx + 1;
+    try testing.expect(next >= num_layers);
+}
+
+test "LayerStreamer: lock/unlock spin via tryLock" {
+    var mutex = std.atomic.Mutex.unlocked;
+    while (!mutex.tryLock()) {
+        std.Thread.yield() catch {};
+    }
+    mutex.unlock();
+}

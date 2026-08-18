@@ -95,9 +95,10 @@ fn backendName(b: matmul.Backend) []const u8 {
 
 /// Imprime nombre, compute capability y memoria de la GPU activa, y avisa si
 /// la arquitectura detectada no coincide con la esperada por los cubins.
-fn printGpuInfo(stdout: anytype) !void {
+fn printGpuInfo(allocator: std.mem.Allocator, stdout: anytype) !void {
     const device = cudaz.cuDeviceGet(0) catch return;
-    const info = cudaz.cuDeviceInfo(device) catch return;
+    const info = cudaz.cuDeviceInfo(allocator, device) catch return;
+    defer allocator.free(info.name);
     var arch_buf: [16]u8 = undefined;
     const gpu_arch = cudaz.gpuArchString(info, &arch_buf);
     try stdout.print(
@@ -138,7 +139,7 @@ pub fn main(init: std.process.Init) !void {
     if (params.model_path) |path| {
         if (backend == .cublas) {
             try @import("cudaz").ensureContext();
-            try printGpuInfo(stdout);
+            try printGpuInfo(allocator, stdout);
         }
         runInference(io, allocator, path, params, backend, stdout) catch |err| {
             if (@errorReturnTrace()) |trace| {
@@ -986,6 +987,11 @@ fn runHybridInference(
      var current_pos: usize = seq_len;
      const t_gen = @import("time").Timer.start();
 
+     const spinner_chars = &[_]u8{ '|', '/', '-', '\\' };
+     var spinner_idx: usize = 0;
+     try stdout.print("[*] Generando", .{});
+     try stdout.flush();
+
      // Activaciones residentes en GPU (Path B): un solo H2D (embedding) y un
      // solo D2H (norma final) por token; todo lo demás queda en device.
      var lk = try layer_kernels.LayerKernels.init(@ptrCast((try matmul.MatmulEngine.sharedCudaStream()).raw));
@@ -1123,6 +1129,12 @@ if (debugz.dbg.chk_state) {
      const perf_t = @import("time").Timer.start();
      for (0..params.max_new_tokens) |_| {
          const last = gen_tokens.items[gen_tokens.items.len - 1];
+     try stdout.print(" {c}\x1b[K\r[*] Generando... {d} tokens", .{
+         spinner_chars[spinner_idx % spinner_chars.len],
+         gen_tokens.items.len,
+     });
+     try stdout.flush();
+     spinner_idx += 1;
 
          // Ensure blocks for the new decode token before forward
          const t_block0 = perf_t.read();
@@ -1293,16 +1305,22 @@ if (debugz.dbg.chk_state) {
          t_d2h_ns += t_samp0 - t_d2h0;
          t_sample_ns += perf_t.read() - t_samp0;
 
-         if (gt.eos_id != null and next_token == gt.eos_id.?) break;
-     }
+      if (gt.eos_id != null and next_token == gt.eos_id.?) break;
+      }
 
-     // Finish sequence: release blocks
-     scheduler.finishSequence(seq_id);
+      // Finish sequence: release blocks
+      scheduler.finishSequence(seq_id);
 
-    const gen_ns = t_gen.read();
-    const gen_ms = @as(f64, @floatFromInt(@divTrunc(gen_ns, std.time.ns_per_ms)));
-    const prefill_ms = @as(f64, @floatFromInt(@divTrunc(prefill_ns, std.time.ns_per_ms)));
-    const tok_s: f64 = if (gen_ms > 0) @as(f64, @floatFromInt(gen_tokens.items.len)) / (gen_ms / 1000.0) else 0;
+     const gen_ns = t_gen.read();
+     const gen_ms = @as(f64, @floatFromInt(@divTrunc(gen_ns, std.time.ns_per_ms)));
+     const prefill_ms = @as(f64, @floatFromInt(@divTrunc(prefill_ns, std.time.ns_per_ms)));
+     const tok_s: f64 = if (gen_ms > 0) @as(f64, @floatFromInt(gen_tokens.items.len)) / (gen_ms / 1000.0) else 0;
+
+     try stdout.print("\r✓ Listo! Generados {d} tokens en {d:.1}s ({d:.1} tok/s)\n\n", .{
+         gen_tokens.items.len,
+         @divTrunc(gen_ns, @as(i128, std.time.ns_per_s)),
+         tok_s,
+     });
 
     try stdout.print("\n[+] Generación ({d} tokens):\n", .{ gen_tokens.items.len });
     const decoded = try tok.decode(gen_tokens.items, allocator);
