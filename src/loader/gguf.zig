@@ -1644,7 +1644,7 @@ const iq1s_grid = [_]u64{
 
 const kvalues_fp4 = [_]i8{
     0, 1, 2, 3, 4, 6, 8, 12,
-    0, 1, 2, 3, 4, 6, 8, 12,
+    0, -1, -2, -3, -4, -6, -8, -12,
 };
 
 
@@ -1895,7 +1895,7 @@ pub fn dequantIq1_s(bytes: []const u8, out: []f32) void {
                 const idx: usize = qs[ib * 4 + l] | (@as(usize, (qhb >> @intCast(3 * l)) & 7) << 8);
                 const g = iq1s_grid[idx];
                 for (0..8) |j| {
-                    const gv: f32 = @floatFromInt(@as(i8, @intCast((g >> @intCast(8 * j)) & 0xFF)));
+                    const gv: f32 = @floatFromInt(@as(i8, @bitCast(@as(u8, @intCast((g >> @intCast(8 * j)) & 0xFF)))));
                     out[i + ib * 32 + l * 8 + j] = dl * (gv + dd);
                 }
             }
@@ -1953,9 +1953,14 @@ pub fn dequantIq1_m(bytes: []const u8, out: []f32) void {
     while (i < out.len) : (i += qk) {
         const base = nb * block_bytes;
         const sc = bytes[base .. base + 8];
-        const scale_bits = (@as(u32, sc[0]) << 4) | (@as(u32, sc[1]) << 8) |
-            (@as(u32, sc[2]) << 12) | (@as(u32, sc[3]) << 16);
-        const d: f32 = @floatCast(@as(f16, @bitCast(@as(u16, @intCast(scale_bits)))));
+        // d es un f16 ensamblado desde bits dispersos de scales (ref ggml):
+        // scales se lee como 4 u16 little-endian y se reensambla el f16.
+        const sc0 = std.mem.readInt(u16, sc[0..2], .little);
+        const sc1 = std.mem.readInt(u16, sc[2..4], .little);
+        const sc2 = std.mem.readInt(u16, sc[4..6], .little);
+        const sc3 = std.mem.readInt(u16, sc[6..8], .little);
+        const scale_u16: u16 = (sc0 >> 12) | ((sc1 >> 8) & 0xF0) | ((sc2 >> 4) & 0xF00) | (sc3 & 0xF000);
+        const d: f32 = @floatCast(@as(f16, @bitCast(scale_u16)));
         const qs = bytes[base + 0 .. base + 32];
         const qh = bytes[base + 32 .. base + 48];
         for (0..qk / 32) |ib| {
@@ -1977,14 +1982,14 @@ pub fn dequantIq1_m(bytes: []const u8, out: []f32) void {
             for (0..2) |l| {
                 const g = iq1s_grid[idx[l]];
                 for (0..8) |j| {
-                    const gv: f32 = @floatFromInt(@as(i8, @intCast((g >> @intCast(8 * j)) & 0xFF)));
+                    const gv: f32 = @floatFromInt(@as(i8, @bitCast(@as(u8, @intCast((g >> @intCast(8 * j)) & 0xFF)))));
                     out[i + ib * 32 + l * 8 + j] = dl1 * (gv + dd[l]);
                 }
             }
             for (2..4) |l| {
                 const g = iq1s_grid[idx[l]];
                 for (0..8) |j| {
-                    const gv: f32 = @floatFromInt(@as(i8, @intCast((g >> @intCast(8 * j)) & 0xFF)));
+                    const gv: f32 = @floatFromInt(@as(i8, @bitCast(@as(u8, @intCast((g >> @intCast(8 * j)) & 0xFF)))));
                     out[i + ib * 32 + l * 8 + j] = dl2 * (gv + dd[l]);
                 }
             }
@@ -2144,13 +2149,18 @@ fn getScaleMinK4(j: usize, q: []const u8) ScaleMin {
     };
 }
 
-/// Dequantiza UN bloque de un tipo cuantizado. `bytes` apunta a los
-/// blockBytes() de ese bloque; `out` debe tener al menos blockSize() elementos
-/// (los tipos de super-bloque de 256 escriben todo el bloque). `elems` limita
-/// cuántos elementos se producen en los tipos float (para cuantizados se
-/// ignora, el llamador sólo debe leer min(blockSize, restantes)).
+/// Dequantiza un tensor GGUF (uno o varios bloques) a f32. `bytes` contiene
+/// `bytes.len / blockBytes()` bloques completos; `out` debe tener al menos
+/// `min(out.len, nbloques * blockSize)` elementos. La dequant por bloque escribe
+/// SIEMPRE blockSize() elementos a partir de un bloque completo de bytes, así
+/// que el llamador (p.ej. QuantWeight) sólo lee los `n` elementos válidos del
+/// bloque parcial con @memcpy.
 pub fn dequantBlock(dtype: GgmlType, bytes: []const u8, out: []f32, elems: usize) void {
     const bs = dtype.blockSize();
+    const bb = dtype.blockBytes();
+    const nblocks = bytes.len / bb;
+    const nout = @min(nblocks * bs, out.len);
+    const o = out[0..nout];
     switch (dtype) {
         .f32 => @memcpy(out[0..elems], std.mem.bytesAsSlice(f32, bytes[0 .. elems * 4])),
         .f16 => for (0..elems) |i| {
@@ -2165,30 +2175,30 @@ pub fn dequantBlock(dtype: GgmlType, bytes: []const u8, out: []f32, elems: usize
         .i16 => dequantI16(bytes, out[0..elems]),
         .i32 => dequantI32(bytes, out[0..elems]),
         .i64 => dequantI64(bytes, out[0..elems]),
-        .q8_0 => dequantQ8_0(bytes, out[0..bs]),
-        .q8_1 => dequantQ8_1(bytes, out[0..bs]),
-        .q4_0 => dequantQ4_0(bytes, out[0..bs]),
-        .q4_1 => dequantQ4_1(bytes, out[0..bs]),
-        .q5_0 => dequantQ5_0(bytes, out[0..bs]),
-        .q5_1 => dequantQ5_1(bytes, out[0..bs]),
-        .q4_k => dequantQ4_K(bytes, out[0..bs]),
-        .q5_k => dequantQ5_K(bytes, out[0..bs]),
-        .q6_k => dequantQ6_K(bytes, out[0..bs]),
-        .q2_k => dequantQ2_K(bytes, out[0..bs]),
-        .q3_k => dequantQ3_K(bytes, out[0..bs]),
-        .q8_k => dequantQ8_K(bytes, out[0..bs]),
-        .iq4_xs => dequantIq4_xs(bytes, out[0..bs]),
-        .iq3_s => dequantIq3_s(bytes, out[0..bs]),
-        .iq4_nl => dequantIq4_nl(bytes, out[0..bs]),
-        .iq2_xxs => dequantIq2_xxs(bytes, out[0..bs]),
-        .iq2_xs => dequantIq2_xs(bytes, out[0..bs]),
-        .iq3_xxs => dequantIq3_xxs(bytes, out[0..bs]),
-        .iq1_s => dequantIq1_s(bytes, out[0..bs]),
-        .iq2_s => dequantIq2_s(bytes, out[0..bs]),
-        .iq1_m => dequantIq1_m(bytes, out[0..bs]),
-        .tq1_0 => dequantTq1_0(bytes, out[0..bs]),
-        .tq2_0 => dequantTq2_0(bytes, out[0..bs]),
-        .mxfp4 => dequantMxfp4(bytes, out[0..bs]),
+        .q8_0 => dequantQ8_0(bytes, o),
+        .q8_1 => dequantQ8_1(bytes, o),
+        .q4_0 => dequantQ4_0(bytes, o),
+        .q4_1 => dequantQ4_1(bytes, o),
+        .q5_0 => dequantQ5_0(bytes, o),
+        .q5_1 => dequantQ5_1(bytes, o),
+        .q4_k => dequantQ4_K(bytes, o),
+        .q5_k => dequantQ5_K(bytes, o),
+        .q6_k => dequantQ6_K(bytes, o),
+        .q2_k => dequantQ2_K(bytes, o),
+        .q3_k => dequantQ3_K(bytes, o),
+        .q8_k => dequantQ8_K(bytes, o),
+        .iq4_xs => dequantIq4_xs(bytes, o),
+        .iq3_s => dequantIq3_s(bytes, o),
+        .iq4_nl => dequantIq4_nl(bytes, o),
+        .iq2_xxs => dequantIq2_xxs(bytes, o),
+        .iq2_xs => dequantIq2_xs(bytes, o),
+        .iq3_xxs => dequantIq3_xxs(bytes, o),
+        .iq1_s => dequantIq1_s(bytes, o),
+        .iq2_s => dequantIq2_s(bytes, o),
+        .iq1_m => dequantIq1_m(bytes, o),
+        .tq1_0 => dequantTq1_0(bytes, o),
+        .tq2_0 => dequantTq2_0(bytes, out),
+        .mxfp4 => dequantMxfp4(bytes, out),
     }
 }
 

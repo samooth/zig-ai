@@ -42,9 +42,11 @@ pub fn build(b: *std.Build) void {
 
     var ptx_output: ?std.Build.LazyPath = null;
     var cubin_output: ?std.Build.LazyPath = null;
-    var dequant_ptx: ?std.Build.LazyPath = null;
     var paged_cubin: ?std.Build.LazyPath = null;
     var layer_cubin: ?std.Build.LazyPath = null;
+    // Objetos CUDA de dequantización (kernels/*.cu), compilados con nvcc y
+    // enlazados al ejecutable/tests vía addObjectFile (patrón zig-cuda-agent).
+    var dequant_objs: []const std.Build.LazyPath = &[0]std.Build.LazyPath{};
 
     if (has_cuda) {
         const nvcc_path = b.findProgram(&.{"nvcc"}, &.{cuda_bin_path}) catch unreachable;
@@ -67,16 +69,7 @@ pub fn build(b: *std.Build) void {
         cubin_output = compile_cubin.addOutputFileArg("flash_attention.cubin");
         compile_cubin.addFileArg(b.path("cuda/flash_attention.cu"));
 
-        // Cubin/PTX nativo para la GPU detectada (el JIT de PTX compute_80
-        // resultaba inestable para lanzamientos repetidos en sm_86).
-        const compile_dequant = b.addSystemCommand(&.{
-            nvcc_path,
-            arch_flag, code_flag,
-            "-ptx", "-o",
-        });
-        dequant_ptx = compile_dequant.addOutputFileArg("dequantize_kernels.ptx");
-        compile_dequant.addFileArg(b.path("cuda/dequantize_kernels.cu"));
-
+        // Cubin nativo para la GPU detectada: PagedAttention y layer_kernels.
         const compile_pa = b.addSystemCommand(&.{
             nvcc_path,
             arch_flag, code_flag,
@@ -92,6 +85,25 @@ pub fn build(b: *std.Build) void {
         });
         layer_cubin = compile_layer.addOutputFileArg("layer_kernels.cubin");
         compile_layer.addFileArg(b.path("src/cuda/layer_kernels.cu"));
+
+        // Dequantización GGUF: compilar kernels/*.cu a objetos (patrón zig-cuda-agent).
+        const dequant_sources = [_][]const u8{
+            "dequant_q4_k.cu", "dequant_q6_k.cu", "dequant_iq4_xs.cu", "dequant_iq3_s.cu",
+            "dequant_iq4_nl.cu", "dequant_iq2_xxs.cu", "dequant_iq2_xs.cu", "dequant_iq3_xxs.cu",
+            "dequant_iq1_s.cu", "dequant_iq2_s.cu", "dequant_iq1_m.cu", "dequant_tq1_0.cu",
+            "dequant_tq2_0.cu", "dequant_mxfp4.cu",
+        };
+        var objs: [dequant_sources.len]std.Build.LazyPath = undefined;
+        inline for (dequant_sources, 0..) |src_name, i| {
+            const nvcc = b.addSystemCommand(&.{
+                nvcc_path, "-O3", "--use_fast_math",
+                "-arch", gpu_arch, "-Xcompiler", "-fPIC", "-c", "-I", "kernels",
+            });
+            nvcc.addFileArg(b.path(b.pathJoin(&.{ "kernels", src_name })));
+            nvcc.addArg("-o");
+            objs[i] = nvcc.addOutputFileArg(src_name ++ ".o");
+        }
+        dequant_objs = &objs;
     }
 
     // === Módulo core ===
@@ -101,17 +113,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // === Options: ruta al PTX de dequantización ===
-    // El PTX generado se instala en zig-out/lib/ (ruta estable en runtime).
+    // === Módulo gguf (debe definirse temprano: lo importan varios módulos) ===
+    const gguf_mod = b.createModule(.{
+        .root_source_file = b.path("src/loader/gguf.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // === Options: disponibilidad de CUDA para el módulo de dequant GPU ===
     const dequant_options = b.addOptions();
-    var ptx_install: ?*std.Build.Step.InstallFile = null;
-    if (dequant_ptx) |ptx| {
-        ptx_install = b.addInstallFileWithDir(ptx, .{ .custom = "lib" }, "dequantize_kernels.ptx");
-        b.getInstallStep().dependOn(&ptx_install.?.step);
-        dequant_options.addOption([]const u8, "dequant_ptx", b.getInstallPath(.{ .custom = "lib" }, "dequantize_kernels.ptx"));
-    } else {
-        dequant_options.addOption([]const u8, "dequant_ptx", "");
-    }
+    dequant_options.addOption(bool, "has_cuda", has_cuda);
 
     // === Options: ruta al cubin de PagedAttention ===
     const paged_options = b.addOptions();
@@ -151,6 +162,14 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/cuda/cudaz_stub.zig"),
     });
 
+    // === Módulo CUDA Runtime API (patrón zig-cuda-agent) ===
+    const cuda_runtime_mod = b.createModule(.{
+        .root_source_file = b.path("src/cuda/cuda_runtime.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     // === Módulo cublas (host) ===
     const cublas_mod = b.createModule(.{
         .root_source_file = b.path("src/matmul/cublas.zig"),
@@ -179,6 +198,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     gguf_dequant_mod.addImport("cudaz", cudaz_mod);
+    gguf_dequant_mod.addImport("cuda_runtime", cuda_runtime_mod);
+    gguf_dequant_mod.addImport("gguf", gguf_mod);
     gguf_dequant_mod.addOptions("build_options", dequant_options);
 
     // === Módulo fa ===
@@ -250,13 +271,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     loader_mod.addImport("core", core_mod);
-
-    // === Módulo gguf ===
-    const gguf_mod = b.createModule(.{
-        .root_source_file = b.path("src/loader/gguf.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
 
     // === Módulo model_config ===
     const model_config_mod = b.createModule(.{
@@ -485,9 +499,6 @@ pub fn build(b: *std.Build) void {
     if (cubin_output) |cubin| {
         exe_mod.addAnonymousImport("flash_attention_cubin", .{ .root_source_file = cubin });
     }
-    if (dequant_ptx) |ptx| {
-        exe_mod.addAnonymousImport("dequantize_ptx", .{ .root_source_file = ptx });
-    }
 
     exe_mod.link_libc = true;
     if (has_cuda) {
@@ -496,6 +507,9 @@ pub fn build(b: *std.Build) void {
         if (cuda_lib_dir_exists) exe_mod.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
         if (cuda_inc_dir_exists) exe_mod.addIncludePath(.{ .cwd_relative = cuda_inc_path });
         exe_mod.linkSystemLibrary("cublas", .{});
+        for (dequant_objs) |obj| {
+            exe_mod.addObjectFile(obj);
+        }
     }
 
     const exe = b.addExecutable(.{
@@ -584,11 +598,11 @@ pub fn build(b: *std.Build) void {
             tmod.linkSystemLibrary("cudart", .{});
             if (cuda_lib_dir_exists) tmod.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
             tmod.linkSystemLibrary("cublas", .{});
+            for (dequant_objs) |obj| {
+                tmod.addObjectFile(obj);
+            }
         }
         const run_t = b.addRunArtifact(t);
-        if (ptx_install) |inst| {
-            run_t.step.dependOn(&inst.step);
-        }
         if (paged_cubin_install) |inst| {
             run_t.step.dependOn(&inst.step);
         }

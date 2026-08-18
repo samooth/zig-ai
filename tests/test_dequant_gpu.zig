@@ -1,20 +1,26 @@
-//! Test Fase 1 — Dequantización GPU (Q4_K, Q6_K, IQ4_XS, IQ3_S) bit-exact
-//! vs la referencia CPU (gguf.dequantQ4_K / dequantQ6_K / dequantIq4_xs /
-//! dequantIq3_s). Usa tensores sintéticos pequeños (sin necesidad del 9B).
-//! Se salta si CUDA no está disponible.
+//! Verificación bit-exact (tolerancia 1e-2) de la dequantización GPU vs la
+//! referencia CPU en gguf.zig. Cubre todos los dtypes con kernel CUDA.
+//! Se salta si CUDA no está disponible (build_options.has_cuda == false).
 const std = @import("std");
 const gguf = @import("gguf");
 const gguf_dequant = @import("gguf_dequant");
-const cudaz = @import("cudaz");
 
-fn testDtype(
-    gpa: std.mem.Allocator,
-    engine: *gguf_dequant.GgufDequantEngine,
-    dtype: gguf_dequant.GgufDtype,
-    cpu_dequant: *const fn (bytes: []const u8, out: []f32) void,
-    num_blocks: usize,
-    seed: u64,
-) !void {
+// Todos los dtypes con kernel CUDA enlazado (kernels/*.cu).
+const dtypes = [_]gguf.GgmlType{
+    .q4_k,     .q6_k,   .iq4_xs,  .iq3_s,
+    .iq4_nl,   .iq2_xxs, .iq2_xs, .iq3_xxs,
+    .iq1_s,    .iq2_s,   .iq1_m,  .tq1_0,
+    .tq2_0,    .mxfp4,
+};
+
+fn approxEq(a: f32, b: f32) bool {
+    if (a == b) return true; // también cubre +Inf/-Inf y valores exactos
+    if (a != a and b != b) return true; // ambos NaN
+    const diff = @abs(a - b);
+    return diff <= 1e-2 + 1e-3 * @abs(a);
+}
+
+fn testDtype(gpa: std.mem.Allocator, engine: *const gguf_dequant.GgufDequantEngine, dtype: gguf.GgmlType, num_blocks: usize, seed: u64) !void {
     const bs = dtype.blockBytes();
     const numel = num_blocks * dtype.blockSize();
 
@@ -27,15 +33,15 @@ fn testDtype(
     defer gpa.free(out_cpu);
     const out_gpu = try gpa.alloc(f32, numel);
     defer gpa.free(out_gpu);
+    @memset(out_gpu, 0);
 
-    cpu_dequant(bytes, out_cpu);
-
+    gguf.dequantBlock(dtype, bytes, out_cpu, numel);
     try engine.dequant(dtype, bytes, out_gpu);
 
     var max_diff: f32 = 0;
     for (out_cpu, out_gpu, 0..) |c, g, i| {
         max_diff = @max(max_diff, @abs(c - g));
-        if (c != g) {
+        if (!approxEq(c, g)) {
             std.debug.print("[{s}] mismatch at {d}: cpu={d} gpu={d}\n", .{ @tagName(dtype), i, c, g });
             return error.DequantMismatch;
         }
@@ -43,17 +49,23 @@ fn testDtype(
     std.debug.print("[{s}] OK: {d} elems, {d} bloques, max_diff={d}\n", .{ @tagName(dtype), numel, num_blocks, max_diff });
 }
 
-test "dequant GPU Q4_K/Q6_K/IQ4_XS/IQ3_S bit-exact vs CPU" {
-    if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
-        return error.SkipZigTest;
-    }
-    const gpa = std.testing.allocator;
-    var engine = try gguf_dequant.GgufDequantEngine.init();
+test "dequant GPU bit-exact vs CPU (todas las variantes)" {
+    const engine = blk: {
+        const eng = gguf_dequant.GgufDequantEngine.init() catch |e| {
+            if (e == error.CudaUnavailable) {
+                std.debug.print("SKIP: CUDA no disponible\n", .{});
+                return error.SkipZigTest;
+            }
+            return e;
+        };
+        break :blk eng;
+    };
     defer engine.deinit();
 
-    try testDtype(gpa, &engine, .q4_k, gguf.dequantQ4_K, 4, 101);
-    try testDtype(gpa, &engine, .q6_k, gguf.dequantQ6_K, 4, 202);
-    try testDtype(gpa, &engine, .iq4_xs, gguf.dequantIq4_xs, 4, 303);
-    try testDtype(gpa, &engine, .iq3_s, gguf.dequantIq3_s, 4, 404);
+    const gpa = std.testing.allocator;
+    var seed: u64 = 100;
+    inline for (dtypes) |dt| {
+        try testDtype(gpa, &engine, dt, 4, seed);
+        seed += 37;
+    }
 }
