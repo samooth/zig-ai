@@ -322,7 +322,7 @@ pub const HybridLayer = struct {
         defer self.act_pool.release(post_norm_data);
         var post_norm_shape = [_]usize{ N, p.n_embd };
         var post_norm_strides = [_]usize{ p.n_embd, 1 };
-        var post_norm_buf = Tensor(f32){ .data = post_norm_data, .shape = &post_norm_shape, .strides = &post_norm_strides, .offset = 0, .allocator = null, .owns_data = false };
+        var post_norm_buf = Tensor(f32){ .data = post_norm_data, .shape = &post_norm_shape, .strides = &post_norm_strides, .offset = 0, .allocator = self.allocator, .owns_data = false };
         norm.rmsNorm(f32, f32, out.*, self.attn_post_norm, p.rms_eps, &post_norm_buf);
 
         // === 5. FFN SwiGLU ===
