@@ -148,7 +148,13 @@ pub const LayerStreamer = struct {
     }
 
     fn runLoad(streamer: *LayerStreamer, layer_idx: usize) void {
+        if (streamer.debug_enabled) {
+            debug.dbg.printLevel(.info, "LayerStreamer: runLoad START li={d} resident={d}\n", .{ layer_idx, streamer.resident_count.load(.acquire) });
+        }
         const result = streamer.layers[layer_idx].loadWeightsFromGguf(streamer.g);
+        if (streamer.debug_enabled) {
+            debug.dbg.printLevel(.info, "LayerStreamer: runLoad DONE li={d} ok={any}\n", .{ layer_idx, result });
+        }
 
         streamer.lock();
         if (result) {

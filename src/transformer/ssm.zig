@@ -191,12 +191,17 @@ pub const SsmLayer = struct {
         self.scratch_qkv = &[_]f32{};
         self.scratch_z = &[_]f32{};
         self.scratch_out = &[_]f32{};
+        self.matmul_engine.clearWeightCache();
     }
 
     /// Carga los pesos desde el GGUF (nombres qwen35). Los grandes quedan
     /// como QuantWeight (bytes mmap, sin copia); los pequeños se dequantizan
     /// a f32.
     pub fn loadWeightsFromGguf(self: *SsmLayer, g: *const gguf.GgufFile) !void {
+        if (debugz.dbg.dump_prefill_layers) {
+            debugz.load_count += 1;
+            std.debug.print("SSM_LOAD li={d} call={d} wbeta_old={*}\n", .{ self.layer_idx, debugz.load_count, self.w_beta.data.ptr });
+        }
         try self.ensureScratch();
         const prefix = try std.fmt.allocPrint(self.allocator, "blk.{d}.", .{self.layer_idx});
         defer self.allocator.free(prefix);
@@ -593,6 +598,26 @@ pub fn forwardGPU(
     // a GPU de forma cacheada vía projectionDevicePtr.
     const w_beta_dev = try self.matmul_engine.projectionDevicePtr(self.w_beta);
     const w_alpha_dev = try self.matmul_engine.projectionDevicePtr(self.w_alpha);
+    if (debugz.dbg.dump_prefill_layers) {
+        try cudaz.cuStreamSynchronize(lk.stream);
+        const abuf = try self.allocator.alloc(f32, dt_rank);
+        defer self.allocator.free(abuf);
+        try cudaz.cuMemcpyDtoH(@intFromPtr(abuf.ptr), @intFromPtr(g.d_ssm_a.dev_ptr), dt_rank * @sizeOf(f32));
+        const dbuf = try self.allocator.alloc(f32, dt_rank);
+        defer self.allocator.free(dbuf);
+        try cudaz.cuMemcpyDtoH(@intFromPtr(dbuf.ptr), @intFromPtr(g.d_dt_bias.dev_ptr), dt_rank * @sizeOf(f32));
+        std.debug.print("SSM_SSMA sum={d:.6} max={d:.6}\n", .{ debugz.sumAbsF32(abuf), debugz.maxAbsF32(abuf) });
+        std.debug.print("SSM_DTBIAS sum={d:.6} max={d:.6}\n", .{ debugz.sumAbsF32(dbuf), debugz.maxAbsF32(dbuf) });
+        const wab = try self.allocator.alloc(f32, dt_rank * p.n_embd);
+        defer self.allocator.free(wab);
+        try cudaz.cuMemcpyDtoH(@intFromPtr(wab.ptr), w_alpha_dev, dt_rank * p.n_embd * @sizeOf(f32));
+        std.debug.print("SSM_WALPHA sum={d:.6} max={d:.6}\n", .{ debugz.sumAbsF32(wab), debugz.maxAbsF32(wab) });
+        const wbb = try self.allocator.alloc(f32, dt_rank * p.n_embd);
+        defer self.allocator.free(wbb);
+        try cudaz.cuMemcpyDtoH(@intFromPtr(wbb.ptr), w_beta_dev, dt_rank * p.n_embd * @sizeOf(f32));
+        std.debug.print("SSM_WBETA sum={d:.6} max={d:.6}\n", .{ debugz.sumAbsF32(wbb), debugz.maxAbsF32(wbb) });
+        std.debug.print("SSM_PTRS wbeta={*} walpha={*} wbdev={d} wadev={d}\n", .{ self.w_beta.data.ptr, self.w_alpha.data.ptr, w_beta_dev, w_alpha_dev });
+    }
     try lk.sigmoidGateProj(x.ptr(), w_beta_dev, w_alpha_dev, @intFromPtr(g.d_dt_bias.dev_ptr), @intFromPtr(g.d_ssm_a.dev_ptr), g.beta.ptr(), g.gate.ptr(), n, p.n_embd, dt_rank);
 
     // conv1d causal + silu leyendo conv_state/qkv directo (sin staging); el
@@ -603,6 +628,25 @@ pub fn forwardGPU(
     try lk.l2NormHeads(g.conv_out.ptr(), n, qkv_dim, key_dim, n_k_heads, head_v_dim, p.rms_eps);
 
     // DeltaNet: recurrencia secuencial por token (estado persiste en d_s_state).
+    if (debugz.dbg.dump_prefill_layers) {
+        try cudaz.cuStreamSynchronize(lk.stream);
+        const qbuf = try self.allocator.alloc(f32, n * qkv_dim);
+        defer self.allocator.free(qbuf);
+        try cudaz.cuMemcpyDtoH(@intFromPtr(qbuf.ptr), g.qkv.ptr(), n * qkv_dim * @sizeOf(f32));
+        const cbuf = try self.allocator.alloc(f32, n * qkv_dim);
+        defer self.allocator.free(cbuf);
+        try cudaz.cuMemcpyDtoH(@intFromPtr(cbuf.ptr), g.conv_out.ptr(), n * qkv_dim * @sizeOf(f32));
+        const gbuf = try self.allocator.alloc(f32, n * dt_rank);
+        defer self.allocator.free(gbuf);
+        try cudaz.cuMemcpyDtoH(@intFromPtr(gbuf.ptr), g.gate.ptr(), n * dt_rank * @sizeOf(f32));
+        const bbuf = try self.allocator.alloc(f32, n * dt_rank);
+        defer self.allocator.free(bbuf);
+        try cudaz.cuMemcpyDtoH(@intFromPtr(bbuf.ptr), g.beta.ptr(), n * dt_rank * @sizeOf(f32));
+        std.debug.print("SSM_QKV sum={d:.6} max={d:.6}\n", .{ debugz.sumAbsF32(qbuf), debugz.maxAbsF32(qbuf) });
+        std.debug.print("SSM_CONVOUT sum={d:.6} max={d:.6}\n", .{ debugz.sumAbsF32(cbuf), debugz.maxAbsF32(cbuf) });
+        std.debug.print("SSM_GATE sum={d:.6} max={d:.6}\n", .{ debugz.sumAbsF32(gbuf), debugz.maxAbsF32(gbuf) });
+        std.debug.print("SSM_BETA sum={d:.6} max={d:.6}\n", .{ debugz.sumAbsF32(bbuf), debugz.maxAbsF32(bbuf) });
+    }
     var t: usize = 0;
     while (t < n) : (t += 1) {
         const co = g.conv_out.ptr() + t * qkv_dim * @sizeOf(f32);

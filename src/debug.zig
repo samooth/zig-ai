@@ -50,6 +50,7 @@ pub const Debug = struct {
     chk_state: bool = false,
     perf_stage: bool = false,
     dump_graph: bool = false,
+    dump_prefill_layers: bool = false,
 
     // Flags de comportamiento (env: NOGRAPH, NOQ4, ...).
     no_graph: bool = false,
@@ -68,6 +69,7 @@ pub const Debug = struct {
             .chk_state = envOn("CHKSTATE"),
             .perf_stage = envOn("PERF_STAGE"),
             .dump_graph = envOn("DUMP_GRAPH"),
+            .dump_prefill_layers = envOn("DUMP_PREFILL_LAYERS"),
             .no_graph = envOn("NOGRAPH"),
             .no_gpu_prefill = envOn("NOGPU_PREFILL"),
             .no_q4 = envOn("NOQ4"),
@@ -94,6 +96,7 @@ pub const Debug = struct {
 
 /// Instancia global (se lee de env en `init()`; leerla antes devuelve off).
 pub var dbg: Debug = .{};
+pub var load_count: usize = 0;
 
 pub fn init() void {
     dbg = Debug.init();

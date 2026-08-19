@@ -192,6 +192,7 @@ pub const AttentionLayer = struct {
         self.scratch_k = &[_]f32{};
         self.scratch_v = &[_]f32{};
         self.scratch_o = &[_]f32{};
+        self.matmul_engine.clearWeightCache();
     }
     /// Cuantiza el tile f16 acumulado (staging) al layout canónico GGUF en
     /// el bloque físico cuyo bloque lógico es `self.staged_block`. Se usa al

@@ -851,6 +851,13 @@ fn runHybridInference(
                 const t2 = cur2gpu;
                 cur2gpu = nxt2gpu;
                 nxt2gpu = t2;
+                if (debugz.dbg.dump_prefill_layers) {
+                    try cudaz.cuStreamSynchronize(lk.stream);
+                    const chk = try allocator.alloc(f32, n * n_embd);
+                    defer allocator.free(chk);
+                    try cudaz.cuMemcpyDtoH(@intFromPtr(chk.ptr), cur2gpu.ptr(), n * n_embd * @sizeOf(f32));
+                    std.debug.print("PREFILL_LAYER li={d} n={d} sum|v|={d:.6} max={d:.6} f0={d:.5} f1={d:.5} f2={d:.5}\n", .{ li, n, debugz.sumAbsF32(chk), debugz.maxAbsF32(chk), chk[0], chk[1], chk[2] });
+                }
             }
             p_t_enq_ns += perf_t.read() - t_enq0;
             pos += n;
@@ -1173,6 +1180,13 @@ if (debugz.dbg.chk_state) {
             // secuencia capa a capa.
             if (perf_stage) try cudaz.cuEventRecord(ev[0], lk.stream);
             try cudaz.cuMemcpyHtoDAsync(g_cur.ptr(), @intFromPtr(embed_staging.ptr), n_embd * @sizeOf(f32), lk.stream);
+            if (debugz.dbg.dump_prefill_layers) {
+                try cudaz.cuStreamSynchronize(lk.stream);
+                const chk = try allocator.alloc(f32, n_embd);
+                defer allocator.free(chk);
+                try cudaz.cuMemcpyDtoH(@intFromPtr(chk.ptr), g_cur.ptr(), n_embd * @sizeOf(f32));
+                std.debug.print("EMBED_IN tok={d} sum|v|={d:.6} max={d:.6} f0={d:.5} f1={d:.5} f2={d:.5}\n", .{ current_pos, debugz.sumAbsF32(chk), debugz.maxAbsF32(chk), chk[0], chk[1], chk[2] });
+            }
             var cur2gpu = g_cur;
             var nxt2gpu = g_nxt;
             for (layers, 0..) |*layer, li| {
@@ -1183,6 +1197,16 @@ if (debugz.dbg.chk_state) {
                 const t2 = cur2gpu;
                 cur2gpu = nxt2gpu;
                 nxt2gpu = t2;
+                if (debugz.dbg.dump_prefill_layers) {
+                    try cudaz.cuStreamSynchronize(lk.stream);
+                    const chk = try allocator.alloc(f32, n_embd);
+                    defer allocator.free(chk);
+                    try cudaz.cuMemcpyDtoH(@intFromPtr(chk.ptr), cur2gpu.ptr(), n_embd * @sizeOf(f32));
+                    std.debug.print("DECODE_LAYER tok={d} li={d} sum|v|={d:.6} max={d:.6} f0={d:.5} f1={d:.5} f2={d:.5}\n", .{ current_pos, li, debugz.sumAbsF32(chk), debugz.maxAbsF32(chk), chk[0], chk[1], chk[2] });
+                    if (li == 0) {
+                        std.debug.print("DECODE_INPUT tok={d} f0={d:.5} f1={d:.5} f2={d:.5}\n", .{ current_pos, chk[0], chk[1], chk[2] });
+                    }
+                }
             }
             // Norma final en GPU, lm_head device→device (peso cacheado en GPU).
             try lk.rmsNorm(cur2gpu.ptr(), @intFromPtr(g_out_norm.dev_ptr), g_normed.ptr(), 1, n_embd, rms_eps);
@@ -1216,6 +1240,26 @@ if (debugz.dbg.chk_state) {
         }
 
         try cudaz.cuStreamSynchronize(lk.stream);
+        if (debugz.dbg.dump_prefill_layers) {
+            for (layers, 0..) |layer, li| {
+                if (!layer.is_attention) {
+                    if (layer.ssm_layer.?.gpu) |gpu| {
+                        const nf32 = gpu.d_s_state.len;
+                        const buf = try allocator.alloc(f32, nf32);
+                        defer allocator.free(buf);
+                        try cudaz.cuMemcpyDtoH(@intFromPtr(buf.ptr), @intFromPtr(gpu.d_s_state.dev_ptr), nf32 * @sizeOf(f32));
+                        std.debug.print("SSTATE tok={d} li={d} sum|v|={d:.6} max={d:.6}\n", .{ current_pos, li, debugz.sumAbsF32(buf), debugz.maxAbsF32(buf) });
+                        if (gpu.d_conv_state.len > 0) {
+                            const nf2 = gpu.d_conv_state.len;
+                            const buf2 = try allocator.alloc(f32, nf2);
+                            defer allocator.free(buf2);
+                            try cudaz.cuMemcpyDtoH(@intFromPtr(buf2.ptr), @intFromPtr(gpu.d_conv_state.dev_ptr), nf2 * @sizeOf(f32));
+                            std.debug.print("CONVSTATE tok={d} li={d} sum|v|={d:.6} max={d:.6}\n", .{ current_pos, li, debugz.sumAbsF32(buf2), debugz.maxAbsF32(buf2) });
+                        }
+                    }
+                }
+            }
+        }
         if (perf_stage) {
             var ms: f32 = 0;
             for (layers, 0..) |_, li| {

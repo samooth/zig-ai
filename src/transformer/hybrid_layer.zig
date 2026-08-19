@@ -270,6 +270,9 @@ pub const HybridLayer = struct {
         self.scratch_gate = &[_]f32{};
         self.scratch_up = &[_]f32{};
         self.scratch_down = &[_]f32{};
+        // Invalidate the GPU weight cache: the freed host addresses may be reused
+        // by the allocator for a different weight on reload.
+        self.matmul_engine.clearWeightCache();
         // Unload sub-layer weights (attention/SSM) — frees their scratch too
         if (self.attn_layer) |*l| l.unloadWeights();
         if (self.ssm_layer) |*l| l.unloadWeights();

@@ -126,6 +126,20 @@ pub const MatmulEngine = struct {
         }
     }
 
+    /// Libera el caché de pesos GPU (host_ptr(W) -> buffer device). Debe llamarse
+    /// al descargar pesos (LRU eviction): los scratch f32 host se liberan y el
+    /// allocator puede reutilizar la misma dirección para otro peso, lo que haría
+    /// que el caché (keyed por host_ptr) devuelva el buffer equivocado.
+    pub fn clearWeightCache(self: *Self) void {
+        if (build_options.has_cuda) {
+            if (self.weight_cache) |*cache| {
+                var it = cache.valueIterator();
+                while (it.next()) |entry| entry.*.free();
+                cache.clearRetainingCapacity();
+            }
+        }
+    }
+
     // ─── GEMM general ───
 
     pub fn gemm(
