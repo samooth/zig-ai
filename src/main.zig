@@ -992,10 +992,7 @@ fn runHybridInference(
      var current_pos: usize = seq_len;
      const t_gen = @import("time").Timer.start();
 
-     const spinner_chars = &[_]u8{ '|', '/', '-', '\\' };
-     var spinner_idx: usize = 0;
-     try stdout.print("[*] Generando", .{});
-     try stdout.flush();
+     try stdout.print("[*] Generando... 0 tokens\n", .{});
 
      // Activaciones residentes en GPU (Path B): un solo H2D (embedding) y un
      // solo D2H (norma final) por token; todo lo demás queda en device.
@@ -1131,17 +1128,11 @@ if (debugz.dbg.chk_state) {
          @memset(layer_gpu_ns, 0);
          for (ev) |*e| e.* = try cudaz.cuEventCreate(0);
      }
-     const perf_t = @import("time").Timer.start();
-     for (0..params.max_new_tokens) |_| {
-         const last = gen_tokens.items[gen_tokens.items.len - 1];
-     try stdout.print(" {c}\x1b[K\r[*] Generando... {d} tokens", .{
-         spinner_chars[spinner_idx % spinner_chars.len],
-         gen_tokens.items.len,
-     });
-     try stdout.flush();
-     spinner_idx += 1;
+const perf_t = @import("time").Timer.start();
+      for (0..params.max_new_tokens) |_| {
+          const last = gen_tokens.items[gen_tokens.items.len - 1];
 
-         // Ensure blocks for the new decode token before forward
+          // Ensure blocks for the new decode token before forward
          const t_block0 = perf_t.read();
          for (layer_block_tables) |bt_opt| {
              if (bt_opt) |bt| {
@@ -1358,7 +1349,7 @@ if (debugz.dbg.chk_state) {
      const prefill_ms = @as(f64, @floatFromInt(@divTrunc(prefill_ns, std.time.ns_per_ms)));
      const tok_s: f64 = if (gen_ms > 0) @as(f64, @floatFromInt(gen_tokens.items.len)) / (gen_ms / 1000.0) else 0;
 
-     try stdout.print("\r✓ Listo! Generados {d} tokens en {d:.1}s ({d:.1} tok/s)\n\n", .{
+     try stdout.print("✓ Listo! Generados {d} tokens en {d:.1}s ({d:.1} tok/s)\n\n", .{
          gen_tokens.items.len,
          @divTrunc(gen_ns, @as(i128, std.time.ns_per_s)),
          tok_s,
