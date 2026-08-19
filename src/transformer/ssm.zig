@@ -551,6 +551,28 @@ pub fn ensureGpu(self: *SsmLayer) !void {
     self.gpu = try GpuSsm.alloc(self.params, self.dt_bias.data, self.ssm_a.data, self.conv1d.data, self.ssm_norm.data);
 }
 
+pub fn warmupGpuWeights(self: *SsmLayer) !void {
+    const p = self.params;
+    const q4_ok = self.w_qkv.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and !debugz.dbg.no_q4_ssm;
+    if (!q4_ok) {
+        const qkv_dim = p.qkvDim();
+        var w_qkv_shape = [_]usize{ qkv_dim, p.n_embd };
+        var w_qkv_strides = [_]usize{ p.n_embd, 1 };
+        _ = try self.matmul_engine.projectionDevicePtr(Tensor(f32){ .data = self.scratch_qkv, .shape = &w_qkv_shape, .strides = &w_qkv_strides, .offset = 0, .allocator = null, .owns_data = false });
+        var w_z_shape = [_]usize{ p.d_inner, p.n_embd };
+        var w_z_strides = [_]usize{ p.n_embd, 1 };
+        _ = try self.matmul_engine.projectionDevicePtr(Tensor(f32){ .data = self.scratch_z, .shape = &w_z_shape, .strides = &w_z_strides, .offset = 0, .allocator = null, .owns_data = false });
+    }
+    const w_out_f32 = self.w_out.dtype() != gguf.GgmlType.q4_0 and self.w_out.dtype() != gguf.GgmlType.q5_k;
+    if (w_out_f32) {
+        var w_out_shape = [_]usize{ p.n_embd, p.d_inner };
+        var w_out_strides = [_]usize{ p.d_inner, 1 };
+        _ = try self.matmul_engine.projectionDevicePtr(Tensor(f32){ .data = self.scratch_out, .shape = &w_out_shape, .strides = &w_out_strides, .offset = 0, .allocator = null, .owns_data = false });
+    }
+    _ = try self.matmul_engine.projectionDevicePtr(self.w_beta);
+    _ = try self.matmul_engine.projectionDevicePtr(self.w_alpha);
+}
+
 pub fn forwardGPU(
     self: *SsmLayer,
     lk: *layer_kernels.LayerKernels,

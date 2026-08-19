@@ -474,6 +474,30 @@ pub fn ensureGpu(self: *HybridLayer) !void {
     self.gpu = g;
 }
 
+pub fn warmupGpuWeights(self: *HybridLayer) !void {
+    const p = self.params;
+    if (self.is_attention) {
+        if (self.attn_layer) |*l| try l.warmupGpuWeights();
+    } else {
+        if (self.ssm_layer) |*l| try SsmLayer.warmupGpuWeights(l);
+    }
+    const q4_ok = self.w_gate.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and !debugz.dbg.no_q4_ffn;
+    if (!q4_ok) {
+        var w_gate_shape = [_]usize{ p.intermediate_dim, p.n_embd };
+        var w_gate_strides = [_]usize{ p.n_embd, 1 };
+        _ = try self.matmul_engine.projectionDevicePtr(Tensor(f32){ .data = self.scratch_gate, .shape = &w_gate_shape, .strides = &w_gate_strides, .offset = 0, .allocator = null, .owns_data = false });
+        var w_up_shape = [_]usize{ p.intermediate_dim, p.n_embd };
+        var w_up_strides = [_]usize{ p.n_embd, 1 };
+        _ = try self.matmul_engine.projectionDevicePtr(Tensor(f32){ .data = self.scratch_up, .shape = &w_up_shape, .strides = &w_up_strides, .offset = 0, .allocator = null, .owns_data = false });
+    }
+    const w_down_q4 = self.w_down.dtype() == gguf.GgmlType.q4_1 and layer_kernels.quantPath() and !debugz.dbg.no_q4_ffn;
+    if (!w_down_q4) {
+        var w_down_shape = [_]usize{ p.n_embd, p.intermediate_dim };
+        var w_down_strides = [_]usize{ p.intermediate_dim, 1 };
+        _ = try self.matmul_engine.projectionDevicePtr(Tensor(f32){ .data = self.scratch_down, .shape = &w_down_shape, .strides = &w_down_strides, .offset = 0, .allocator = null, .owns_data = false });
+    }
+}
+
 pub fn forwardGPU(
     self: *HybridLayer,
     lk: *layer_kernels.LayerKernels,

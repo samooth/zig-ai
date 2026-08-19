@@ -816,6 +816,25 @@ pub const AttentionLayer = struct {
         if (self.gpu != null) return;
         self.gpu = try AttentionGpu.alloc(self.params, self.attn_q_norm.data, self.attn_k_norm.data);
     }
+
+    pub fn warmupGpuWeights(self: *Self) !void {
+        const p = self.params;
+        const q4_ok = self.w_q.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and !debugz.dbg.no_q4_attn;
+        if (!q4_ok) {
+            var w_q_shape = [_]usize{ p.qg_dim(), p.n_embd };
+            var w_q_strides = [_]usize{ p.n_embd, 1 };
+            _ = try self.matmul_engine.projectionDevicePtr(Tensor(f32){ .data = self.scratch_q, .shape = &w_q_shape, .strides = &w_q_strides, .offset = 0, .allocator = null, .owns_data = false });
+            var w_k_shape = [_]usize{ p.kv_dim(), p.n_embd };
+            var w_k_strides = [_]usize{ p.n_embd, 1 };
+            _ = try self.matmul_engine.projectionDevicePtr(Tensor(f32){ .data = self.scratch_k, .shape = &w_k_shape, .strides = &w_k_strides, .offset = 0, .allocator = null, .owns_data = false });
+            var w_v_shape = [_]usize{ p.kv_dim(), p.n_embd };
+            var w_v_strides = [_]usize{ p.n_embd, 1 };
+            _ = try self.matmul_engine.projectionDevicePtr(Tensor(f32){ .data = self.scratch_v, .shape = &w_v_shape, .strides = &w_v_strides, .offset = 0, .allocator = null, .owns_data = false });
+            var w_o_shape = [_]usize{ p.n_embd, p.n_head * p.head_dim };
+            var w_o_strides = [_]usize{ p.n_head * p.head_dim, 1 };
+            _ = try self.matmul_engine.projectionDevicePtr(Tensor(f32){ .data = self.scratch_o, .shape = &w_o_shape, .strides = &w_o_strides, .offset = 0, .allocator = null, .owns_data = false });
+        }
+    }
 };
 
 // ─── Buffers GPU de la capa de atención ──────────────────────────────────────

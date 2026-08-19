@@ -1090,6 +1090,12 @@ fn runHybridInference(
          }
          if (dg) |*g| {
              g.setEmbedStaging(embed_staging);
+             if (streamer) |*s| {
+                 for (layers, 0..) |*layer, li| {
+                     try s.ensureLayerLoaded(li);
+                     try layer.warmupGpuWeights();
+                 }
+             }
              if (captureDecodeGraph(g, &lk, layers, &g_cur, &g_nxt, &g_normed, &g_logits, &g_out_norm, &engine, allocator, n_embd, vocab, rms_eps, current_pos, state_parts.items, lm_head_q4, lm_head_q6k, lm_head_q, lm_head)) {
                  decode_g = dg;
 if (debugz.dbg.chk_state) {
