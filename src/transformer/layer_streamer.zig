@@ -40,6 +40,9 @@ pub const LayerStreamer = struct {
     ) !Self {
         _ = num_workers;
         const num_layers = cfg.block_count;
+        if (layers.len != num_layers) {
+            debug.dbg.printLevel(.info, "LayerStreamer: MISMATCH layers.len={d} block_count={d}\n", .{layers.len, num_layers});
+        }
 
         const states = try allocator.alloc(std.atomic.Value(LayerState), num_layers);
         errdefer allocator.free(states);
@@ -152,7 +155,7 @@ pub const LayerStreamer = struct {
             streamer.states[layer_idx].store(.loaded, .release);
             _ = streamer.resident_count.fetchAdd(1, .acq_rel);
             if (streamer.debug_enabled) {
-                debug.dbg.printLevel(.info, "LayerStreamer: async load layer {d} OK\n", .{layer_idx});
+                debug.dbg.printLevel(.info, "LayerStreamer: async load layer {d} OK (resident={d})\n", .{layer_idx, streamer.resident_count.load(.acquire)});
             }
         } else |e| {
             streamer.states[layer_idx].store(.unloaded, .release);
@@ -213,7 +216,7 @@ pub const LayerStreamer = struct {
             self.lock();
 
             if (self.debug_enabled) {
-                debug.dbg.printLevel(.info, "LayerStreamer: evicted layer {d} (LRU)\n", .{lru_idx});
+                debug.dbg.printLevel(.info, "LayerStreamer: evicted layer {d} (LRU, resident={d})\n", .{lru_idx, self.resident_count.load(.acquire)});
             }
         }
     }

@@ -742,9 +742,7 @@ fn runHybridInference(
     if (streamer) |*s| {
         try s.prefetchLayer(0);
     }
-    if (streamer) |*s| {
-        defer s.deinit();
-    }
+    defer if (streamer) |*s| s.deinit();
 
     // Tokenizer
     var gt = try gguf_tokenizer.GgufTokenizer.fromGguf(allocator, &model.file);
