@@ -1174,12 +1174,12 @@ test "hybrid attention single token hand-computed" {
     // Pre-allocate blocks (scheduler normally does this)
     try fixture.block_table.appendTokens(fixture.paged_kv.block_alloc, 1);
 
-    // Input x = [1, 1, 8] all ones
-    var x = try Tensor(f32).alloc(allocator, &.{ 1, 1, test_params.n_embd });
+    // Input x = [1, 8] all ones (2D como espera forward)
+    var x = try Tensor(f32).alloc(allocator, &.{ 1, test_params.n_embd });
     defer x.deinit();
     for (x.data) |*v| v.* = 1.0;
 
-    var out = try Tensor(f32).alloc(allocator, &.{ 1, 1, test_params.n_embd });
+    var out = try Tensor(f32).alloc(allocator, &.{ 1, test_params.n_embd });
     defer out.deinit();
 
     try layer.forward(x, &out, 0, 1);
@@ -1208,12 +1208,12 @@ test "hybrid attention preserves norm with rope" {
     // Pre-allocate blocks for 4 tokens
     try fixture.block_table.appendTokens(fixture.paged_kv.block_alloc, 4);
 
-    var x = try Tensor(f32).alloc(allocator, &.{ 1, 4, test_params.n_embd });
+    var x = try Tensor(f32).alloc(allocator, &.{ 4, test_params.n_embd });
     defer x.deinit();
     var rng = std.Random.Xoshiro256.init(123);
     x.randUniform(&rng, -0.5, 0.5);
 
-    var out = try Tensor(f32).alloc(allocator, &.{ 1, 4, test_params.n_embd });
+    var out = try Tensor(f32).alloc(allocator, &.{ 4, test_params.n_embd });
     defer out.deinit();
 
     try layer.forward(x, &out, 0, 4);
