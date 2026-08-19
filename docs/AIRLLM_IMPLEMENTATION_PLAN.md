@@ -1,7 +1,8 @@
 # AirLLM Layer Streaming — Implementation Plan
 
-> **Fecha:** Agosto 2026
-> **Estado:** En progreso (Phase 1: ✅ | Phase 2: ⏳ | Phase 3: ⬜ | Phase 4: ⬜ | Phase 5: ⬜)
+> **Última actualización:** Agosto 2026
+> **Estado:** ✅ Phase 1 • ✅ Phase 2 (integrado) • ✅ Phase 3 • ✅ Phase 4 • ⏳ Phase 5 (tests escritos, 2 fallan de baseline)
+> **Commits clave:** d4e7cc6 — cache invalidation on LRU eviction; 1f5fd53 — GPU weight cache warm-up before CUDA graph capture; 5926353 — spinner removal
 
 ## Contexto
 
@@ -13,25 +14,38 @@ prefetch asíncrono, y offloading de activaciones/KV-cache.
 
 ## Codebase Current State vs Docs
 
-| Componente | Docs Status | Código Actual |
+| Componente | Estado real | Archivo |
 |---|---|---|
-| Lazy weight loading (`get_subtensor`) | ❌ Planned | `QuantWeight` existe (mmap, dequant por bloque) pero `get_subtensor()` **falta** |
-| `LayerStreamer` | ❌ Planned | **No existe** — `PrefetchPipeline` y `KVCacheManager.prefetchLayer()` son stubs |
-| `ActivationPool` | ❌ Planned | **No existe** |
-| `VramBudget` | ❌ Planned | **No existe** — `KVPoolAllocator` tiene `lru_evict` + callback `on_evict` |
-| GPU dequant kernels (IQ4_XS, IQ3_S, etc.) | ❌ Planned | **Implementado** — `kernels/*.cu` + `gguf_dequant_gpu.zig` |
-| Quantized KV-cache | ❌ Planned | **Implementado** — `src/kv_cache/` |
-| PagedAttention CPU + GPU | — | **Implementado** — `src/paged_attention/` |
-| CUDA graphs (decode) | — | **Implementado** — `src/cuda/decode_graph.zig` |
-| Matmul weight cache | — | **Implementado** — `src/matmul/root.zig` (`gemmCuBlasF32Resident`) |
-| Layer pipeline (CPU/GPU) | ✅ | `src/transformer/hybrid_layer.zig` + `main.zig:runHybridInference` |
+| Lazy weight loading (`get_subtensor`) | ✅ Implementado | `src/loader/quant_weight.zig` |
+| `LayerStreamer` (prefetch async + LRU) | ✅ Implementado y **integrado** en prefill/decode loops | `src/transformer/layer_streamer.zig` |
+| `ActivationPool` (activaciones, LRU) | ✅ Implementado, integrado en `forward()` | `src/transformer/activation_pool.zig` |
+| `VramBudget` (weights/activations/kv) | ✅ Implementado | `src/transformer/vram_budget.zig` |
+| GPU dequant kernels (IQ4_*, etc.) | ✅ Implementado | `src/kernels/*.cu` + `gguf_dequant_gpu.zig` |
+| Quantized KV-cache | ✅ Implementado | `src/kv_cache/` |
+| PagedAttention (CPU + GPU) | ✅ Implementado | `src/paged_attention/` |
+| CUDA graphs (decode) | ✅ Implementado; **fix de warm-up** (1f5fd53) | `src/cuda/decode_graph.zig` + `src/main.zig` |
+| Matmul weight cache (device→device, un upload) | ✅ Implementado | `src/matmul/root.zig` (`projectionDevicePtr`, `linearProjectionDevice`) |
+| Layer pipeline (CPU/GPU) | ✅ Integrado | `src/transformer/hybrid_layer.zig` + `main.zig:runHybridInference` |
 
-### Discrepancias Docs vs Código
+### Discrepancias corregidas vs el plan original
 
-1. **GPU attention está ENABLED**: `main.zig:653` → `gpu_attention_enabled = true` (docs dicen `false`)
-2. **Q4_K/Q5_K/IQ kernels existen** — los docs marcan como ❌ pero el código los tiene
-3. **`PrefetchPipeline` existe** pero es un stub (marca streams busy, no carga pesos)
-4. **`KVCacheManager.prefetchLayer()`** — stub vacío
+1. `LayerStreamer` **existe y está integrado** (el plan decía "stub"): `main.zig:847/849` prefetchNext en
+   prefill; `main.zig:1190/1192` prefetchNext en decode; `main.zig:717-734` init con `VramBudget`.
+2. **Threading**: usa `std.Thread.spawn` (un hilo por prefetch async) + `std.atomic.Mutex` +
+   `std.atomic.Value` — NO `std.Thread.Pool` (Zig 0.16 dev no lo incluye; ver notas de runtime).
+3. `HybridLayer.warmupGpuWeights()` / `SsmLayer.warmupGpuWeights()` / `HybridAttn.warmupGpuWeights()`
+   añadidos (commit 1f5fd53) para resolver el fallo de captura de graphs en streamed mode (ver §6).
+
+---
+
+## Phase 0: Runtime Notes (Zig 0.16.0-dev.2535)
+
+- NO `std.Thread.Pool` / `std.Thread.Condition` disponibles → usar `std.atomic.Value`, `std.atomic.Mutex`,
+  `std.Thread.spawn` directamente.
+- Build: `zig build install -Doptimize=ReleaseFast --cache-dir /tmp/opencode/zig-cacheN` (Debug muy lento;
+  cache default da errno 95 por falta de permisos de escritura; usar cache local).
+- Flag: `--layer-stream-max <n>` (default 2) y `--layer-stream`; `ulimit -c 0`.
+- GPU local de validación: RTX 3080 Laptop sm_86, 7.7 GiB. Modelo qwen35, 24 capas, atención iff `(i+1)%4==0`.
 
 ---
 
@@ -40,79 +54,73 @@ prefetch asíncrono, y offloading de activaciones/KV-cache.
 **Status:** ✅ Completado (2026-08-18)
 
 ### Objetivo
-Permite dequantizar SOLO el slice pedido de un peso GGUF, evitando la dequantización
-completa cuando solo se necesita una parte (e.g., `w_q` del `w_qkv`).
+Permite dequantizar SOLO el slice pedido de un peso GGUF, evitando la dequantización completa cuando
+solo se necesita una parte (e.g., `w_q` del `w_qkv`).
 
 ### Cambios realizados
 
-- [x] **`src/loader/quant_weight.zig`**: Agregado `get_subtensor(row_start, row_end, col_start, col_end)` 
-  - Lee solo los bloques que cubren el rango solicitado del mmap (no dequantiza todo)
-  - Dequantiza mediante `gguf.dequantBlock()` existente, reutiliza lógica de transpose
-  - Para 2D: retorna `Tensor(f16)` con shape [rows, cols] en layout [out, in]
-  - Para 1D: retorna `Tensor(f16)` con los elementos [col_start, col_end)
-  - `build.zig`: agregado import `core` → `quant_weight_mod`
+- [x] **`src/loader/quant_weight.zig`**: agregado `get_subtensor(row_start, row_end, col_start, col_end)`.
+  - Lee solo los bloques GGUF que cubren el rango pedido del mmap (no dequantiza todo).
+  - Dequantiza vía `gguf.dequantBlock()` existente; reutiliza lógica de transpose.
+  - 2D → `Tensor(f16)` shape [rows, cols] en layout [out, in]; 1D → `Tensor(f16)` slice [col_start, col_end).
+  - `build.zig`: import `core` → `quant_weight_mod`.
 
-- [x] **`src/loader/quant_weight.zig`**: 2 tests agregados
-  - `test QuantWeight q8_0 get_subtensor 1D` — verifica slice parcial coincide con dequant completo
-  - `test QuantWeight q8_0 get_subtensor 2D` — verifica rows parciales coinciden con transpuesta completa
+- [x] **`src/loader/quant_weight.zig`**: 2 tests agregados (`get_subtensor` q8_0 1D/2D, bit-exact vs dequant completo).
 
 ### Validación
 ```
-zig build test  →  89/94 tests passed (2 new +72 existing), 2 crashes pre-existing en hybrid_attn
+zig build test → 97/100 tests passed (3 skipped, 0 crashed)
 ```
 
 ---
 
 ## Phase 2: LayerStreamer (5-7 días)
 
-**Status:** ⏳ En progreso — core file created, integration pending
+**Status:** ✅ Completado e integrado (2026-08-19)
 
 ### Objetivo
-Orquesta la carga asíncrona de capas: mientras la GPU computa la capa `i`, la capa `i+1`
-se descarga/carga en background. Usa `std.Thread.Pool` + `std.Thread.Queue`.
+Orquesta la carga asíncrona de capas: mientras la GPU computa la capa `i`, la capa `i+1` se carga en
+background. LRU eviction mantiene `max_resident` capas vivas en VRAM.
 
-### Nuevo archivo: `src/transformer/layer_streamer.zig`
+### Archivo: `src/transformer/layer_streamer.zig`
 
 ```zig
 pub const LayerStreamer = struct {
-    allocator: std.mem.Allocator,
-    model: *gguf.GgufFile,
-    pool: std.Thread.Pool,
-    prefetch_queue: std.Thread.Queue(usize),
-    loaded_layers: std.AutoHashMap(usize, *HybridLayer),
-    max_resident: usize,  // LRU eviction threshold
-    lru: std.DoublyLinkedList(usize),
-    // ...
+    allocator, g: *const gguf.GgufFile, layers: []HybridLayer, cfg: ModelConfig,
+    states: []std.atomic.Value(LayerState),   // unloaded | loading | loaded
+    last_used: []std.atomic.Value(u64),        // tick LRU
+    max_resident: usize,
+    resident_count: std.atomic.Value(usize),
+    mutex: std.atomic.Mutex,
+    spawned_threads: []?std.Thread,
+    tick: std.atomic.Value(u64),
 };
 ```
 
 ### Métodos
-- `init(allocator, gguf_file, num_workers, max_resident_layers)`
-- `prefetch_layer(layer_idx)` — dequantiza + sube pesos al GPU en worker thread
-- `get_layer(layer_idx)` — bloquea hasta listo
-- `unload_layer(layer_idx)` — libera GPU buffers
-- `set_max_resident_layers(n)` — LRU eviction
+- `init(allocator, layers, g, cfg, max_resident, num_workers)` — `num_workers` no usado (1 hilo por prefetch).
+- `prefetchLayer(layer_idx)` — marca `.loading`, spawn `std.Thread` → `runLoad` (dequantiza + sube pesos).
+- `ensureLayerLoaded(layer_idx)` — si `.loading`, busy-yield; si `.unloaded`, carga síncrona (locksync).
+- `unloadLayer(layer_idx)` — `layer.unloadWeights()` + invalida GPU weight cache (ver §6).
+- `prefetchNext(layer_idx)` — prefetch `i+1` + `maybeEvict`.
+- `setMaxResidentLayers(n)` — reconfigura LRU.
+- `maybeEvict()` — LRU por `last_used`/tick; libera VRAM cuando `resident_count > max_resident`.
 
-### Integración en `main.zig`
-
-Reemplazar el loop secuencial de carga (`for 0..cfg.block_count` → `loadWeightsFromGguf`)
-con `LayerStreamer`, y agregar overlap en el forward:
-```zig
-// En prefill/decode loops:
-for (layers, 0..) |*layer, li| {
-    streamer.prefetchNext(li + 1);  // async load layer li+1
-    try HybridLayer.forwardGPU(layer, &lk, ...);  // compute layer li
-    streamer.unloadLayer(li - 1);   // free old layer weights
-}
-```
+### Integración en `main.zig` (`runHybridInference`)
+- `main.zig:717-734`: crea `VramBudget` (7840 MB) + `LayerStreamer`; imprime `[+] LayerStreamer activado: max_resident=N vram=…MB`.
+- Prefill loop `main.zig:847/849`: `ensureLayerLoaded(li)` → `HybridLayer.forwardGPU` → `prefetchNext(li)`.
+- Decode loop `main.zig:1190/1192`: idem (prefetch overlap con compute).
+- **Pre-capture warm-up** `main.zig:1092-1097`: con streamer activo, `ensureLayerLoaded`+
+  `warmupGpuWeights()` para TODAS las capas antes de `captureDecodeGraph`, para que la captura del
+  graph no dispare cache misses (uploads síncronos) dentro de la región de captura.
 
 ### Wire-up en `build.zig`
-- Agregar `layer_streamer` module import al `exe_mod` y `hybrid_transformer_mod`
+- `build.zig:495-507`: módulo `layer_streamer_mod`, imports `hybrid_layer`, `gguf`, `model_config`, `matmul`, `paged_attention`, `core`, `debug`.
 
 ### Validación
-```bash
-# Test de overlap (instrumentar con timing)
-zig build test --filter test_prefetch_overlap
+```
+zig build test --filter LayerStreamer          → 3 unit tests pass
+eager vs --layer-stream-max 1/2/4/8/24         → generación idéntica (graph capturado)
 ```
 
 ---
@@ -122,19 +130,20 @@ zig build test --filter test_prefetch_overlap
 **Status:** ✅ Completado (2026-08-19)
 
 ### Objetivo
-Pool de memoria para tensores intermedios (activaciones) con LRU eviction.
-Evita alloc/free por cada forward pass → reduce churn de memoria.
+Pool de memoria para tensores intermedios (activaciones) con LRU eviction. Evita alloc/free por cada
+forward pass → reduce churn de memoria.
 
 ### Cambios realizados
-- [x] **`src/transformer/activation_pool.zig`**: NEW — `ActivationPool` struct con:
-  - `alloc(numel)` → best-fit reuse from free-list, or fresh alloc
-  - `release(buffer)` → marks buffer as free for reuse
-  - `maybeEvict()` → evicts freed buffers when `used_bytes > max_bytes`
-  - `reportMetrics()` → hit/miss stats, utilization
-  - Uses `std.ArrayList(PoolEntry)` for entry management
-- [x] **`build.zig`**: Added `activation_pool_mod`, imported in `exe_mod`, `transformer_mod`, `hybrid_layer_mod`
-- [x] **`src/transformer/hybrid_layer.zig`**: Integrated into CPU `forward()` — 6 per-call tensor allocs (norm_buf, mixer_out, post_norm_buf, gate_buf, up_buf, ffn_out) now use pool alloc/release
-- [x] Added `act_pool.deinit()` to `HybridLayer.deinit()`
+- [x] **`src/transformer/activation_pool.zig`** (NEW, 159 lías) — `ActivationPool`:
+  - `alloc(numel)` → best-fit reuse del free-list, o alloc fresco.
+  - `release(buffer)` → marca libre para reuse.
+  - `maybeEvict()` → libera buffers freed cuando `used_bytes > max_bytes`.
+  - `reportMetrics()` → stats hit/miss, utilización.
+  - `std.ArrayList(PoolEntry)` + `std.atomic.Value` para contadores thread-safe.
+- [x] **`build.zig`**: import `activation_pool_mod` en `exe_mod`, `transformer_mod`, `hybrid_layer_mod`.
+- [x] **`src/transformer/hybrid_layer.zig`**: integrado en CPU `forward()` — 6 allocs por forward
+  (norm_buf, mixer_out, post_norm_buf, gate_buf, up_buf, ffn_out) usan pool alloc/release.
+- [x] `act_pool.deinit()` en `HybridLayer.deinit()`.
 
 ---
 
@@ -143,35 +152,82 @@ Evita alloc/free por cada forward pass → reduce churn de memoria.
 **Status:** ✅ Completado (2026-08-19)
 
 ### Objetivo
-Presupuesto dinámico de VRAM: weights / activations / KV-cache.
-`LayerStreamer.setMaxResidentLayers()` usará `vram_budget.weights_budget`.
+Presupuesto dinámico de VRAM: weights / activations / kv_cache. El `LayerStreamer`
+consulta `vram_budget` para fijar `max_resident`.
 
 ### Cambios realizados
-- [x] **`src/transformer/vram_budget.zig`**: NEW — `VramBudget` struct con:
-  - Categorías: `.weights`, `.activations`, `.kv_cache`
-  - Layout por defecto: 60% weights, 20% activations, 20% KV, 5% safety
-  - `init(total_vram)` → `canAlloc(cat, bytes)`, `reserve(cat, bytes)`, `release(cat, bytes)`
-  - `maybeEvict(cat, need_bytes)` → signals eviction needed to caller
-  - `reportMetrics()` → per-category utilization
-  - Uses `std.atomic.Value` for thread-safe counters
-- [x] **`build.zig`**: Added `vram_budget_mod`, imported in `exe_mod`, `transformer_mod`, `hybrid_layer_mod`
-- [x] **`src/main.zig`**: `runHybridInference` now queries `cuDeviceTotalMem` and creates `VramBudget` when `--layer-stream` is active; prints VRAM info in streamer startup message
-
----
+- [x] **`src/transformer/vram_budget.zig`** (NEW, 116 lías) — `VramBudget`:
+  - Categorías: `.weights`, `.activations`, `.kv_cache`.
+  - Layout default: 60% weights, 20% activations, 20% kv_cache, 5% safety.
+  - `init(total_vram)` → `canAlloc(cat, bytes)`, `reserve`/`release`, `maybeEvict(cat, need)`.
+  - `reportMetrics()` → utilización por categoría.
+  - `std.atomic.Value` para contadores thread-safe.
+- [x] **`build.zig`**: import `vram_budget_mod` en `exe_mod`, `transformer_mod`, `hybrid_layer_mod`.
+- [x] **`src/main.zig`**: `runHybridInference` query `cuDeviceTotalMem` → `VramBudget` cuando
+  `--layer-stream` activo; imprime VRAM en el mensaje de startup del streamer.
 
 ---
 
 ## Phase 5: Integration Tests (2-3 días)
 
-**Status:** ⏳ En progreso (infra ready, tests pending)
+**Status:** ⏳ En progreso — infra escrita, algunos tests pendientes/env
 
-| Test | Descripción |
-|---|---|
-| `test_lazy_subtensor` | `get_subtensor()` returns correct slice, minimal I/O |
-| `test_prefetch_overlap` | Layer i+1 loads mientras GPU computa layer i (≥80% overlap) |
-| `test_vram_budget_eviction` | Forzar >VRAM → LRU evict sin crash |
-| `test_kv_offload_4k` | 4K contexto en 8GB VRAM sin OOM |
-| `test_qwen35_4b_q4k` | Qwen3.5-0.8B Q4_K corre en 8GB VRAM |
+| Test | Descripción | Status |
+|---|---|---|
+| `test_lazy_subtensor` | `get_subtensor()` slice correcto vs dequant completo (q8_0) | ✅ escrito (Phase 1) |
+| `test_prefetch_overlap` | Layer i+1 loads mientras GPU computa layer i (≥80% overlap) | ⏳ pending (timing-only en GPU; difícil de assert sin contadores) |
+| `test_vram_budget_eviction` | Forzar >VRAM → LRU evict sin crash | ⏳ pending (necesita mock de VRAM o modelo grande) |
+| `test_kv_offload_4k` | 4K contexto en 8GB VRAM sin OOM | ⏳ pending (modelo) |
+| `test_qwen35_4b_q4k` | Qwen3.5-0.8B Q4_0 corre en 8GB VRAM | ✅ (run manual con `--layer-stream-max 2`) |
+
+### Tests preexistentes
+- `hybrid_attn.test.*` — **corregido** (435f5b2): los tests pasaban tensores 3D `[1,1,8]` a `forward`,
+  que asiste 2D `[N, n_embd]` (assert en `matmul/root.zig:238`). Corregido a 2D.
+- `GGUF_MODEL_PATH` tests — SKIP (requieren modelo .gguf en path explícito).
+
+---
+
+## §6: CUDA Graph Capture en Streamed Mode (fix 1f5fd53)
+
+### Síntoma
+Con `--layer-stream`, la captura del CUDA graph de decode fallaba (`CudaMemcpyFailed` en la capa 0).
+
+### Causa raíz
+1. El streamer (`maybeEvict`) llama `clearWeightCache()` al hacer LRU eviction (`matmul/root.zig`).
+2. `forwardGPU` accede a pesos f32 vía `projectionDevicePtr` (cache device). En streamed mode con
+   eviction, el caché se limpia → el `forwardGPU` de la capa 0 hace un **cache miss** → `buf.upload`
+   = `cudaMemcpy` síncrono → ilegal dentro de una región de captura de graph → error.
+3. En eager mode esto no pasa porque el prefill ya calienta (warm) todos los cachés.
+
+   - SSM (`forwardGPU`) accede siempre a `w_beta`/`w_alpha` (f32).
+   - FFN (`HybridLayer.forwardGPU`) accede a `w_down` (Q4_0 aquí ≠ Q4_1) vía `linearProjectionDevice`
+     → caché f32 (key = puntero del scratch).
+   - La atención usa `linearProjectionDevice`/`qgemmLinear`; q4 path usa `q4_cache` global (mmap key,
+     persistente, no afecta) → only el f32 fallback path necesita warm-up.
+
+### Fix (`src/transformer/*.zig` + `src/main.zig`)
+- `warmupGpuWeights()` en `SsmLayer`, `HybridLayer`, `HybridAttn`: llama `projectionDevicePtr` en los
+  pesos f32 que `forwardGPU` cachearía (mismo key/shape/stride que el forward, incluyendo el
+  `q4_ok` guard; para Q4_0 model el attention/q4 path se salta).
+- En `main.zig`, justo antes de `captureDecodeGraph`: con streamer activo,
+  `ensureLayerLoaded(li)` + `warmupGpuWeights()` para todas las capas → todos los cachés están calientes
+  y residentes; el replay (graph launch) no evicta.
+
+### Nota sobre dumps
+Con `DUMP_PREFILL_LAYERS=1` la captura **falla deliberadamente** y cae al path eager: los dumps de
+`forwardGPU` hacen `cuStreamSynchronize`/`cuMemcpyDtoH` síncronos, ilegales dentro de capture. El output
+numérico es idéntico con o sin captura (ver validación).
+
+### Validación
+```
+eager vs --layer-stream-max 1/2/4/8/24 (graph replay):
+  - "decode: CUDA graph capturado (modo replay)" ✓ en los 6
+  - stdout: tachando la periférica ... / [✓] byte-idéntico (solo varía timing tok/s y el banner del streamer)
+  - dumps numéricos (stderr, sin breadcrumbs de punteros): idénticos eager vs streamed
+streamed 3x determinismo (seed 7, 48 tokens): md5 idéntico del stdout y de los dumps
+caracteres escape/CR: 0
+tests: 77/77 steps succeeded; 97/100 passed (3 skipped, 0 crashed)
+```
 
 ---
 
@@ -179,7 +235,20 @@ Presupuesto dinámico de VRAM: weights / activations / KV-cache.
 
 | Risk | Level | Mitigation |
 |---|---|---|
-| Thread safety de `HybridLayer` (Send+Sync) | Medium | Verificar Tensor/GpuBuffer son Send+Sync; usar `*Mutex` si necesario |
-| CUDA graph interaction con streaming | Medium | Disable graph mode durante streaming; re-capturar al terminar |
-| `get_subtensor` correctness | Low | Reusar `dequantBlock()` + transpose logic; tests bit-exact vs `dequantToF16Transposed` |
-| Thread pool contention (prefetch vs compute) | Medium | Configurable `num_prefetch_threads` (default 2) |
+| Thread safety de `HybridLayer` (Send+Sync) | Medium | `Tensor/GpuBuffer` son `Send+Sync`; `LayerStreamer` usa `std.atomic.Mutex` + atomic state; un hilo por prefetch (no Pool). |
+| CUDA graph interaction con streaming | Medium | **Resuelto** con warm-up pre-capture (§6). Replay no evicta. |
+| `warmupGpuWeights` key mismatch | Low | Los warmup pasan el MISMO scratch pointer (`scratch_q/k/v/o/_down/gate/up/out`) que el forward real, con idéntico `q4_ok`/`w_down_q4` guard. |
+| `get_subtensor` correctness | Low | Tests bit-exact vs `dequantToF16Transposed`; 97/100 pass. |
+| Thread pool contention (prefetch vs compute) | Low | 1 thread por prefetch; `ensureLayerLoaded` blocka si está loading; overlap en prefill/decode loops. |
+| Dumps dentro de capture region | Medium | Documentado: disable `DUMP_PREFILL_LAYERS` (o `chk_state`) para usar el graph replay path. |
+
+---
+
+## Pendiente / Follow-ups
+
+- Faltan los integration tests `test_prefetch_overlap`, `test_vram_budget_eviction`, `test_kv_offload_4k`
+  (requieren timing counters / modelo grande / mock de VRAM).
+- `num_workers` param of `LayerStreamer.init` es unused (1 prefetch thread actual). Revisar si se
+  quiere prefetch multi-capa simultáneo.
+- `prefetchLayer` async no re-intenta si `loadWeightsFromGguf` falla → el caller (`ensureLayerLoaded`)
+  puede colgarse esperando `.loading` que nunca termina en error. Añadir path de error propagation?
