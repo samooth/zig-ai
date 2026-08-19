@@ -4,6 +4,11 @@
 > **Estado:** ✅ Phase 1 • ✅ Phase 2 (integrado) • ✅ Phase 3 • ✅ Phase 4 • ⏳ Phase 5 (tests escritos, 2 fallan de baseline)
 > **Commits clave:** d4e7cc6 — cache invalidation on LRU eviction; 1f5fd53 — GPU weight cache warm-up before CUDA graph capture; 5926353 — spinner removal
 
+> **Tests:** `zig build test` → **100/100 passed** con `GGUF_MODEL_PATH` seteado al modelo bajo prueba
+(3 tests SKIP exigen `GGUF_MODEL_PATH`; sin él se reporta 97/100 con 3 skips). Build limpio (sm_86).
+> **Commits nuevos (firmados GPG, EdDSA):** `5926353` spinner; `1f5fd53` warm-up de caches antes de
+capture; `435f5b2` tests 2D; `b64ffd6` reshape allocator; `9c3f29d` docs.
+
 ## Contexto
 
 Portar la arquitectura AirLLM (inferencia por capas con streaming) al motor Zig existente. El
@@ -69,7 +74,9 @@ solo se necesita una parte (e.g., `w_q` del `w_qkv`).
 
 ### Validación
 ```
-zig build test → 97/100 tests passed (3 skipped, 0 crashed)
+GGUF_MODEL_PATH=/opt/models/Qwen3.5-0.8B-Q4_0.gguf zig build test --summary all
+  → Build Summary: 77/77 steps succeeded; 100/100 tests passed
+(sin GGUF_MODEL_PATH: 97/100 passed, 3 skipped — tests que requieren un .gguf)
 ```
 
 ---
@@ -120,7 +127,7 @@ pub const LayerStreamer = struct {
 ### Validación
 ```
 zig build test --filter LayerStreamer          → 3 unit tests pass
-eager vs --layer-stream-max 1/2/4/8/24         → generación idéntica (graph capturado)
+eager vs --layer-stream-max 1/2/4/8/24 (128 t)  → generación idéntica (graph capturado)
 ```
 
 ---
@@ -174,16 +181,19 @@ consulta `vram_budget` para fijar `max_resident`.
 
 | Test | Descripción | Status |
 |---|---|---|
-| `test_lazy_subtensor` | `get_subtensor()` slice correcto vs dequant completo (q8_0) | ✅ escrito (Phase 1) |
-| `test_prefetch_overlap` | Layer i+1 loads mientras GPU computa layer i (≥80% overlap) | ⏳ pending (timing-only en GPU; difícil de assert sin contadores) |
-| `test_vram_budget_eviction` | Forzar >VRAM → LRU evict sin crash | ⏳ pending (necesita mock de VRAM o modelo grande) |
-| `test_kv_offload_4k` | 4K contexto en 8GB VRAM sin OOM | ⏳ pending (modelo) |
-| `test_qwen35_4b_q4k` | Qwen3.5-0.8B Q4_0 corre en 8GB VRAM | ✅ (run manual con `--layer-stream-max 2`) |
+| `test_lazy_subtensor` | `get_subtensor()` slice correcto vs dequant completo (q8_0) | ✅ (Phase 1) |
+| `test_prefetch_overlap` | Layer i+1 loads mientras GPU computa layer i (≥80% overlap) | ⏳ pendiente (timing counter) |
+| `test_vram_budget_eviction` | Forzar >VRAM → LRU evict sin crash | ⏳ pendiente (modelo grande / mock) |
+| `test_kv_offload_4k` | 4K contexto en 8GB VRAM sin OOM | ⏳ pendiente (modelo) |
+| `test_qwen35_4b_q4k` | Qwen3.5-0.8B Q4_0 corre en 8GB VRAM | ✅ (run manual `--layer-stream-max 1/2/...`) |
 
-### Tests preexistentes
-- `hybrid_attn.test.*` — **corregido** (435f5b2): los tests pasaban tensores 3D `[1,1,8]` a `forward`,
-  que asiste 2D `[N, n_embd]` (assert en `matmul/root.zig:238`). Corregido a 2D.
-- `GGUF_MODEL_PATH` tests — SKIP (requieren modelo .gguf en path explícito).
+### Tests preexistentes corregidos
+- `hybrid_attn.test.*` (2 crashes) — corregido en `435f5b2`: los tests pasaban tensores 3D `[1,1,8]` a
+  `forward`, que asiste 2D `[N,n_embd]` (assert `matmul/root.zig:238`). Corregido a 2D → 0 crashes.
+- `gguf.test.load real gguf model…` (E1/E2) — corregido en `b64ffd6`: el CPU `forward()` de la capa de
+  atención hacía `post_norm_buf.reshape()` sobre un `Tensor` con `.allocator = null` → null-deref en
+  `tensor.zig:186`. Usar `self.allocator` → test pasa (forward OK, max_abs razonable).
+- `GGUF_MODEL_PATH` tests — SKIP si el env no está seteado; `PASS` si apunta a un `.gguf` válido.
 
 ---
 
@@ -220,13 +230,13 @@ numérico es idéntico con o sin captura (ver validación).
 
 ### Validación
 ```
-eager vs --layer-stream-max 1/2/4/8/24 (graph replay):
-  - "decode: CUDA graph capturado (modo replay)" ✓ en los 6
-  - stdout: tachando la periférica ... / [✓] byte-idéntico (solo varía timing tok/s y el banner del streamer)
-  - dumps numéricos (stderr, sin breadcrumbs de punteros): idénticos eager vs streamed
-streamed 3x determinismo (seed 7, 48 tokens): md5 idéntico del stdout y de los dumps
-caracteres escape/CR: 0
-tests: 77/77 steps succeeded; 97/100 passed (3 skipped, 0 crashed)
+eager vs --layer-stream-max 1/2/4/8/24 (graph replay, 128 tokens, seed 42):
+  - "decode: CUDA graph capturado (modo replay)" ✓ en los 6 (sin DUMP_PREFILL_LAYERS)
+  - stdout: byte-idéntico excluyendo banner del streamer y timing tok/s
+  - 128-token streamed vs eager: stdout byte-identical
+streamed 3x determinismo (seed 7, 48 tokens): stdout idéntico salvo timing tok/s (md5 diferente)
+caracteres escape/CR: 0 (spinner removido)
+tests: 77/77 steps succeeded; 100/100 tests passed (con GGUF_MODEL_PATH set)
 ```
 
 ---
@@ -238,7 +248,7 @@ tests: 77/77 steps succeeded; 97/100 passed (3 skipped, 0 crashed)
 | Thread safety de `HybridLayer` (Send+Sync) | Medium | `Tensor/GpuBuffer` son `Send+Sync`; `LayerStreamer` usa `std.atomic.Mutex` + atomic state; un hilo por prefetch (no Pool). |
 | CUDA graph interaction con streaming | Medium | **Resuelto** con warm-up pre-capture (§6). Replay no evicta. |
 | `warmupGpuWeights` key mismatch | Low | Los warmup pasan el MISMO scratch pointer (`scratch_q/k/v/o/_down/gate/up/out`) que el forward real, con idéntico `q4_ok`/`w_down_q4` guard. |
-| `get_subtensor` correctness | Low | Tests bit-exact vs `dequantToF16Transposed`; 97/100 pass. |
+| `get_subtensor` correctness | Low | Tests bit-exact vs `dequantToF16Transposed`; 100/100 pass. |
 | Thread pool contention (prefetch vs compute) | Low | 1 thread por prefetch; `ensureLayerLoaded` blocka si está loading; overlap en prefill/decode loops. |
 | Dumps dentro de capture region | Medium | Documentado: disable `DUMP_PREFILL_LAYERS` (o `chk_state`) para usar el graph replay path. |
 
