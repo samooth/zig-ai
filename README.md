@@ -11,6 +11,7 @@ Motor de inferencia de transformers en Zig con FlashAttention, matmul multi-back
 - **Capa Transformer completa**: proyecciones Q/K/V/O + FA + residual
 - **KV-Cache**: para generación autoregresiva
 - **Bloques híbridos (Qwen3.5)**: Gated DeltaNet / SSM recurrente + atención con GQA e IMROPE
+- **Bloques híbridos (LFM2.5)**: ShortConv (depthwise conv1d + gating) + atención estándar con GQA
 - **Precisión configurable**: f32, f16, bf16, INT8, INT4
 
 ## Estructura
@@ -38,16 +39,17 @@ zig-ai-engine/
 │   │   ├── fa_utils.zig         # RoPE, softmax, utilidades
 │   │   └── fa_kernels.zig       # Launchers CUDA
 │   ├── transformer/
-│   │   ├── layer.zig       # Capa Transformer completa
-│   │   ├── ssm.zig         # Gated DeltaNet / SSM (Qwen3.5 hybrid)
-│   │   ├── pipeline.zig    # Pipeline de capas
-│   │   ├── norm.zig        # RMSNorm / LayerNorm
-│   │   ├── ffn.zig         # FFN SwiGLU
-│   │   ├── rope.zig        # Rotatory Position Embedding
-│   │   ├── gqa.zig         # Grouped Query Attention
-│   │   ├── hybrid_attn.zig # Atención híbrida (Qwen3.5)
-│   │   ├── hybrid_layer.zig# Capa híbrida (atención + SSM rutado)
-│   │   └── embedding.zig   # Embedding / lm_head
+│   │   ├── layer.zig          # Capa Transformer completa
+│   │   ├── ssm.zig            # Gated DeltaNet / SSM (Qwen3.5 hybrid)
+│   │   ├── short_conv.zig     # ShortConv (LFM2.5 hybrid)
+│   │   ├── pipeline.zig       # Pipeline de capas
+│   │   ├── norm.zig           # RMSNorm / LayerNorm
+│   │   ├── ffn.zig            # FFN SwiGLU
+│   │   ├── rope.zig           # Rotatory Position Embedding
+│   │   ├── gqa.zig            # Grouped Query Attention
+│   │   ├── hybrid_attn.zig    # Atención híbrida (Qwen3.5 + LFM2.5)
+│   │   ├── hybrid_layer.zig   # Capa híbrida (atención + SSM/ShortConv rutado)
+│   │   └── embedding.zig      # Embedding / lm_head
 │   ├── utils/
 │   │   ├── time.zig        # Timer (posix clock_gettime)
 │   │   └── sampling.zig    # Samplers (top-k, top-p, temp)
@@ -198,13 +200,15 @@ top-k → top-p → muestreo multinomial (o greedy si `temperature ≤ 0`).
 > `zig build --cache-dir /tmp/ziglocal --global-cache-dir /tmp/zigglobal`.
 
 ## Documentación
-
+ 
 
 - [`docs/qwen35-hybrid-deltanet.md`](docs/qwen35-hybrid-deltanet.md) — arquitectura
   híbrida Qwen3.5 (Gated DeltaNet + atención), estrategia `QuantWeight`, bugs de
   la recurrencia corregidos y plan de la Fase H.
- - [`docs/PAGED_ATTENTION_TODO.md`](docs/PAGED_ATTENTION_TODO.md) — plan de desarrollo PagedAttention (Fases 1–3).
- - [`TODO.md`](TODO.md) — plan de desarrollo canónico por fases (A–H).
+- [`docs/lfm25-hybrid-shortconv.md`](docs/lfm25-hybrid-shortconv.md) — arquitectura
+  híbrida LFM2.5 (ShortConv + atención), per-layer routing, ShortConv implementación.
+  - [`docs/PAGED_ATTENTION_TODO.md`](docs/PAGED_ATTENTION_TODO.md) — plan de desarrollo PagedAttention (Fases 1–3).
+  - [`TODO.md`](TODO.md) — plan de desarrollo canónico por fases (A–H).
 - [`docs/zig-ai-engine-plan.md`](docs/zig-ai-engine-plan.md) — plan de desarrollo (histórico).
 - [`docs/zig-ai-engine-todo.md`](docs/zig-ai-engine-todo.md) — checklist por fases (histórico).
 

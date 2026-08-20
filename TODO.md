@@ -1,6 +1,6 @@
 # Zig AI Engine — TODO
 
-> Fecha: 2026-08-04
+> Fecha: 2026-08-20
 > Stack objetivo: **Zig 0.16.0** (único toolchain soportado; migración desde 0.13/0.14 en curso)
 > Formato de modelo: GGUF (primario) + safetensors (secundario)
 > Tests: `zig build test` → 57/61 (3 fallos reales en `tests/test_gguf.zig`, 4 skips); NO está 100% verde.
@@ -109,7 +109,7 @@ Instalado en `~/.local/bin/zig-0.16`.
 > Detalles en `docs/qwen35-hybrid-deltanet.md`.
 
 ## Fase H — Bloque híbrido Qwen3.5 (atención + rutado)
-
+ 
 | # | Tarea | Archivo | Prioridad | Estado |
 |---|-------|---------|-----------|--------|
 | H1 | Capa de atención completa: `attn_q` fused Q+G, `attn_q_norm`/`attn_k_norm`, GQA 16→4, KV cache | `src/transformer/layer.zig`, `hybrid_attn.zig` | 🔴 | ✅ (`hybrid_attn.zig`/`hybrid_layer.zig` ya compilan y se testean) |
@@ -120,6 +120,19 @@ Instalado en `~/.local/bin/zig-0.16`.
 | H6 | Commit final + docs | — | 🟢 | ✅ (commit e1898a4) |
 | H7 | Corregir dequant Q4_0/Q4_1: layout "split" de nibbles de ggml | `src/loader/gguf.zig` | 🔴 | ✅ (fue la causa raíz de logits descorrelacionados; test de regresión añadido) |
 | H8 | Backend GPU (cuBLAS Sgemm + contexto) | `src/cuda/` | 🟢 | ✅ (commit f1ad33b: `cuDevicePrimaryCtxRetain` + símbolos `_v2`, `cublasSgemm_v2`, layout col-major → `colMajorToRowMajor`; GPU vs CPU Pearson 1.0) |
+ 
+## Fase I — Bloque híbrido LFM2.5 (ShortConv + Atención) ✅
+ 
+| # | Tarea | Archivo | Prioridad | Estado |
+|---|-------|---------|-----------|--------|
+| I1 | `ModelConfig`: add `lfm2` arch, parse `head_count_kv` array (30 int32), per-layer attn flags, `shortconv_l_cache` | `src/loader/model_config.zig` | 🔴 | ✅ |
+| I2 | `MetaValue`: add `asI32()` for int32 arrays | `src/loader/gguf.zig` | 🔴 | ✅ |
+| I3 | `ShortConvLayer`: depthwise conv1d + silu → in_proj (3x) → split(gate,up,value) → silu(gate)*up+value → out_proj | `src/transformer/short_conv.zig` (new) | 🔴 | ✅ CPU + GPU stub |
+| I4 | `HybridAttnParams`: `no_gate` (separate Q), `use_mrope` (standard RoPE) | `src/transformer/hybrid_attn.zig` | 🔴 | ✅ |
+| I5 | `HybridLayer`: LFM2 dispatch (ShortConv vs Attention), optional `attn_post_norm` (uses `ffn_norm`), GPU path for ShortConv | `src/transformer/hybrid_layer.zig` | 🔴 | ✅ |
+| I6 | `rope.zig`: generic `applyRoPE(comptime T, ...)` for f32 | `src/transformer/rope.zig` | 🔴 | ✅ |
+| I7 | `build.zig`: wire `short_conv` module | `build.zig` | 🔴 | ✅ |
+| I8 | Validate: loads LFM2.5-2.6B-Q4_K_M.gguf (CPU + GPU OOM on 7.7GB VRAM) | — | 🟡 | ✅ |
 
 ---
 

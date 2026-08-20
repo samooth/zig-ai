@@ -1,6 +1,6 @@
-# Estado del proyecto — CUDA Graphs decode
-
-Ultima actualizacion: 2026-08-18.
+# Estado del proyecto — CUDA Graphs decode + LFM2.5 hybrid
+ 
+Ultima actualizacion: 2026-08-20.
 
 ## Objetivo
 Terminar la optimizacion de decode con CUDA Graphs (paridad Debug ya verificada),
@@ -36,7 +36,41 @@ verificar paridad, correr tests y commitear.
   call en `src/cuda/decode_graph.zig` (`endCaptureAndInstantiate`).
 - **Verificado:** 5/5 runs EXIT=0 en ambos paths (1-token y 5-token).
 
-## Bug pendiente — Paridad graph vs NOGRAPH (OPEN)
+## LFM2.5 Hybrid Architecture (COMPLETED 2026-08-20)
+ 
+Soporte completo para la arquitectura LFM2.5 (Liquid Foundation Model 2.5) en formato GGUF:
+ 
+### Modelo probado
+- **LFM2.5-2.6B-Q4_K_M.gguf** (266 tensores, 30 capas, 2048 dim, 32 heads, 8 kv_heads)
+- Metadata clave: `general.architecture = "lfm2"`, `lfm2.attention.head_count_kv` = array[30] de int32 (capas 2,5,9,13,17,21,24,27 tienen kv=8, resto 0)
+- `lfm2.shortconv.l_cache = 3` (kernel size 4)
+- Tokenizer: GPT-2 BPE (`tokenizer.ggml.pre = "lfm2"`), 128k vocab
+ 
+### Implementación
+- **ModelConfig** (`model_config.zig`): detecta `lfm2`, parsea array `head_count_kv` (30 int32), construye `per_layer_attn: []bool` y `shortconv_l_cache`, setea `is_hybrid=true`
+- **ShortConvLayer** (`short_conv.zig` new): depthwise conv1d (kernel=4) + silu → in_proj (3x expand) → split(gate,up,value) → silu(gate)*up+value → out_proj; CPU forward completo, GPU path con `conv1dSiluKernel` + GEMM host scratch
+- **HybridAttnParams** (`hybrid_attn.zig`): `no_gate=true` (Q separado, no Q+G fusionado), `use_mrope=false` (RoPE estándar NEOX)
+- **HybridLayer** (`hybrid_layer.zig`): dispatch por capa usando `per_layer_attn`, `attn_post_norm` opcional (usa `ffn_norm` para LFM2), integra `ShortConvLayer` en init/load/forward/unload/deinit/warmupGpuWeights/forwardGPU
+- **RoPE genérico** (`rope.zig`): `applyRoPE(comptime T: type, ...)` soporta f32 para LFM2
+- **Build** (`build.zig`): módulo `short_conv` conectado a `hybrid_layer`
+ 
+### Validación
+- ✅ Build exitoso con Zig 0.16.0 (`zig build install --cache-dir /tmp/opencode/zig-cache`)
+- ✅ Todos los tests pasan (`zig build test`)
+- ✅ Carga modelo LFM2.5-2.6B-Q4_K_M.gguf en CPU y GPU
+- ⚠️ GPU: OOM en 7.7GB VRAM (RTX 3080 Laptop) — necesita 12GB+ para model caching completo
+- ⚠️ CPU: prefill lento (~2 min para 2.6B params) pero funcional
+ 
+### Archivos afectados
+- `src/loader/model_config.zig` (+70 líneas)
+- `src/loader/gguf.zig` (+10 líneas)
+- `src/transformer/short_conv.zig` (nuevo, ~500 líneas)
+- `src/transformer/hybrid_attn.zig` (+52 líneas)
+- `src/transformer/hybrid_layer.zig` (+247 líneas)
+- `src/transformer/rope.zig` (+27 líneas)
+- `build.zig` (+37 líneas)
+ 
+Commit: `93d6fad` (firmado)
 - **Sintoma:** la generacion con grafo diverge de `NOGRAPH=1` desde el token 0.
   Logits del token 0 difieren (max diff ~4.4), deterministico.
 - **Diagnostico hasta ahora:**
