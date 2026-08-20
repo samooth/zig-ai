@@ -201,16 +201,17 @@ top-k → top-p → muestreo multinomial (o greedy si `temperature ≤ 0`).
 
 ## Documentación
  
-
-- [`docs/qwen35-hybrid-deltanet.md`](docs/qwen35-hybrid-deltanet.md) — arquitectura
-  híbrida Qwen3.5 (Gated DeltaNet + atención), estrategia `QuantWeight`, bugs de
-  la recurrencia corregidos y plan de la Fase H.
-- [`docs/lfm25-hybrid-shortconv.md`](docs/lfm25-hybrid-shortconv.md) — arquitectura
-  híbrida LFM2.5 (ShortConv + atención), per-layer routing, ShortConv implementación.
-  - [`docs/PAGED_ATTENTION_TODO.md`](docs/PAGED_ATTENTION_TODO.md) — plan de desarrollo PagedAttention (Fases 1–3).
-  - [`TODO.md`](TODO.md) — plan de desarrollo canónico por fases (A–H).
-- [`docs/zig-ai-engine-plan.md`](docs/zig-ai-engine-plan.md) — plan de desarrollo (histórico).
-- [`docs/zig-ai-engine-todo.md`](docs/zig-ai-engine-todo.md) — checklist por fases (histórico).
+ - [`docs/airllm-layer-streaming-guide.md`](docs/airllm-layer-streaming-guide.md) — **guía de usuario: AirLLM layer streaming** (flags, VRAM, tuning, troubleshooting)
+ - [`docs/AIRLLM_IMPLEMENTATION_PLAN.md`](docs/AIRLLM_IMPLEMENTATION_PLAN.md) — plan de implementación, estado, riesgos
+ - [`docs/qwen35-hybrid-deltanet.md`](docs/qwen35-hybrid-deltanet.md) — arquitectura
+   híbrida Qwen3.5 (Gated DeltaNet + atención), estrategia `QuantWeight`, bugs de
+   la recurrencia corregidos y plan de la Fase H.
+ - [`docs/lfm25-hybrid-shortconv.md`](docs/lfm25-hybrid-shortconv.md) — arquitectura
+   híbrida LFM2.5 (ShortConv + atención), per-layer routing, ShortConv implementación.
+ - [`docs/PAGED_ATTENTION_TODO.md`](docs/PAGED_ATTENTION_TODO.md) — plan de desarrollo PagedAttention (Fases 1–3).
+ - [`TODO.md`](TODO.md) — plan de desarrollo canónico por fases (A–H).
+ - [`docs/zig-ai-engine-plan.md`](docs/zig-ai-engine-plan.md) — plan de desarrollo (histórico).
+ - [`docs/zig-ai-engine-todo.md`](docs/zig-ai-engine-todo.md) — checklist por fases (histórico).
 
 ## Backends Matmul
 | Backend   | f32 | f64 | f16 | bf16 | INT8 | Async | Batch |

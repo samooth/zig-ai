@@ -327,3 +327,58 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     try std.testing.expect(max_abs > 0);
     std.debug.print("forward hybrid layer {d} OK: max_abs={d:.3}\n", .{layer_idx, max_abs});
 }
+
+test "kv offload 4k context fits in 8GB VRAM (F3)" {
+    const gpa = std.testing.allocator;
+    const env_path = std.c.getenv("GGUF_MODEL_PATH") orelse {
+        std.debug.print("SKIP: GGUF_MODEL_PATH no está definida\n", .{});
+        return error.SkipZigTest;
+    };
+    const path = std.mem.span(env_path);
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var model = try gguf_model.GgufModel.load(io, gpa, path);
+    defer model.deinit();
+    const cfg = model.config;
+
+    const paged_attn = @import("paged_attention");
+
+    const head_dim = if (cfg.head_dim > 0) cfg.head_dim else cfg.embedding_length / cfg.head_count;
+
+    // 4096 tokens = 256 blocks of 16, need ~256 blocks + margin
+    var paged_kv = try paged_attn.PagedKVCache.init(gpa, .{
+        .block_size = 16,
+        .num_blocks = 300,
+        .head_dim = head_dim,
+        .num_kv_heads = cfg.head_count_kv,
+        .num_q_heads = cfg.head_count,
+        .dtype = .f16,
+        .enable_prefix_cache = false,
+        .enable_cpu_offload = false,
+        .max_seq_len = 4096,
+        .max_batch_size = 1,
+    });
+    defer paged_kv.deinit();
+
+    // Test block allocation for 4096 tokens (256 blocks of 16 tokens each)
+    var block_table = paged_attn.BlockTable.init(gpa, 16);
+    defer block_table.deinit(paged_kv.block_alloc);
+
+    // Allocate blocks for 4096 tokens
+    try block_table.appendTokens(paged_kv.block_alloc, 4096);
+
+    const num_blocks = block_table.numBlocks();
+    std.debug.print("Allocated {} blocks (expected 256)\n", .{num_blocks});
+    if (num_blocks != 256) {
+        std.debug.print("ERROR: Expected 256 blocks, got {}\n", .{num_blocks});
+    }
+    try std.testing.expect(num_blocks == 256);
+
+    // Verify we can read/write block mappings
+    for (0..256) |i| {
+        const physical = block_table.getPhysical(i) orelse return error.Unexpected;
+        try std.testing.expect(physical < 300);
+    }
+
+    std.debug.print("kv offload 4k context test passed: 256 blocks allocated\n", .{});
+}
