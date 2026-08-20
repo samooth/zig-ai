@@ -197,6 +197,16 @@ pub const MetaValue = union(MetaValueType) {
         };
     }
 
+    pub fn asI32(self: MetaValue) ?i32 {
+        return switch (self) {
+            .int32 => |v| v,
+            .uint32 => |v| @intCast(v),
+            .int64 => |v| @intCast(v),
+            .uint64 => |v| @intCast(v),
+            else => null,
+        };
+    }
+
     pub fn asF32(self: MetaValue) ?f32 {
         return switch (self) {
             .float32 => |v| v,

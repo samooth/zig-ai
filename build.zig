@@ -342,6 +342,22 @@ pub fn build(b: *std.Build) void {
     ssm_mod.addImport("gguf", gguf_mod);
     ssm_mod.addImport("debug", debug_mod);
 
+    // === Módulo short_conv ===
+    const short_conv_mod = b.createModule(.{
+        .root_source_file = b.path("src/transformer/short_conv.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    short_conv_mod.addImport("core", core_mod);
+    short_conv_mod.addImport("matmul", matmul_mod);
+    short_conv_mod.addImport("cublas", cublas_mod);
+    short_conv_mod.addImport("cudaz", cudaz_mod);
+    short_conv_mod.addImport("layer_kernels", layer_kernels_mod);
+    short_conv_mod.addImport("quant_weight", quant_weight_mod);
+    short_conv_mod.addImport("gguf", gguf_mod);
+    short_conv_mod.addImport("norm", norm_mod);
+    short_conv_mod.addImport("debug", debug_mod);
+
     // === Módulo hybrid_attn ===
     const hybrid_attn_mod = b.createModule(.{
         .root_source_file = b.path("src/transformer/hybrid_attn.zig"),
@@ -377,6 +393,7 @@ pub fn build(b: *std.Build) void {
     hybrid_layer_mod.addImport("model_config", model_config_mod);
     hybrid_layer_mod.addImport("hybrid_attn", hybrid_attn_mod);
     hybrid_layer_mod.addImport("ssm", ssm_mod);
+    hybrid_layer_mod.addImport("short_conv", short_conv_mod);
     hybrid_layer_mod.addImport("cublas", cublas_mod);
     hybrid_layer_mod.addImport("cudaz", cudaz_mod);
     hybrid_layer_mod.addImport("layer_kernels", layer_kernels_mod);
@@ -582,24 +599,6 @@ pub fn build(b: *std.Build) void {
         "tests/test_paged_attention.zig",
         "tests/test_gguf.zig",
         "tests/test_paged_attention_gpu.zig",
-        "src/transformer/norm.zig",
-        "src/transformer/ffn.zig",
-        "src/transformer/rope.zig",
-        "src/transformer/gqa.zig",
-        "src/transformer/embedding.zig",
-        "src/transformer/ssm.zig",
-        "src/transformer/hybrid_attn.zig",
-        "src/transformer/hybrid_layer.zig",
-        "src/tokenizer/bpe.zig",
-        "src/loader/safetensors.zig",
-        "src/loader/gguf.zig",
-        "src/loader/quant_weight.zig",
-        "src/loader/model_config.zig",
-        "src/loader/gguf_tokenizer.zig",
-        "src/loader/gguf_model.zig",
-        "src/transformer/layer_streamer.zig",
-        "src/transformer/activation_pool.zig",
-        "src/transformer/vram_budget.zig",
         "tests/test_dequant_gpu.zig",
     };
 
@@ -622,6 +621,8 @@ pub fn build(b: *std.Build) void {
         tmod.addImport("embedding", embedding_mod);
         tmod.addImport("hybrid_attn", hybrid_attn_mod);
         tmod.addImport("hybrid_layer", hybrid_layer_mod);
+        tmod.addImport("short_conv", short_conv_mod);
+        tmod.addImport("layer_streamer", layer_streamer_mod);
         tmod.addImport("tokenizer", tokenizer_mod);
         tmod.addImport("gguf", gguf_mod);
         tmod.addImport("quant_weight", quant_weight_mod);

@@ -1,5 +1,6 @@
 //! Hybrid Transformer Layer — unifica SSM (Gated DeltaNet) y Attention
 //! para qwen35. Dispatch por capa usando ModelConfig.isFullAttentionLayer.
+//! También soporta LFM2 (ShortConv + Attention).
 const std = @import("std");
 const Tensor = @import("core").Tensor;
 const matmul = @import("matmul");
@@ -15,6 +16,7 @@ const gqa_mod = @import("gqa");
 const model_config = @import("model_config");
 const AttentionLayer = @import("hybrid_attn").AttentionLayer;
 const SsmLayer = @import("ssm").SsmLayer;
+const ShortConvLayer = @import("short_conv").ShortConvLayer;
 const paged = @import("paged_attention");
 const debugz = @import("debug");
 const activation_pool = @import("activation_pool");
@@ -37,7 +39,7 @@ pub const HybridLayerParams = struct {
     rms_eps: f32,
     max_seq_len: usize,
 
-    // SSM params
+    // SSM params (Qwen3.5)
     d_inner: usize,
     d_state: usize,
     dt_rank: usize,
@@ -47,6 +49,12 @@ pub const HybridLayerParams = struct {
     // FFN
     intermediate_dim: usize,
 
+    // LFM2 params
+    is_lfm2: bool = false,
+    shortconv_l_cache: usize = 0,
+    no_gate: bool = false, // LFM2 attention: separate Q (not fused Q+G)
+    use_mrope: bool = true, // LFM2: use standard RoPE instead of MRoPE
+
     pub fn fromModelConfig(cfg: model_config.ModelConfig, max_seq_len: usize) HybridLayerParams {
         const ssm_d_inner = if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size else cfg.embedding_length * 3;
         const ssm_d_state = if (cfg.ssm_state_size > 0) cfg.ssm_state_size else 128;
@@ -54,6 +62,7 @@ pub const HybridLayerParams = struct {
         const ssm_n_group = if (cfg.ssm_group_count > 0) cfg.ssm_group_count else 16;
         const ssm_d_conv = if (cfg.ssm_conv_kernel > 0) cfg.ssm_conv_kernel else 4;
 
+        const is_lfm2 = std.mem.eql(u8, cfg.architecture, "lfm2");
         return .{
             .n_embd = cfg.embedding_length,
             .n_head = cfg.head_count,
@@ -70,6 +79,10 @@ pub const HybridLayerParams = struct {
             .n_group = ssm_n_group,
             .d_conv = ssm_d_conv,
             .intermediate_dim = if (cfg.feed_forward_length > 0) cfg.feed_forward_length else cfg.embedding_length * 3,
+            .is_lfm2 = is_lfm2,
+            .shortconv_l_cache = cfg.shortconv_l_cache,
+            .no_gate = is_lfm2,
+            .use_mrope = !is_lfm2, // LFM2 uses standard RoPE, Qwen3.5 uses MRoPE
         };
     }
 };
@@ -83,7 +96,7 @@ pub const HybridLayer = struct {
 
     // Pesos comunes (normalización)
     attn_norm: Tensor(f32),      // [n_embd]
-    attn_post_norm: Tensor(f32), // [n_embd]
+    attn_post_norm: ?Tensor(f32) = null, // [n_embd] - optional for LFM2 (uses ffn_norm)
 
     // FFN weights (QuantWeight)
     w_gate: QuantWeight,
@@ -98,6 +111,7 @@ pub const HybridLayer = struct {
     // Sub-layer específica
     attn_layer: ?AttentionLayer = null,
     ssm_layer: ?SsmLayer = null,
+    short_conv_layer: ?ShortConvLayer = null,
 
     // KV-Cache paginado compartido (solo usado por capas de atención)
     paged_kv: ?*paged.PagedKVCache = null,
@@ -137,8 +151,14 @@ pub const HybridLayer = struct {
 
         var attn_norm = try Tensor(f32).alloc(allocator, &.{params.n_embd});
         errdefer attn_norm.deinit();
-        var attn_post_norm = try Tensor(f32).alloc(allocator, &.{params.n_embd});
-        errdefer attn_post_norm.deinit();
+
+        // LFM2 uses ffn_norm instead of post_attention_norm for both attention and shortconv layers
+        // For Qwen3.5, allocate post_attention_norm; for LFM2, we'll load ffn_norm into this slot
+        var attn_post_norm: ?Tensor(f32) = null;
+        if (!params.is_lfm2) {
+            attn_post_norm = try Tensor(f32).alloc(allocator, &.{params.n_embd});
+            errdefer if (attn_post_norm) |t| t.deinit();
+        }
 
         var self = Self{
             .allocator = allocator,
@@ -156,46 +176,87 @@ pub const HybridLayer = struct {
             .scratch_down = scratch_down,
             .attn_layer = null,
             .ssm_layer = null,
+            .short_conv_layer = null,
             .paged_kv = paged_kv,
             .block_table = block_table,
             .paged_gpu = paged_gpu,
             .act_pool = activation_pool.ActivationPool.init(allocator, 256 * 1024 * 1024),
         };
 
-        if (is_attention) {
-            const attn_params = @import("hybrid_attn").HybridAttnParams{
-                .n_embd = params.n_embd,
-                .n_head = params.n_head,
-                .n_kv_head = params.n_kv_head,
-                .head_dim = params.head_dim,
-                .n_rot = params.n_rot,
-                .rope_sections = params.rope_sections,
-                .rope_freq_base = params.rope_freq_base,
-                .rms_eps = params.rms_eps,
-                .max_seq_len = params.max_seq_len,
-            };
-            self.attn_layer = try AttentionLayer.init(
-                allocator,
-                layer_idx,
-                attn_params,
-                backend,
-                paged_kv orelse return HybridLayerError.KvCacheNotSet,
-                block_table orelse return HybridLayerError.KvCacheNotSet,
-                paged_gpu,
-            );
-            errdefer if (self.attn_layer) |l| l.deinit();
+        if (params.is_lfm2) {
+            if (is_attention) {
+                const attn_params = @import("hybrid_attn").HybridAttnParams{
+                    .n_embd = params.n_embd,
+                    .n_head = params.n_head,
+                    .n_kv_head = params.n_kv_head,
+                    .head_dim = params.head_dim,
+                    .n_rot = params.n_rot,
+                    .rope_sections = params.rope_sections,
+                    .rope_freq_base = params.rope_freq_base,
+                    .rms_eps = params.rms_eps,
+                    .max_seq_len = params.max_seq_len,
+                    .no_gate = params.no_gate,
+                    .use_mrope = params.use_mrope,
+                };
+                self.attn_layer = try AttentionLayer.init(
+                    allocator,
+                    layer_idx,
+                    attn_params,
+                    backend,
+                    paged_kv orelse return HybridLayerError.KvCacheNotSet,
+                    block_table orelse return HybridLayerError.KvCacheNotSet,
+                    paged_gpu,
+                );
+                errdefer if (self.attn_layer) |l| l.deinit();
+            } else {
+                // LFM2 ShortConv layer
+                const sc_params = @import("short_conv").ShortConvParams{
+                    .n_embd = params.n_embd,
+                    .conv_dim = params.n_embd,
+                    .l_cache = params.shortconv_l_cache,
+                    .rms_eps = params.rms_eps,
+                };
+                self.short_conv_layer = try ShortConvLayer.init(allocator, layer_idx, sc_params, backend);
+                errdefer if (self.short_conv_layer) |l| l.deinit();
+            }
         } else {
-            const ssm_params = @import("ssm").SsmParams{
-                .n_embd = params.n_embd,
-                .d_inner = params.d_inner,
-                .d_state = params.d_state,
-                .dt_rank = params.dt_rank,
-                .n_group = params.n_group,
-                .d_conv = params.d_conv,
-                .rms_eps = params.rms_eps,
-            };
-            self.ssm_layer = try SsmLayer.init(allocator, layer_idx, ssm_params, backend);
-            errdefer if (self.ssm_layer) |l| l.deinit();
+            // Qwen3.5 hybrid (SSM + Attention)
+            if (is_attention) {
+                const attn_params = @import("hybrid_attn").HybridAttnParams{
+                    .n_embd = params.n_embd,
+                    .n_head = params.n_head,
+                    .n_kv_head = params.n_kv_head,
+                    .head_dim = params.head_dim,
+                    .n_rot = params.n_rot,
+                    .rope_sections = params.rope_sections,
+                    .rope_freq_base = params.rope_freq_base,
+                    .rms_eps = params.rms_eps,
+                    .max_seq_len = params.max_seq_len,
+                    .use_mrope = params.use_mrope,
+                };
+                self.attn_layer = try AttentionLayer.init(
+                    allocator,
+                    layer_idx,
+                    attn_params,
+                    backend,
+                    paged_kv orelse return HybridLayerError.KvCacheNotSet,
+                    block_table orelse return HybridLayerError.KvCacheNotSet,
+                    paged_gpu,
+                );
+                errdefer if (self.attn_layer) |l| l.deinit();
+            } else {
+                const ssm_params = @import("ssm").SsmParams{
+                    .n_embd = params.n_embd,
+                    .d_inner = params.d_inner,
+                    .d_state = params.d_state,
+                    .dt_rank = params.dt_rank,
+                    .n_group = params.n_group,
+                    .d_conv = params.d_conv,
+                    .rms_eps = params.rms_eps,
+                };
+                self.ssm_layer = try SsmLayer.init(allocator, layer_idx, ssm_params, backend);
+                errdefer if (self.ssm_layer) |l| l.deinit();
+            }
         }
 
         return self;
@@ -207,18 +268,20 @@ pub const HybridLayer = struct {
         self.allocator.free(self.scratch_up);
         self.allocator.free(self.scratch_down);
         self.attn_norm.deinit();
-        self.attn_post_norm.deinit();
+        if (self.attn_post_norm) |*t| t.deinit();
         self.act_pool.deinit();
         if (self.attn_layer) |*l| l.deinit();
         if (self.ssm_layer) |*l| l.deinit();
+        if (self.short_conv_layer) |*l| l.deinit();
     }
 
     pub fn resetState(self: *Self) void {
         if (self.attn_layer) |l| l.resetState();
         if (self.ssm_layer) |l| l.resetState();
+        if (self.short_conv_layer) |l| l.resetState();
     }
 
-    /// Carga pesos desde GGUF (nombres qwen35). Si weights_loaded es false,
+    /// Carga pesos desde GGUF (nombres qwen35 o lfm2). Si weights_loaded es false,
     /// re-alloca los scratch buffers antes de dequantizar.
     pub fn loadWeightsFromGguf(self: *HybridLayer, g: *const gguf.GgufFile) !void {
         // If previously unloaded (scratch freed), re-allocate
@@ -235,8 +298,16 @@ pub const HybridLayer = struct {
         // Norm weights
         self.attn_norm.deinit();
         self.attn_norm = try loadGgufF32(self.allocator, g, prefix, "attn_norm.weight");
-        self.attn_post_norm.deinit();
-        self.attn_post_norm = try loadGgufF32(self.allocator, g, prefix, "post_attention_norm.weight");
+
+        if (self.params.is_lfm2) {
+            // LFM2: uses ffn_norm instead of post_attention_norm
+            if (self.attn_post_norm) |*t| t.deinit();
+            self.attn_post_norm = try loadGgufF32(self.allocator, g, prefix, "ffn_norm.weight");
+        } else {
+            // Qwen3.5: uses post_attention_norm
+            if (self.attn_post_norm) |*t| t.deinit();
+            self.attn_post_norm = try loadGgufF32(self.allocator, g, prefix, "post_attention_norm.weight");
+        }
 
         // FFN weights
         self.w_gate = try loadQuantWeight(g, prefix, "ffn_gate.weight");
@@ -249,10 +320,19 @@ pub const HybridLayer = struct {
         self.w_up.dequantToF32Transposed(self.scratch_up);
         self.w_down.dequantToF32Transposed(self.scratch_down);
 
-        if (self.is_attention) {
-            if (self.attn_layer) |*l| try l.loadWeightsFromGguf(g);
+        if (self.params.is_lfm2) {
+            if (self.is_attention) {
+                if (self.attn_layer) |*l| try l.loadWeightsFromGguf(g);
+            } else {
+                if (self.short_conv_layer) |*l| try l.loadWeightsFromGguf(g);
+            }
         } else {
-            if (self.ssm_layer) |*l| try l.loadWeightsFromGguf(g);
+            // Qwen3.5 hybrid (SSM + Attention)
+            if (self.is_attention) {
+                if (self.attn_layer) |*l| try l.loadWeightsFromGguf(g);
+            } else {
+                if (self.ssm_layer) |*l| try l.loadWeightsFromGguf(g);
+            }
         }
         self.weights_loaded = true;
     }
@@ -273,15 +353,16 @@ pub const HybridLayer = struct {
         // Invalidate the GPU weight cache: the freed host addresses may be reused
         // by the allocator for a different weight on reload.
         self.matmul_engine.clearWeightCache();
-        // Unload sub-layer weights (attention/SSM) — frees their scratch too
+        // Unload sub-layer weights (attention/SSM/ShortConv) — frees their scratch too
         if (self.attn_layer) |*l| l.unloadWeights();
         if (self.ssm_layer) |*l| l.unloadWeights();
+        if (self.short_conv_layer) |*l| l.unloadWeights();
         // Norm weights remain resident (small: [n_embd] each)
         self.weights_loaded = false;
     }
 
     /// Forward del bloque híbrido:
-    /// x → attn_norm → (SSM | Attention) → +residual → attn_post_norm → FFN → +residual → out
+    /// x → attn_norm → (SSM | Attention | ShortConv) → +residual → attn_post_norm → FFN → +residual → out
     pub fn forward(self: *HybridLayer, x: Tensor(f32), out: *Tensor(f32), start_pos: usize, n: usize) !void {
         const p = self.params;
         const N = n;
@@ -295,20 +376,33 @@ pub const HybridLayer = struct {
         var norm_buf = Tensor(f32){ .data = norm_buf_data, .shape = &norm_buf_shape, .strides = &norm_buf_strides, .offset = 0, .allocator = null, .owns_data = false };
         norm.rmsNorm(f32, f32, x, self.attn_norm, p.rms_eps, &norm_buf);
 
-        // === 2. SSM o Attention (pool: reuse [N, n_embd]) ===
+        // === 2. SSM o Attention o ShortConv (pool: reuse [N, n_embd]) ===
         const mixer_data = try self.act_pool.alloc(buf_numel);
         defer self.act_pool.release(mixer_data);
         var mixer_shape = [_]usize{ N, p.n_embd };
         var mixer_strides = [_]usize{ p.n_embd, 1 };
         var mixer_out = Tensor(f32){ .data = mixer_data, .shape = &mixer_shape, .strides = &mixer_strides, .offset = 0, .allocator = null, .owns_data = false };
 
-        if (self.is_attention) {
-            if (self.attn_layer) |*l| {
-                try l.forward(norm_buf, &mixer_out, start_pos, N);
+        if (self.params.is_lfm2) {
+            if (self.is_attention) {
+                if (self.attn_layer) |*l| {
+                    try l.forward(norm_buf, &mixer_out, start_pos, N);
+                }
+            } else {
+                if (self.short_conv_layer) |*l| {
+                    try l.forward(norm_buf, &mixer_out, N);
+                }
             }
         } else {
-            if (self.ssm_layer) |*l| {
-                try l.forward(norm_buf, &mixer_out, N);
+            // Qwen3.5 hybrid (SSM + Attention)
+            if (self.is_attention) {
+                if (self.attn_layer) |*l| {
+                    try l.forward(norm_buf, &mixer_out, start_pos, N);
+                }
+            } else {
+                if (self.ssm_layer) |*l| {
+                    try l.forward(norm_buf, &mixer_out, N);
+                }
             }
         }
 
@@ -323,7 +417,9 @@ pub const HybridLayer = struct {
         var post_norm_shape = [_]usize{ N, p.n_embd };
         var post_norm_strides = [_]usize{ p.n_embd, 1 };
         var post_norm_buf = Tensor(f32){ .data = post_norm_data, .shape = &post_norm_shape, .strides = &post_norm_strides, .offset = 0, .allocator = self.allocator, .owns_data = false };
-        norm.rmsNorm(f32, f32, out.*, self.attn_post_norm, p.rms_eps, &post_norm_buf);
+        // attn_post_norm holds post_attention_norm (Qwen3.5) or ffn_norm (LFM2)
+        const post_norm_weight = self.attn_post_norm.?;
+        norm.rmsNorm(f32, f32, out.*, post_norm_weight, p.rms_eps, &post_norm_buf);
 
         // === 5. FFN SwiGLU ===
         var w_gate_shape = [_]usize{ p.intermediate_dim, p.n_embd };
@@ -470,16 +566,26 @@ pub fn ensureGpu(self: *HybridLayer) !void {
     if (self.gpu != null) return;
     var g = try HybridGpu.alloc(self.params);
     try g.g_attn_norm.upload(self.attn_norm.data);
-    try g.g_attn_post_norm.upload(self.attn_post_norm.data);
+    if (self.attn_post_norm) |post_norm| {
+        try g.g_attn_post_norm.upload(post_norm.data);
+    }
     self.gpu = g;
 }
 
 pub fn warmupGpuWeights(self: *HybridLayer) !void {
     const p = self.params;
-    if (self.is_attention) {
-        if (self.attn_layer) |*l| try l.warmupGpuWeights();
+    if (self.params.is_lfm2) {
+        if (self.is_attention) {
+            if (self.attn_layer) |*l| try l.warmupGpuWeights();
+        } else {
+            if (self.short_conv_layer) |*l| try l.warmupGpuWeights();
+        }
     } else {
-        if (self.ssm_layer) |*l| try SsmLayer.warmupGpuWeights(l);
+        if (self.is_attention) {
+            if (self.attn_layer) |*l| try l.warmupGpuWeights();
+        } else {
+            if (self.ssm_layer) |*l| try SsmLayer.warmupGpuWeights(l);
+        }
     }
     const q4_ok = self.w_gate.dtype() == gguf.GgmlType.q4_0 and layer_kernels.quantPath() and !debugz.dbg.no_q4_ffn;
     if (!q4_ok) {
@@ -513,18 +619,27 @@ pub fn forwardGPU(
 
     try lk.rmsNorm(x.ptr(), @intFromPtr(g.g_attn_norm.dev_ptr), g.g_norm.ptr(), n, p.n_embd, p.rms_eps);
 
-    if (self.is_attention) {
-        // Atención 100% GPU (Phase 1b): proyecciones, split, MRoPE, KV-append,
-        // decode paginado device→device, gate y out-proj viven en device. Solo
-        // el KV recién escrito se baja al pool host (D2H async).
-        if (self.attn_layer) |*l| try l.forwardGPU(lk, g.g_norm, &g.g_mixer, start_pos, n);
-        try lk.add(x.ptr(), g.g_mixer.ptr(), out.ptr(), n * p.n_embd);
+    if (self.params.is_lfm2) {
+        if (self.is_attention) {
+            if (self.attn_layer) |*l| try l.forwardGPU(lk, g.g_norm, &g.g_mixer, start_pos, n);
+            try lk.add(x.ptr(), g.g_mixer.ptr(), out.ptr(), n * p.n_embd);
+        } else {
+            if (self.short_conv_layer) |*l| try l.forwardGPU(lk, g.g_norm, out, n);
+        }
     } else {
-        if (self.ssm_layer) |*l| try SsmLayer.forwardGPU(l, lk, g.g_norm, &g.g_mixer, n);
-        try lk.add(x.ptr(), g.g_mixer.ptr(), out.ptr(), n * p.n_embd);
+        // Qwen3.5 hybrid (SSM + Attention)
+        if (self.is_attention) {
+            if (self.attn_layer) |*l| try l.forwardGPU(lk, g.g_norm, &g.g_mixer, start_pos, n);
+            try lk.add(x.ptr(), g.g_mixer.ptr(), out.ptr(), n * p.n_embd);
+        } else {
+            if (self.ssm_layer) |*l| try SsmLayer.forwardGPU(l, lk, g.g_norm, &g.g_mixer, n);
+            try lk.add(x.ptr(), g.g_mixer.ptr(), out.ptr(), n * p.n_embd);
+        }
     }
 
-    try lk.rmsNorm(out.ptr(), @intFromPtr(g.g_attn_post_norm.dev_ptr), g.g_post.ptr(), n, p.n_embd, p.rms_eps);
+    if (self.attn_post_norm) |_| {
+        try lk.rmsNorm(out.ptr(), @intFromPtr(g.g_attn_post_norm.dev_ptr), g.g_post.ptr(), n, p.n_embd, p.rms_eps);
+    }
 
     var w_gate_shape = [_]usize{ p.intermediate_dim, p.n_embd };
     var w_gate_strides = [_]usize{ p.n_embd, 1 };

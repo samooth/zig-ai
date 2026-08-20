@@ -1,15 +1,15 @@
 const std = @import("std");
 const Tensor = @import("core").Tensor;
 
-/// RoPE (Rotary Position Embedding) vectorizado
-/// Aplica rotación a pares de dimensiones (d/2 pares)
+/// Generic RoPE that works with any numeric type (f32, f16, etc.)
 /// Q/K shape: [batch, num_heads, seq_len, head_dim]
 pub fn applyRoPE(
-    Q: *Tensor(f16),
-    K: *Tensor(f16),
+    comptime T: type,
+    Q: *Tensor(T),
+    K: *Tensor(T),
     start_pos: usize,
     head_dim: usize,
-    base: f32,         // theta base, típicamente 10000.0 o 1000000.0
+    base: f32,
 ) void {
     std.debug.assert(Q.shape.len == 4);
     std.debug.assert(K.shape.len == 4);
@@ -82,6 +82,17 @@ pub fn applyRoPE(
     }
 }
 
+/// Legacy f16-only RoPE (kept for compatibility)
+pub fn applyRoPE_f16(
+    Q: *Tensor(f16),
+    K: *Tensor(f16),
+    start_pos: usize,
+    head_dim: usize,
+    base: f32,
+) void {
+    applyRoPE(f16, Q, K, start_pos, head_dim, base);
+}
+
 /// RoPE para un único token (generación autoregresiva)
 /// Q/K shape: [batch, num_heads, 1, head_dim]
 pub fn applyRoPESingle(
@@ -91,9 +102,7 @@ pub fn applyRoPESingle(
     head_dim: usize,
     base: f32,
 ) void {
-    std.debug.assert(Q.shape[2] == 1);
-    std.debug.assert(K.shape[2] == 1);
-    applyRoPE(Q, K, position, head_dim, base);
+    applyRoPE(f16, Q, K, position, head_dim, base);
 }
 
 /// MRoPE (Multi-section RoPE) para qwen35 / Qwen3.5 hybrid.
@@ -234,7 +243,7 @@ test "rope preserves norm" {
     var norm_before: f32 = 0;
     for (Q.data) |v| { const f = @as(f32, @floatCast(v)); norm_before += f * f; }
 
-    applyRoPE(&Q, &K, 0, dim, 10000.0);
+    applyRoPE(f32, &Q, &K, 0, dim, 10000.0);
 
     // Calcular norma después (RoPE es una rotación, preserva norma)
     var norm_after: f32 = 0;

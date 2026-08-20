@@ -8,10 +8,11 @@ pub const ModelConfigError = error{
     MissingRequiredMetadata,
     InvalidMetadata,
     UnsupportedArchitecture,
+    OutOfMemory,
 };
 
 pub const ModelConfig = struct {
-    architecture: []const u8, // "llama", "gemma", "mistral", "qwen35", ...
+    architecture: []const u8, // "llama", "gemma", "mistral", "qwen35", "lfm2", ...
     context_length: usize,
     embedding_length: usize,
     block_count: usize,
@@ -34,6 +35,10 @@ pub const ModelConfig = struct {
     ssm_group_count: usize = 0,
     rope_sections: [4]usize = [_]usize{ 0, 0, 0, 0 }, // IMROPE sections
 
+    // LFM2 hybrid (ShortConv + Attention)
+    per_layer_attn: ?[]bool = null, // per-layer: true=attention, false=shortconv
+    shortconv_l_cache: usize = 0,   // conv kernel size - 1 (l_cache=3 -> kernel=4)
+
     pub const Self = @This();
 
     /// Construye la config desde metadata GGUF. `tokenizer.ggml.tokens`
@@ -52,7 +57,7 @@ pub const ModelConfig = struct {
             .block_count = block_count,
             .feed_forward_length = try u64Meta(g, arch, "feed_forward_length", null),
             .head_count = head_count,
-            .head_count_kv = try u64Meta(g, arch, "attention.head_count_kv", head_count),
+            .head_count_kv = head_count, // default, will be overridden for LFM2
             .layer_norm_rms_epsilon = try f32Meta(g, arch, "attention.layer_norm_rms_epsilon", 1e-5),
             .rope_dimension_count = try u64Meta(g, arch, "rope.dimension_count", 0),
             .rope_freq_base = try f32Meta(g, arch, "rope.freq_base", 10000.0),
@@ -88,14 +93,57 @@ pub const ModelConfig = struct {
             for (0..@min(4, n_sections)) |i| cfg.rope_sections[i] = sections_buf[i];
         }
 
+        // ── LFM2 hybrid (ShortConv + Attention) ──
+        if (std.mem.eql(u8, arch, "lfm2")) {
+            cfg.is_hybrid = true;
+            cfg.head_dim = cfg.embedding_length / cfg.head_count; // 64
+
+            // head_count_kv es un array de 30 int32: capas [2,5,9,13,17,21,24,27] tienen 8, resto 0
+            var kv_heads_buf: [64]i32 = undefined;
+            const n_kv = try arrI32Meta(g, arch, "attention.head_count_kv", &kv_heads_buf) orelse 0;
+            if (n_kv > 0) {
+                // First non-zero value is the attention layer's kv_heads (8)
+                for (0..n_kv) |i| {
+                    if (kv_heads_buf[i] > 0) {
+                        cfg.head_count_kv = @as(usize, @intCast(kv_heads_buf[i]));
+                        break;
+                    }
+                }
+                // If all zero, fallback to head_count
+                if (cfg.head_count_kv == 0) {
+                    cfg.head_count_kv = cfg.head_count;
+                }
+
+                // Build per-layer attention flag array
+                var per_layer = try g.allocator.alloc(bool, cfg.block_count);
+                errdefer g.allocator.free(per_layer);
+                for (0..cfg.block_count) |i| {
+                    per_layer[i] = (i < n_kv and kv_heads_buf[i] > 0);
+                }
+                cfg.per_layer_attn = per_layer;
+            }
+
+            // shortconv.l_cache = 3 (kernel size = l_cache + 1 = 4)
+            cfg.shortconv_l_cache = try u64Meta(g, arch, "shortconv.l_cache", 3);
+        }
+
         return cfg;
     }
 
     /// True si la capa `il` usa atención densa (Qwen3.5 hybrid).
     /// Las capas recurrentes (SSM linear attention) se intercalan cada
     /// `full_attention_interval` capas: capa i es atención si (i+1)%interval == 0.
+    /// Para LFM2: usa per_layer_attn array si está disponible.
     pub fn isFullAttentionLayer(self: Self, il: usize) bool {
         if (!self.is_hybrid) return true;
+        // LFM2: per-layer attention flags
+        if (std.mem.eql(u8, self.architecture, "lfm2")) {
+            if (self.per_layer_attn) |arr| {
+                if (il < arr.len) return arr[il];
+            }
+            return false;
+        }
+        // Qwen3.5: periodic pattern
         if (self.full_attention_interval == 0) return true;
         return (il + 1) % self.full_attention_interval == 0;
     }
@@ -108,6 +156,7 @@ pub const ModelConfig = struct {
             "phi2",     "phi3",     "qwen2",   "qwen2moe",
             "starcoder2", "deepseek2", "granite",
             "qwen35",   "qwen35moe",
+            "lfm2",
         };
         for (llama_like) |a| {
             if (std.mem.eql(u8, arch, a)) return true;
@@ -152,6 +201,23 @@ fn f32Meta(g: *const gguf.GgufFile, arch: []const u8, key: []const u8, default: 
         return v.asF32() orelse ModelConfigError.InvalidMetadata;
     }
     return default orelse ModelConfigError.MissingRequiredMetadata;
+}
+
+/// Lee un array de int32 (para lfm2.attention.head_count_kv que es array de 30 int32)
+fn arrI32Meta(
+    g: *const gguf.GgufFile,
+    arch: []const u8,
+    key: []const u8,
+    out: []i32,
+) ModelConfigError!?usize {
+    var buf: [128]u8 = undefined;
+    const full = std.fmt.bufPrint(&buf, "{s}.{s}", .{ arch, key }) catch unreachable;
+    const v = g.getMeta(full) orelse return null;
+    const n = @min(out.len, v.array.items.len);
+    for (v.array.items[0..n], 0..) |it, i| {
+        out[i] = it.asI32() orelse return ModelConfigError.InvalidMetadata;
+    }
+    return n;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

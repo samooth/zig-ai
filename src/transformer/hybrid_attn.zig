@@ -34,8 +34,11 @@ pub const HybridAttnParams = struct {
     rope_freq_base: f32 = 1e7,
     rms_eps: f32 = 1e-6,
     max_seq_len: usize = 2048,
+    no_gate: bool = false, // LFM2: separate Q (not fused Q+G)
+    use_mrope: bool = true, // LFM2: use standard RoPE instead of MRoPE
 
     pub fn qg_dim(self: HybridAttnParams) usize {
+        if (self.no_gate) return self.n_head * self.head_dim;
         return self.n_head * self.head_dim * 2;
     }
     pub fn kv_dim(self: HybridAttnParams) usize {
@@ -279,7 +282,7 @@ pub const AttentionLayer = struct {
         const n_kv_head = p.n_kv_head;
         const N = n;
 
-        // === 2. Proyección Q+G fusionada (w_q) ===
+        // === 2. Proyección Q (y G si no es no_gate) ===
         var w_q_shape = [_]usize{ qg_dim, p.n_embd };
         var w_q_strides = [_]usize{ p.n_embd, 1 };
         const w_q32 = Tensor(f32){
@@ -294,18 +297,29 @@ pub const AttentionLayer = struct {
         defer qg32.deinit();
         try self.matmul_engine.linearProjection(f32, x, w_q32, &qg32);
 
-        // Dividir Q y G interleaved [Q0|G0|Q1|G1|...]: Q = base, G = base+head_dim
         var Qf32 = try Tensor(f32).alloc(self.allocator, &.{ N, n_head, head_dim });
         defer Qf32.deinit();
         var Gf32 = try Tensor(f32).alloc(self.allocator, &.{ N, n_head, head_dim });
         defer Gf32.deinit();
 
-        for (0..N) |t| {
-            for (0..n_head) |h| {
-                const base = h * (2 * head_dim);
-                for (0..head_dim) |d| {
-                    Qf32.data[t * n_head * head_dim + h * head_dim + d] = qg32.data[t * qg_dim + base + d];
-                    Gf32.data[t * n_head * head_dim + h * head_dim + d] = qg32.data[t * qg_dim + base + head_dim + d];
+        if (p.no_gate) {
+            // LFM2: Q projection only, no G
+            for (0..N) |t| {
+                for (0..n_head) |h| {
+                    for (0..head_dim) |d| {
+                        Qf32.data[t * n_head * head_dim + h * head_dim + d] = qg32.data[t * qg_dim + h * head_dim + d];
+                    }
+                }
+            }
+        } else {
+            // Qwen3.5: fused Q+G interleaved [Q0|G0|Q1|G1|...]
+            for (0..N) |t| {
+                for (0..n_head) |h| {
+                    const base = h * (2 * head_dim);
+                    for (0..head_dim) |d| {
+                        Qf32.data[t * n_head * head_dim + h * head_dim + d] = qg32.data[t * qg_dim + base + d];
+                        Gf32.data[t * n_head * head_dim + h * head_dim + d] = qg32.data[t * qg_dim + base + head_dim + d];
+                    }
                 }
             }
         }
@@ -367,7 +381,7 @@ pub const AttentionLayer = struct {
         norm.rmsNorm(f32, f32, K_norm, self.attn_k_norm, p.rms_eps, &K_norm);
         for (0..N * n_kv_head * head_dim) |i| Kf32_hm.data[i] = K_norm.data[i];
 
-        // === 5. MRoPE (IMROPE) ===
+        // === 5. RoPE (MRoPE for Qwen3.5, standard for LFM2) ===
         var Q_hm = try Tensor(f32).alloc(self.allocator, &.{ 1, n_head, N, head_dim });
         defer Q_hm.deinit();
         for (0..N * n_head * head_dim) |i| Q_hm.data[i] = Qf32.data[i];
@@ -375,7 +389,11 @@ pub const AttentionLayer = struct {
         defer K_hm.deinit();
         for (0..N * n_kv_head * head_dim) |i| K_hm.data[i] = Kf32_hm.data[i];
 
-        rope_mod.applyRoPEMultiSection(f32, &Q_hm, &K_hm, start_pos, head_dim, p.n_rot, p.rope_sections, p.rope_freq_base);
+        if (p.use_mrope) {
+            rope_mod.applyRoPEMultiSection(f32, &Q_hm, &K_hm, start_pos, head_dim, p.n_rot, p.rope_sections, p.rope_freq_base);
+        } else {
+            rope_mod.applyRoPE(f32, &Q_hm, &K_hm, start_pos, head_dim, p.rope_freq_base);
+        }
 
         for (0..N * n_head * head_dim) |i| Qf32.data[i] = Q_hm.data[i];
         for (0..N * n_kv_head * head_dim) |i| Kf32_hm.data[i] = K_hm.data[i];
@@ -590,13 +608,15 @@ pub const AttentionLayer = struct {
                     }
                 }
             }
-        }
+}
 
-        // === 9. Gate: sigmoid(G) * attn_out ===
-        for (0..N * n_head * head_dim) |i| {
-            const g = Gf32.data[i];
-            const sigmoid = 1.0 / (1.0 + @exp(-g));
-            attn_out.data[i] *= sigmoid;
+// === 9. Gate: sigmoid(G) * attn_out (skip for LFM2 no_gate) ===
+        if (!p.no_gate) {
+            for (0..N * n_head * head_dim) |i| {
+                const g = Gf32.data[i];
+                const sigmoid = 1.0 / (1.0 + @exp(-g));
+                attn_out.data[i] *= sigmoid;
+            }
         }
 
         // === 10. Output projection ===
