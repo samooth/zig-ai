@@ -10,7 +10,7 @@ Implementación de PagedAttention (vLLM, Kwon et al. 2023) adaptada al motor de 
 - **Prefix Caching**: Reutilización de bloques KV entre requests con prefijos comunes
 - **CPU Offloading**: Swap de bloques preempted a memoria del host
 - **Referencia CPU**: Kernel de atención paginada con online softmax
-- **Stubs CUDA**: Kernels GPU listos para compilación con nvcc
+- **GPU**: Kernels CUDA compilados (decode, reshape/block write, copy) + pool de bloques VMM
 
 ## Estructura
 
@@ -24,13 +24,13 @@ src/paged_attention/
 ├── attention.zig         # Kernel CPU reference (online softmax)
 ├── scheduler.zig         # Batch scheduler con preemption
 ├── prefix_cache.zig      # Deduplicación por hash de bloques
-└── gpu_kernels.zig       # Stubs CUDA
+└── gpu_kernels.zig       # Motor GPU (decode/prefill/copy) + GpuBlockPool VMM
 
-cuda/
+src/cuda/
 └── paged_attention.cu    # Kernels CUDA (decode, reshape, copy)
 
 tests/
-└── test_paged_attention.zig
+└── test_paged_attention.zig / test_paged_attention_gpu.zig
 ```
 
 ## Integración en build.zig

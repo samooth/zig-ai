@@ -8,15 +8,15 @@
 
 | Componente | Estado |
 |---|---|
-| `src/paged_attention/` | ✅ Implementación completa (CPU reference + CUDA stubs) |
+| `src/paged_attention/` | ✅ Implementación completa (CPU reference + GPU kernels) |
 | `src/paged_attention/attention.zig` | ✅ CPU reference con online softmax |
 | `src/paged_attention/attention.zig` | ✅ `decode` / `prefill` / `decodeBatch` |
 | `src/paged_attention/scheduler.zig` | ✅ Scheduler con preemption + prefix cache |
 | `src/paged_attention/allocator.zig` | ✅ Block allocator con COW + swap a CPU |
 | `src/paged_attention/block_table.zig` | ✅ Mapeo lógico→físico |
 | `src/paged_attention/prefix_cache.zig` | ✅ Prefix cache por hash |
-| `src/paged_attention/*.cu` | ✅ Kernels CUDA (flash_attention_v2 + paged kernels) |
-| `src/kv_cache/` | ⚠️ Implementación legacy (contigua) - **reemplazar** |
+| `src/cuda/paged_attention.cu` | ✅ Kernels CUDA (flash_attention_v2 + paged kernels) |
+| `src/kv_cache/` | ✅ Re-export del módulo `kv_cache` (gestión cuantizada; el KV paginado vive en `src/paged_attention/`) |
 | `src/transformer/hybrid_attn.zig` | ✅ AttentionLayer con KV-cache paginado (f16 blocks) + GPU decode |
 | `src/main.zig` | ✅ Path híbrido con `PagedKVCache` + `Scheduler` (legacy `runInference` + `KVCacheManager` aún presente) |
 
@@ -437,4 +437,6 @@ qkv_input: [batch, seq_len, num_kv_heads * head_dim * 2]  // K + V concatenados
 
 ---
 
-> **Nota**: El módulo `paged_attention` ya tiene 90% de la lógica CPU + stubs CUDA. El trabajo principal es **wiring** (conectar piezas) + **kernels CUDA** para decode/prefill/reshape.
+> **Nota**: El módulo `paged_attention` está completo (CPU reference + GPU kernels con
+> pool de bloques VMM). La integración híbrida (`hybrid_attn.zig`) y el path paginado por
+> defecto están conectados (ver sección **Integración** abajo).

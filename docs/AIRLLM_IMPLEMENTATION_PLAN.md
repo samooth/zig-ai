@@ -25,7 +25,7 @@ prefetch asíncrono, y offloading de activaciones/KV-cache.
 | `LayerStreamer` (prefetch async + LRU) | ✅ Implementado y **integrado** en prefill/decode loops | `src/transformer/layer_streamer.zig` |
 | `ActivationPool` (activaciones, LRU) | ✅ Implementado, integrado en `forward()` | `src/transformer/activation_pool.zig` |
 | `VramBudget` (weights/activations/kv) | ✅ Implementado | `src/transformer/vram_budget.zig` |
-| GPU dequant kernels (IQ4_*, etc.) | ✅ Implementado | `src/kernels/*.cu` + `gguf_dequant_gpu.zig` |
+| GPU dequant kernels (IQ4_*, etc.) | ✅ Implementado | `/kernels/*.cu` + `gguf_dequant_gpu.zig` |
 | Quantized KV-cache | ✅ Implementado | `src/kv_cache/` |
 | PagedAttention (CPU + GPU) | ✅ Implementado | `src/paged_attention/` |
 | CUDA graphs (decode) | ✅ Implementado; **fix de warm-up** (1f5fd53) | `src/cuda/decode_graph.zig` + `src/main.zig` |

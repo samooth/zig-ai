@@ -1,7 +1,8 @@
 # Qwen3.5 Hybrid — Gated DeltaNet (SSM) + Atención Completa
 
-> Estado: 2026-08-13 — implementación SSM con `QuantWeight` completada; bloque de
-> atención híbrido y rutado pendientes (Fase H).
+> Estado: 2026-08-20 — implementación completa (SSM con `QuantWeight`, bloque híbrido de
+> atención + rutado por `isFullAttentionLayer`, validado contra llama.cpp con
+> Qwen3.5-0.8B-Q4_0.gguf: Pearson 0.9989 en logits del primer token). Fase H ✅ en TODO.md.
 > Fuentes autoritativas: `transformers/modular_qwen3_5.py` (HF), kernel de FLA
 > `fla/ops/gated_delta_rule` (naive.py + fused_recurrent.py), y dump del GGUF real.
 
@@ -138,24 +139,22 @@ permanente en el repo) e **IQ4_XS**, junto a IQ2_XS/IQ2_S. `dequantTensor` /
 
 ## 5. Estado de tests
 
-- `zig build test`: **57/61 tests** (4 skips). Los 3 fallos son los tests reales
-  de `tests/test_gguf.zig`, escritos para el modelo 4B full-attention (esperan
-  `attn_output`/`attn_q` en todas las capas); se arreglan en la Fase H.
+- `zig build test`: **todos pasan** (55/55 con `GGUF_MODEL_PATH`; 52/55 sin él, 3 skips
+  que requieren un `.gguf` real). Los tests de `tests/test_gguf.zig` se escribieron para el
+  modelo 4B full-attention (esperan `attn_output`/`attn_q` en todas las capas); se ajustaron
+  para el híbrido en la Fase H (`hybrid_attn.test.*` corregidos en `435f5b2`).
 - Tests de `ssm.zig` (4): forward hand-computed, persistencia de estado,
   brute-force reference, y **recurrencia vs referencia naive de FLA**.
 - Tests reales: `GGUF_MODEL_PATH=/opt/models/<archivo>.gguf zig build test`.
 
 ## 6. Próximos pasos (Fase H — bloque híbrido)
 
-1. Capa de atención completa: `attn_q` fused Q+G, `attn_q_norm`/`attn_k_norm`
-   por head, GQA 16→4, KV cache (reutilizar `fa/` + `pipeline`).
-2. **IMROPE** en `src/transformer/rope.zig`: NEOX, rotar 64 de 256 dims,
-   secciones `[11, 11, 10, 0]`.
-3. Rutado híbrido: `TransformerLayer` decide SSM vs atención por
-   `model_config.isFullAttentionLayer`.
-4. Rework de `src/loader/gguf_model.zig` a `QuantWeight` + `dequantTensor`.
-5. CLI de inferencia (reemplazar demo en `src/main.zig`), validación contra el
-   modelo real y commit final.
+Fase H ✅ completada (ver TODO.md). Entregables: capa de atención completa con
+`attn_q` fused Q+G, `attn_q_norm`/`attn_k_norm` por head, GQA 16→4, KV cache;
+**IMROPE** en `src/transformer/rope.zig` (NEOX, rotar 64 de 256 dims, secciones
+`[11, 11, 10, 0]`); rutado híbrido por `isFullAttentionLayer`; rework de
+`src/loader/gguf_model.zig` a `QuantWeight`; CLI de inferencia validada contra el
+modelo real (Pearson 0.9989).
 
 ## 7. Notas de entorno
 

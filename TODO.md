@@ -1,19 +1,17 @@
 # Zig AI Engine — TODO
 
 > Fecha: 2026-08-20
-> Stack objetivo: **Zig 0.16.0** (único toolchain soportado; migración desde 0.13/0.14 en curso)
+> Stack objetivo: **Zig 0.16.0** (único toolchain soportado; compila en 0.16).
 > Formato de modelo: GGUF (primario) + safetensors (secundario)
-> Tests: `zig build test` → 57/61 (3 fallos reales en `tests/test_gguf.zig`, 4 skips); NO está 100% verde.
+> Tests: `zig build test` → **todos pasan** (55/55 con `GGUF_MODEL_PATH`; 52/55 sin él, 3 skips que requieren un `.gguf`).
 
 ---
 
 ## Decisión de toolchain
 
 El **único toolchain soportado es Zig 0.16.0**. El código NO compila en 0.13/0.14/0.15
-(usa `std.Io`, `ArrayList` unmanaged, `b.createModule`). La migración a 0.16 está en
-curso: `build.zig` aún usa `.root_source_file` en los `addModule` (API de 0.13/0.14,
-eliminada en 0.16; ver Fase A1), por lo que **todavía no compila en 0.16 tal cual**.
-Instalado en `~/.local/bin/zig-0.16`.
+(usa `std.Io`, `ArrayList` unmanaged, `b.createModule`). El `build.zig` ya usa la API 0.16
+(`b.createModule`, lazy paths) y compila correctamente en 0.16. Instalado en `~/.local/bin/zig-0.16`.
 
 ## Referencias útiles
 
@@ -29,7 +27,7 @@ Instalado en `~/.local/bin/zig-0.16`.
 
 | # | Tarea | Archivo | Prioridad | Estado |
 |---|-------|---------|-----------|--------|
-| A1 | Reemplazar `.root_source_file` por `root_module` en addExecutable/addTest/addModule | `build.zig` | 🔴 | ⬜ (build.zig aún usa `.root_source_file`, ~30 refs; sólo algunos módulos migrados) |
+| A1 | Migrar `addExecutable`/`addTest` a la API 0.16 (`root_module` + `b.createModule`) | `build.zig` | 🔴 | ✅ (módulos via `b.createModule(.{ .root_source_file = b.path(...) })`, que es la API 0.16; `zig build`/`test` compilan y corren en 0.16) |
 | A2 | Ajustar `b.addModule` / imports a la API 0.16 (`b.path`, lazy paths) | `build.zig` | 🔴 | ✅ |
 | A3 | nvcc/cubin/ptx pasos siguen igual (addSystemCommand) | `build.zig` | 🟡 | ✅ |
 | A4 | `zig build test` verde en 0.16 | — | 🔴 | ✅ |

@@ -49,6 +49,9 @@ zig-ai-engine/
 │   │   ├── gqa.zig            # Grouped Query Attention
 │   │   ├── hybrid_attn.zig    # Atención híbrida (Qwen3.5 + LFM2.5)
 │   │   ├── hybrid_layer.zig   # Capa híbrida (atención + SSM/ShortConv rutado)
+│   │   ├── layer_streamer.zig # LayerStreamer: prefetch asíncrono + LRU (AirLLM-style)
+│   │   ├── vram_budget.zig    # Presupuesto de VRAM (60/20/20/5)
+│   │   ├── activation_pool.zig# Pool de activaciones offload (VRAM↔RAM)
 │   │   └── embedding.zig      # Embedding / lm_head
 │   ├── utils/
 │   │   ├── time.zig        # Timer (posix clock_gettime)
@@ -60,6 +63,7 @@ zig-ai-engine/
 │   │   ├── gpu_dequant.zig       # Dequant en GPU
 │   │   ├── allocator.zig         # Pool allocator (LRU/swap)
 │   │   ├── flash_attention.zig   # FlashAttention sobre KV-cache
+│   │   ├── kv_quant.zig          # Operaciones de cuantización KV
 │   │   └── stream.zig            # Stream de tokens
 │   ├── tokenizer/bpe.zig   # Tokenizer BPE
 │   ├── loader/
@@ -78,12 +82,22 @@ zig-ai-engine/
 │   │   ├── attention.zig         # Kernel CPU reference (online softmax)
 │   │   ├── scheduler.zig         # Batch scheduler con preemption
 │   │   ├── prefix_cache.zig      # Deduplicación por hash de bloques
-│   │   └── gpu_kernels.zig       # Motor GPU PagedAttention (decode/prefill/copy)
+│   │   ├── gpu_kernels.zig       # Motor GPU PagedAttention (decode/prefill/copy)
+│   │   └── paged_gpu_pool.zig    # Pool de bloques GPU (VMM / contiguo)
 │   ├── cuda/
 │   │   ├── cudaz_stub.zig       # Bindings CUDA Driver API (stub sin GPU)
+│   │   ├── cuda_runtime.zig     # Bindings CUDA Runtime API
+│   │   ├── layer_kernels.zig/.cu# Kernels de capa (rmsNorm, conv1d, deltaNet, Q4 GEMM)
+│   │   ├── decode_graph.zig     # Captura/replay de CUDA Graphs para decode
 │   │   └── paged_attention.cu   # Kernels CUDA paginados (decode, reshape, copy)
 │   └── main.zig                  # CLI principal
 ├── cuda/
+│   ├── online_softmax.cuh       # Online softmax (warp/block reduce)
+│   ├── matmul_utils.cuh         # Tiles shared-memory
+│   ├── flash_attention.cu       # Kernel FA v1
+│   ├── flash_attention_v2.cu    # Kernel FA v2
+│   └── dequantize_kernels.cu    # Kernels de dequantización
+├── kernels/                      # Kernels CUDA de dequantización GPU (IQ_*/Q_K, 16 archivos)
 │   ├── online_softmax.cuh       # Online softmax (warp/block reduce)
 │   ├── matmul_utils.cuh         # Tiles shared-memory
 │   ├── flash_attention.cu       # Kernel FA v1
@@ -97,6 +111,8 @@ zig-ai-engine/
 │   ├── test_transformer.zig
 │   ├── test_kv_cache.zig
 │   ├── test_paged_attention.zig
+│   ├── test_paged_attention_gpu.zig
+│   ├── test_dequant_gpu.zig
 │   ├── test_gguf.zig
 │   └── benchmark.zig
 └── examples/
@@ -186,6 +202,15 @@ la inferencia end-to-end (carga GGUF + tokenizer + generación autoregresiva); s
 | `-ctk, --cache-type-k <fmt>`| fp16    | Cuantización de la cache K (q8_0/q4_0/q4_1/...)     |
 | `-ctv, --cache-type-v <fmt>`| fp16    | Cuantización de la cache V (q8_0/q4_0/q4_1/...)     |
 | `--quant <auto|off>`        | auto    | GEMM de pesos cuantizados Q4_0 en GPU (auto = activo)|
+| `--layer-stream`            | off     | Activa layer streaming (AirLLM-style): carga asíncrona + prefetch + LRU |
+| `--layer-stream-max <n>`    | 2       | Máx. capas residentes simultáneamente en VRAM    |
+| `-ngl, --n-gpu-layers <n>`  | auto    | Capas a offload a GPU (0 = CPU; >0 = offload completo) |
+| `-np <n>`                   | 1       | Secuencias paralelas (parallel sampling)             |
+| `--spec-type <none|draft-mtp>` | none | Modo spec-decoding                          |
+| `--spec-draft-n-max <n>`    | 16      | Máx. tokens de draft por round                        |
+| `--spec-draft-type-k <fmt>` | fp16    | Cuantización de la cache K del draft                  |
+| `--spec-draft-type-v <fmt>` | fp16    | Cuantización de la cache V del draft                  |
+| `-jinja, --jinja`           | off     | Usar template de chat Jinja (llama.cpp)               |
 
 El prefill del prompt corre en GPU por chunks de `--ubatch-size` tokens (causal
 por chunk, con solapamiento correcto de conv/deltaNet entre chunks). Variables
@@ -200,18 +225,16 @@ top-k → top-p → muestreo multinomial (o greedy si `temperature ≤ 0`).
 > `zig build --cache-dir /tmp/ziglocal --global-cache-dir /tmp/zigglobal`.
 
 ## Documentación
- 
- - [`docs/airllm-layer-streaming-guide.md`](docs/airllm-layer-streaming-guide.md) — **guía de usuario: AirLLM layer streaming** (flags, VRAM, tuning, troubleshooting)
- - [`docs/AIRLLM_IMPLEMENTATION_PLAN.md`](docs/AIRLLM_IMPLEMENTATION_PLAN.md) — plan de implementación, estado, riesgos
- - [`docs/qwen35-hybrid-deltanet.md`](docs/qwen35-hybrid-deltanet.md) — arquitectura
-   híbrida Qwen3.5 (Gated DeltaNet + atención), estrategia `QuantWeight`, bugs de
-   la recurrencia corregidos y plan de la Fase H.
- - [`docs/lfm25-hybrid-shortconv.md`](docs/lfm25-hybrid-shortconv.md) — arquitectura
-   híbrida LFM2.5 (ShortConv + atención), per-layer routing, ShortConv implementación.
- - [`docs/PAGED_ATTENTION_TODO.md`](docs/PAGED_ATTENTION_TODO.md) — plan de desarrollo PagedAttention (Fases 1–3).
- - [`TODO.md`](TODO.md) — plan de desarrollo canónico por fases (A–H).
- - [`docs/zig-ai-engine-plan.md`](docs/zig-ai-engine-plan.md) — plan de desarrollo (histórico).
- - [`docs/zig-ai-engine-todo.md`](docs/zig-ai-engine-todo.md) — checklist por fases (histórico).
+
+- [`docs/README.md`](docs/README.md) — **índice central de documentación** (vigente + archive)
+- [`docs/airllm-layer-streaming-guide.md`](docs/airllm-layer-streaming-guide.md) — **guía de usuario: AirLLM layer streaming** (flags, VRAM, tuning, troubleshooting)
+- [`docs/qwen35-hybrid-deltanet.md`](docs/qwen35-hybrid-deltanet.md) — arquitectura
+   híbrida Qwen3.5 (Gated DeltaNet + atención) y LFM2.5 (ShortConv + atención), estrategia `QuantWeight`.
+- [`docs/PAGED_ATTENTION_TODO.md`](docs/PAGED_ATTENTION_TODO.md) — desarrollo e integración PagedAttention.
+- [`docs/AIRLLM_IMPLEMENTATION_PLAN.md`](docs/AIRLLM_IMPLEMENTATION_PLAN.md) — plan de implementación, estado y riesgos del layer streaming.
+- [`TODO.md`](TODO.md) — plan de desarrollo canónico por fases (A–H).
+- [`STATE.md`](STATE.md) — estado actual del proyecto (bug-hunt y optimización en curso).
+- [`docs/archive/`](docs/archive/) — documentación histórica (planes, análisis, estudios).
 
 ## Backends Matmul
 | Backend   | f32 | f64 | f16 | bf16 | INT8 | Async | Batch |
