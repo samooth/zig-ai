@@ -369,8 +369,18 @@ pub const ShortConvLayer = struct {
     }
 
     pub fn warmupGpuWeights(self: *Self) !void {
-        // Weights already uploaded in ensureGpu
-        _ = self;
+        // Warm up weight cache for in_proj and out_proj
+        var in_proj_shape = [_]usize{ 3 * self.params.conv_dim, self.params.n_embd };
+        var in_proj_strides = [_]usize{ self.params.n_embd, 1 };
+        _ = try self.matmul_engine.projectionDevicePtr(Tensor(f32){
+            .data = self.scratch_in_proj, .shape = &in_proj_shape, .strides = &in_proj_strides, .offset = 0, .allocator = null, .owns_data = false
+        });
+        
+        var out_proj_shape = [_]usize{ self.params.n_embd, self.params.conv_dim };
+        var out_proj_strides = [_]usize{ self.params.conv_dim, 1 };
+        _ = try self.matmul_engine.projectionDevicePtr(Tensor(f32){
+            .data = self.scratch_out_proj, .shape = &out_proj_shape, .strides = &out_proj_strides, .offset = 0, .allocator = null, .owns_data = false
+        });
     }
 
     pub fn forwardGPU(
@@ -475,7 +485,7 @@ pub const ShortConvLayer = struct {
         // Step 1+2: swiglu(gate, up) -> g_gated
         try lk.swiglu(gate_ptr, up_ptr, n * self.params.conv_dim);
         // Step 3: add g_gated + value -> g_gated
-        try lk.add(up_ptr, value_ptr, out, n * self.params.conv_dim);
+        try lk.add(gate_ptr, value_ptr, out, n * self.params.conv_dim);
     }
 };
 

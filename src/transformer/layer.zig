@@ -313,7 +313,7 @@ pub const TransformerLayer = struct {
         k_strides[0] = seq_len * self.num_kv_heads * self.head_dim; k_strides[1] = self.head_dim; k_strides[2] = self.num_kv_heads * self.head_dim; k_strides[3] = 1;
         var k_hm = self.k_pos.view(k_shape, k_strides, 0);
 
-        rope_mod.applyRoPE(&q_hm, &k_hm, position, self.head_dim, self.rope_freq_base);
+        rope_mod.applyRoPE(f16, &q_hm, &k_hm, position, self.head_dim, self.rope_freq_base);
 
         // === 4. KV-Cache ===
         if (self.kv_manager) |mgr| {
