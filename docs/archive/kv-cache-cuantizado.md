@@ -1,5 +1,11 @@
 # KV-Cache Cuantizado en Zig — Diseño e Implementación
 
+> **ARCHIVADO (histórico)** — diseño/implementación ya construida. Ver docs vigentes:
+> `PAGED_ATTENTION_TODO.md` y `docs/airllm-layer-streaming-guide.md`. Nota: el estado real
+> actual difiere de lo que describe este doc (p. ej. la atención GPU está habilitada,
+> `gpu_attention_enabled = true` en `src/main.zig`; el KV-cache paginado vive en
+> `src/paged_attention/`, no en `src/kv_cache/`).
+
 > **Fecha:** Agosto 2026  
 > **Contexto:** Motor de KV-cache para AirLLM-Zig con soporte multi-formato de cuantización, paging y GQA/MQA.
 

@@ -1,5 +1,11 @@
 # AIRLLM Implementation TODO — Layer Streaming para Modelos > VRAM
 
+> **ARCHIVADO (histórico)** — superseded por
+> [`AIRLLM_IMPLEMENTATION_PLAN.md`](AIRLLM_IMPLEMENTATION_PLAN.md). El plan original se
+> implementó: `LayerStreamer` (con `std.Thread.spawn`/`std.atomic`, no `std.Thread.Pool`),
+> `ActivationPool`, `VramBudget`, dequant Q4_K/Q5_K/IQ4_XS/IQ3_S y prefetch asíncrono con LRU
+> ya existen. Consulte el plan vigente y la guía de usuario (`airllm-layer-streaming-guide.md`).
+
 > **Objetivo**: Ejecutar modelos que no caben en VRAM (ej. Qwen3.5-4B 5.6GB en 8GB VRAM) mediante **layer streaming** estilo AirLLM: cargar pesos capa a capa desde disco, prefetch asíncrono, offloading de activaciones/KV-cache.
 
 ---
