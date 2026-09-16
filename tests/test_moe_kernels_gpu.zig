@@ -7,7 +7,7 @@
 //! reescritos. Cualquier desviación = fallo duro.
 //!
 //! Disciplina GPU: toda la sesión corre bajo lock exclusivo `.bench.lock`
-//! (patrón benchmarks/bench_bw.zig). Se salta sin CUDA (error.CudaUnavailable).
+//! (patrón tools/bench_bw.zig). Se salta sin CUDA (error.CudaUnavailable).
 const std = @import("std");
 const cudaz = @import("cudaz");
 const moe_cuda = @import("moe_cuda");
