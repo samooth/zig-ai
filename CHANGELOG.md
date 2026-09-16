@@ -1,105 +1,38 @@
 # Changelog
 
-All notable changes to this project are documented here.
+## v0.1.0 — 2026-09-15
 
-## [Unreleased]
+**Scope**: Qwen3.5 family (0.8B/2B/4B/9B/27B)
 
-- feat: add CI workflow and GitHub Actions
-- feat: update build system and add config example
-- feat: add benchmarks and examples
-- feat: add CUDA dequantization kernels
-- feat: add new engine modules (CUDA, MoE, speculative, vision, server)
-- feat: update core modules (tensor, transformer, kv_cache, paged_attention, CUDA)
-- feat: add vendored stb_image dependency for vision preprocessing
-- docs: add public ROADMAP.md (done + planned)
+### Gates de release
+- G3 family smoke: 5/5 PASS
+- G4 27B streaming: PASS (178 layers)
+- G5 KT-B identity: PASS
+- G6b golden llama.cpp: PPL 11.34 ± 1.09 (ctx 1024, wiki12k)
+- G6 PPL golden Qwen3.5-0.8B: **9.9705** PASS
 
-### 2026-08-20
-- feat: add LFM2.5 architecture (ShortConv + Attention hybrid)
-- docs: add AirLLM layer streaming user guide
-- docs: fix stale claims and complete README CLI table
-- docs: add central documentation index
-- fix(transformer): LFM2.5 warmup + swiglu/value fix + RoPE f16 generic
+### Paridad familiar R2 (PPL wiki12k, fp16 KV)
+- 0.8B Q4_0: **9.9705** ✅
+- 2B Q3_K_M: **7.8429** ✅
+- 4B Q4_0: **6.3025** ✅
+- 9B UD-IQ2_M: **7.3512** ✅
 
-### 2026-08-19
-- feat: AirLLM-style layer streaming (Phase 1+2)
-- feat: Phase 3+4 — ActivationPool + VramBudget in hybrid inference
-- feat: spinner progress, GPU name fix, Spanish messages
-- fix: use cuDeviceTotalMem_v2 for VRAM reporting (>4GB)
-- fix: LayerStreamer deinit scope — prevent use-after-free
-- fix: invalidate GPU weight cache on LRU eviction
-- feat: remove spinner from generation output
-- fix: warm GPU weight caches before CUDA graph capture
-- fix: pass 2D tensors to hybrid attention forward
-- fix: give FFN post-norm buf real allocator for Tensor.reshape
-- docs: record 100/100 test pass and 128-token capture matrix
+### Rendimiento decode
+- IQ dp4a kernels cases 8/9/18 (iq3_s/iq2_s/iq4_xs) — P0-5 @70adfc7
+- q4_0 gate fix: dp4a ahora aplica para n>=1024 (antes n>=2048) — @b88d90d
+- 0.8B decode: 6.00 → 4.69 ms/tok (+22%)
+- 9B decode: 3.1 tok/s (iq2_s scalar baseline; dp4a en progresión P0-6)
 
-### 2026-08-18
-- fix: CUDA graph prefill UAF + cuGraphInstantiate crash; add STATE.md
-- fix(decode): per-layer block table scratch for CUDA graph replay parity
-- feat: IQ/q2_k/q3_k/q8_k dequant + 10 more quant types (Phase D-E)
-- feat: GPU dequant for 14 GGML types (zig-cuda-agent pattern)
-- fix: bench-pa stream lifetime bug + centralized debug breadcrumbs
+### Infra
+- GPU sampler VRAM/GPUutil peaks + bench-history.csv (@42a4101)
+- A5 ZIG_AI_NO_LEAK_REPORT flag para train binaries (@d84db8e)
+- q4_0 dp4a para n>=1024: fix @b88d90d
+- IQ4_XS mapping fix: rowstride type 18 + case 18 escalar — 4B IQ4_XS 24.7 tok/s (@0a054d2)
+- KVarN D64 Manager Integration: head_dim 64/128/256 + layout rect-64 (@33ba484)
+- R-2 --exact-replay NOGRAPH: deterministic replay sin draft cache (@0180077)
+- R2 runHybridPpl KV q4_k multi-ubatch: honor -ctk/-ctv en PPL path (@91cdf42)
 
-### 2026-08-17
-- feat: llama.cpp-compatible quantized KV cache + CLI (Phase 2)
-- feat: real quantized K/V store + dequant-on-read (q8_0/q4_0/q4_1)
-- perf(matmul): GPU weight residency cache + dequant-once (~11x faster)
-- fix(paged-attention): correct online-softmax accumulator rescaling
-- perf(ssm): dequantize SSM weights once at load instead of per token
-- perf(hybrid): GPU-resident hybrid layer decode (~20-75 tok/s)
-- feat(prefill): GPU-resident chunked prefill for hybrid Qwen3.5
-- perf(prefill): batched quantized GEMM kernels (q4_0/q4_1/q5_k/q6_k)
-- build: auto-detect GPU architecture instead of hardcoding sm_86
-- test: fix ssm fixtures and paged attention GPU tests on Zig 0.16
-- docs: mark F1/F2 done, note full-suite green with real model
-- perf(decode): cache CUfunction handles + drop decodeDevice stream sync
-- perf(ssm): fuse sigmoid+gateCompute and conv1d+silu
-- perf(sample): vectorized greedy argmax and skip the logits copy
-- perf(ssm): fuse beta/alpha projections into sigmoidGateProj
-
-### 2026-08-16
-- feat: prefix cache block reuse + preemption/restore (Phase 5)
-- feat: prefix cache hit-rate metrics + CPU offload swap (Phase 5)
-- feat: proactive eviction of stale prefix blocks (Phase 5)
-- feat: persistent GPU block pool with block-granular stage/evict (Phase 5)
-- feat: GPU cold-block eviction driven by prefix-cache hit rate (Phase 5)
-- feat: GPU paginated block pool (Phase 5)
-- feat: hybrid paginated path by default, benchmarks, GPU pool (Phase 5)
-- feat: automatic path detection (removes --legacy) (Phase 5)
-
-### 2026-08-15
-- feat: Fase 2: decode vectorizado (LDST.128) y prefill causal batched
-- fix: Q4_0 split-layout dequant + tokenizer (llama.cpp parity)
-- fix: CUDA context + cuBLAS layout for hybrid inference
-- feat: complete E2E pipeline (RoPE, tok/s, cuLaunchKernel cast)
-- feat: integrate PagedKVCache into hybrid attention (Phase 1)
-- feat: PagedAttention CUDA kernels + GPU engine + tests (Phase 2)
-- feat: integrate PagedAttentionGpu.decode into AttentionLayer (Phase 3)
-- feat: scheduler integration into runHybridInference + test fixes (Phase 4)
-
-### 2026-08-14
-- feat: add hybrid attention layer + fix GGUF loading (Phase H)
-- feat: add CUDA bindings, runtime sampling CLI, GPU dequant kernels
-- fix: small-model loading (tied lm_head fallback + Q4_1 dequant)
-- fix: weight orientations for real GGUF + f16 matmul precision
-- fix: SSM decay gate (ssm_a already -exp(A_log), dont double-transform)
-- fix: GGUF weight transpose (dim0-contiguous layout)
-
-### 2026-08-13
-- feat: add QuantWeight zero-copy + Gated DeltaNet SSM (Phase G)
-- feat: add PagedAttention evolution study notes
-
-### 2026-08-04
-- feat: integrate PagedAttention (vLLM-style) KV cache module
-- refactor: port to Zig 0.16 (build system + stdlib + parallel backend)
-- refactor: migrate file I/O to std.Io (readFileAlloc, Dir.access, io threading)
-- feat: add GGUF loader Phase C (parser, metadata, dequant, ModelConfig)
-- feat: add GGUF mmap loading, tensor mapping, real-model test
-- feat: add GGUF tokenizer extraction and BPE feeding (Phase D)
-- feat: add Q4_K/Q6_K dequantization (Phase E)
-- feat: add GGUF weight loading and CPU forward (Phase E)
-
-### 2026-08-03
-- refactor: reorganize monorepo by components
-- fix: port to Zig 0.14 (stdlib API + CUDA linking)
-- docs: update README
+### Bugs fixeados
+- IQ4_XS rowstride type 18 missing → LAUNCH_FAILED (@0a054d2)
+- moe/cache.zig string literal multiline roto → compilación fallaba (@049103d)
+- qgemmTypeFor mapping incompleto (0..17 → 0..18) (@0a054d2)
