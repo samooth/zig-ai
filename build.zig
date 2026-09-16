@@ -80,6 +80,7 @@ pub fn build(b: *std.Build) void {
             nvcc_path,
             arch_flag,
             "-ptx",
+            "-diag-suppress=177,128",
             "-o",
         });
         ptx_output = compile_ptx.addOutputFileArg("flash_attention.ptx");
@@ -90,6 +91,7 @@ pub fn build(b: *std.Build) void {
             arch_flag,
             code_flag,
             "-cubin",
+            "-diag-suppress=177,128",
             "-o",
         });
         cubin_output = compile_cubin.addOutputFileArg("flash_attention.cubin");
@@ -101,6 +103,7 @@ pub fn build(b: *std.Build) void {
             arch_flag,
             code_flag,
             "-cubin",
+            "-diag-suppress=177,128",
             "-o",
         });
         paged_cubin = compile_pa.addOutputFileArg("paged_attention.cubin");
@@ -112,6 +115,7 @@ pub fn build(b: *std.Build) void {
             arch_flag,
             code_flag,
             "-cubin",
+            "-diag-suppress=177,128",
             "-o",
         });
         kvarn_cubin = compile_kvarn.addOutputFileArg("kvarn_kernels.cubin");
@@ -123,6 +127,7 @@ pub fn build(b: *std.Build) void {
             arch_flag,
             code_flag,
             "-cubin",
+            "-diag-suppress=177,128",
             "-I",
             "src/cuda",
             "-o",
@@ -136,6 +141,7 @@ pub fn build(b: *std.Build) void {
             arch_flag,
             code_flag,
             "-cubin",
+            "-diag-suppress=177,128",
             "-I",
             "src/cuda",
             "-o",
@@ -149,6 +155,7 @@ pub fn build(b: *std.Build) void {
             arch_flag,
             code_flag,
             "-cubin",
+            "-diag-suppress=177,128",
             "-I",
             "src/cuda",
             "-o",
@@ -162,6 +169,7 @@ pub fn build(b: *std.Build) void {
             arch_flag,
             code_flag,
             "-cubin",
+            "-diag-suppress=177,128",
             "-I",
             "kernels",
             "-o",
@@ -174,6 +182,7 @@ pub fn build(b: *std.Build) void {
             arch_flag,
             code_flag,
             "-cubin",
+            "-diag-suppress=177,128",
             "-o",
         });
         layer_cubin = compile_layer.addOutputFileArg("layer_kernels.cubin");
@@ -187,6 +196,7 @@ pub fn build(b: *std.Build) void {
             arch_flag,
             code_flag,
             "-cubin",
+            "-diag-suppress=177,128",
             "-o",
         });
         prefill_cubin = compile_prefill.addOutputFileArg("prefill_delta_net.cubin");
@@ -198,6 +208,7 @@ pub fn build(b: *std.Build) void {
             arch_flag,
             code_flag,
             "-cubin",
+            "-diag-suppress=177,128",
             "-o",
         });
         moe_cubin = compile_moe.addOutputFileArg("moe_kernels.cubin");
@@ -209,6 +220,7 @@ pub fn build(b: *std.Build) void {
             arch_flag,
             code_flag,
             "-c",
+            "-diag-suppress=177,128",
             "-o",
         });
         hybrid_split_obj = compile_hybrid_split.addOutputFileArg("hybrid_split.cu.o");
@@ -221,6 +233,7 @@ pub fn build(b: *std.Build) void {
             code_flag,
             "-O3",
             "-c",
+            "-diag-suppress=177,128",
             "-o",
         });
         quant_encode_obj = compile_quant_encode.addOutputFileArg("encode_kernels.cu.o");
@@ -234,6 +247,7 @@ pub fn build(b: *std.Build) void {
             code_flag,
             "-O3",
             "-cubin",
+            "-diag-suppress=177,128",
             "-I",
             "src/cuda",
             "-o",
@@ -248,6 +262,7 @@ pub fn build(b: *std.Build) void {
             code_flag,
             "-cubin",
             "--use_fast_math",
+            "-diag-suppress=177,128",
             "-o",
         });
         fp8_cubin = compile_fp8.addOutputFileArg("fp8_block_kernels.cubin");
@@ -1900,8 +1915,10 @@ pub fn build(b: *std.Build) void {
         "tests/test_p0_6_dp4a.zig", // lane-cuda P0-6 dp4a parity
         "tests/test_dbg_scratch.zig",
         "tests/test_debug_scope.zig",
+        "tests/test_sampler_persistent.zig",
         "tests/test_dflash2_topk.zig", // lane-cuda 5.3 dflash2 selector top-K benchmark
         "tests/test_tier_manager.zig", // IQ MH-4: LFRU 3-tier admission
+        "tests/test_bpe_tokenizer.zig", // tokenizer: decodeOne stack-buffer parity
     };
 
     inline for (test_files) |tf| {
@@ -2686,6 +2703,25 @@ pub fn build(b: *std.Build) void {
     const mf_step = b.step("moe-make-fixture", "Generate synthetic MoE GGUF fixture");
     mf_step.dependOn(&run_mf.step);
 
+    // === lane-e 11.2: moe-make-bundle (builder del bundle contiguo) ===
+    const mbu_mod = b.createModule(.{
+        .root_source_file = b.path("tools/moe_make_bundle.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mbu_mod.addImport("gguf", gguf_mod); // lane-e 11.2
+    mbu_mod.addImport("gguf_moe", gguf_moe_mod); // lane-e 11.2: layerSpec
+    mbu_mod.addImport("expert_bundle", moe_bundle_mod); // lane-e 11.2
+    mbu_mod.addImport("debug", debug_mod); // lane-e 11.2
+    mbu_mod.addImport("time", time_mod); // lane-e 11.2: Timer
+    mbu_mod.link_libc = true; // lane-e 11.2: pread extern
+    const mbu = b.addExecutable(.{ .name = "moe-make-bundle", .root_module = mbu_mod });
+    b.installArtifact(mbu);
+    const run_mbu = b.addRunArtifact(mbu);
+    if (b.args) |args| run_mbu.addArgs(args);
+    const mbu_step = b.step("moe-make-bundle", "Build contiguous MoE expert bundle from GGUF (lane-e 11.2)");
+    mbu_step.dependOn(&run_mbu.step);
+
     // === Benchmark PagedAttention ===
     const bench_pa_step = b.step("bench-pa", "Run PagedAttention benchmarks");
     const bench_pa_mod = b.createModule(.{
@@ -2785,6 +2821,59 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_rlt_merge_cli.addArgs(args);
     rlt_merge_cli_step.dependOn(&run_rlt_merge_cli.step);
 
+    // === Lane D: bench-bw (perfilador STREAM vs PCIe) ===
+    const bench_bw_step = b.step("bench-bw", "Lane D: bandwidth profiler (STREAM vs PCIe vs contención)");
+    const bench_bw_mod = b.createModule(.{
+        .root_source_file = b.path("tools/bench_bw.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_bw_mod.addImport("cudaz", cudaz_mod);
+    bench_bw_mod.addImport("time", time_mod);
+    bench_bw_mod.addImport("debug", debug_mod);
+    bench_bw_mod.link_libc = true;
+    if (has_cuda) {
+        bench_bw_mod.linkSystemLibrary("cuda", .{});
+        bench_bw_mod.linkSystemLibrary("cudart", .{});
+        if (cuda_lib_dir_exists) bench_bw_mod.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
+    } else {
+        bench_bw_mod.addCSourceFile(.{
+            .file = b.path("src/cuda/cuda_noop_stub.c"),
+            .flags = &.{},
+        });
+    }
+    const bench_bw = b.addExecutable(.{ .name = "bench_bw", .root_module = bench_bw_mod });
+    b.installArtifact(bench_bw);
+    const run_bench_bw = b.addRunArtifact(bench_bw);
+    if (b.args) |args| run_bench_bw.addArgs(args);
+    bench_bw_step.dependOn(&run_bench_bw.step);
+
+    // === Lane F: bench-copyonce (4.13 — serial pread vs io_uring read copy-once) ===
+    const bench_copyonce_step = b.step("bench-copyonce", "4.13: copy-once read profiler (serial pread vs iouring qd, odirect opt)");
+    const bench_copyonce_mod = b.createModule(.{
+        .root_source_file = b.path("tools/bench_copyonce.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_copyonce_mod.addImport("time", time_mod);
+    bench_copyonce_mod.addImport("host_bank", host_bank_mod); // lane-f: buffer pinned Contrato 5
+    bench_copyonce_mod.link_libc = true;
+    if (has_cuda) {
+        bench_copyonce_mod.linkSystemLibrary("cuda", .{});
+        bench_copyonce_mod.linkSystemLibrary("cudart", .{});
+        if (cuda_lib_dir_exists) bench_copyonce_mod.addLibraryPath(.{ .cwd_relative = cuda_lib_path });
+    } else {
+        bench_copyonce_mod.addCSourceFile(.{
+            .file = b.path("src/cuda/cuda_noop_stub.c"),
+            .flags = &.{},
+        });
+    }
+    const bench_copyonce = b.addExecutable(.{ .name = "bench-copyonce", .root_module = bench_copyonce_mod });
+    b.installArtifact(bench_copyonce);
+    const run_bench_copyonce = b.addRunArtifact(bench_copyonce);
+    if (b.args) |args| run_bench_copyonce.addArgs(args);
+    bench_copyonce_step.dependOn(&run_bench_copyonce.step);
+
     // === Lane D: stream-bench (harness streaming denso, D4/D5) ===
     const stream_bench_step = b.step("stream-bench", "Lane D: streaming FFN benchmark (wire vs f32)");
     stream_bench_mod.link_libc = true;
@@ -2878,6 +2967,22 @@ pub fn build(b: *std.Build) void {
     const run_bench_overhead = b.addRunArtifact(bench_overhead_exe);
     if (b.args) |args| run_bench_overhead.addArgs(args);
     bench_overhead_step.dependOn(&run_bench_overhead.step);
+
+    // === KT-C Bench: latency A/B ===
+    const bench_latency_mod = b.createModule(.{
+        .root_source_file = b.path("tools/bench_latency_ab.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const bench_latency_exe = b.addExecutable(.{
+        .name = "bench_latency_ab",
+        .root_module = bench_latency_mod,
+    });
+    b.installArtifact(bench_latency_exe);
+    const bench_latency_step = b.step("bench-latency-ab", "KT-C Bench: latency A/B benchmark");
+    const run_bench_latency = b.addRunArtifact(bench_latency_exe);
+    if (b.args) |args| run_bench_latency.addArgs(args);
+    bench_latency_step.dependOn(&run_bench_latency.step);
 }
 
 fn gpuArchDetect(b: *std.Build) []const u8 {
