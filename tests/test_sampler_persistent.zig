@@ -1,7 +1,7 @@
 //! Tests unitarios de `pipeline.Sampler` con buffers persistentes.
 const std = @import("std");
 
-const pipeline = @import("transformer/pipeline.zig");
+const pipeline = @import("pipeline");
 
 test "sampler: initScratch y deinitScratch con vocab=256" {
     const gpa = std.testing.allocator;

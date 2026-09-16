@@ -1227,7 +1227,7 @@ fn runInference(
     // 7.1a: configurar LRU de f16 tensors antes de init (las capas se
     // registran en pipeline.init via F16Residency.register).
     transformer.F16Residency.setMaxResident(params.f16_max_resident);
-    var pl = pipeline.InferencePipeline.init(allocator, layers, &kv_manager, cfg.embedding_length, cfg.vocab_size, fa_config, &fa_engine);
+    var pl = pipeline.InferencePipeline.init(io, allocator, layers, &kv_manager, cfg.embedding_length, cfg.vocab_size, fa_config, &fa_engine);
     pl.rms_eps = cfg.layer_norm_rms_epsilon; // 7.2: eps del RMSNorm final
 
     // Tokenizer
@@ -1505,7 +1505,7 @@ fn runPpl(
     var kv_manager = try KVCacheManager.init(allocator, kv_config, 256);
     defer kv_manager.deinit();
 
-    var pl = pipeline.InferencePipeline.init(allocator, layers, &kv_manager, cfg.embedding_length, cfg.vocab_size, fa_config, &fa_engine);
+    var pl = pipeline.InferencePipeline.init(io, allocator, layers, &kv_manager, cfg.embedding_length, cfg.vocab_size, fa_config, &fa_engine);
     pl.rms_eps = cfg.layer_norm_rms_epsilon;
 
     var gt = try gguf_tokenizer.GgufTokenizer.fromGguf(allocator, &model.file);

@@ -41,6 +41,7 @@
 //!
 //! Structured output (`DEBUG_FORMAT=json`): emite JSON line por cada
 //! printLevel, útil para diff automatizado entre runs.
+const builtin = @import("builtin");
 const std = @import("std");
 
 pub const Level = enum(u8) {
@@ -320,7 +321,7 @@ pub const Debug = struct {
     }
 
     fn printJson(lvl: Level, comptime fmt: []const u8, args: anytype) void {
-        const ts = BreadcrumbScope.monotonicNs() / std.time.ns_per_ms;
+        const ts = monotonicNs() / std.time.ns_per_ms;
         const tag = comptime blk: {
             if (fmt.len < 2 or fmt[0] != '[') break :blk "";
             var i: usize = 1;
@@ -513,13 +514,22 @@ pub const Debug = struct {
 // Emite "[pipeline] > prefill" al entrar y "[pipeline] < prefill (Xms)" al salir.
 // Solo emite si DEBUG_LEVEL >= 1 (nivel info).
 
+fn monotonicNs() u64 {
+    if (builtin.target.os.tag == .windows) {
+        return 0;
+    }
+    var ts = std.posix.timespec{ .sec = 0, .nsec = 0 };
+    _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
 pub const BreadcrumbScope = struct {
     module: []const u8,
     name: []const u8,
-    start_ns: u64,
+    start_ts: std.Io.Clock.Timestamp,
     active: bool,
 
-    pub fn init(comptime module: []const u8, comptime name: []const u8) BreadcrumbScope {
+    pub fn init(io: std.Io, comptime module: []const u8, comptime name: []const u8) BreadcrumbScope {
         const active = dbg.at(.info);
         if (active) {
             dbg.printLevel(.info, "[{s}] > {s}.{s}\n", .{ module, module, name });
@@ -527,23 +537,17 @@ pub const BreadcrumbScope = struct {
         return .{
             .module = module,
             .name = name,
-            .start_ns = if (active) monotonicNs() else 0,
+            .start_ts = if (active) std.Io.Clock.Timestamp.now(io, .awake) else std.Io.Clock.Timestamp{ .raw = std.Io.Timestamp.fromNanoseconds(0), .clock = .awake },
             .active = active,
         };
     }
 
-    pub fn exit(self: *const BreadcrumbScope) void {
+    pub fn exit(self: *const BreadcrumbScope, io: std.Io) void {
         if (self.active) {
-            const elapsed_ns = monotonicNs() -| self.start_ns;
-            const ms = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms;
+            const elapsed_ns = self.start_ts.untilNow(io).raw.nanoseconds;
+            const ms = @as(f64, @floatFromInt(@as(u64, @intCast(elapsed_ns)))) / std.time.ns_per_ms;
             dbg.printLevel(.info, "[{s}] < {s}.{s} ({d:.2}ms)\n", .{ self.module, self.module, self.name, ms });
         }
-    }
-
-    fn monotonicNs() u64 {
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
-        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_ms * 1000 + @as(u64, @intCast(ts.nsec));
     }
 };
 
@@ -578,7 +582,7 @@ pub const MemorySnapshot = struct {
         self.counter += 1;
         if (self.counter % self.interval != 0) return;
 
-        const ts = BreadcrumbScope.monotonicNs();
+        const ts = monotonicNs();
         dbg.printLevel(.info, "[mem_snapshot] {s} at {d}ns (counter={d})\n", .{ label, ts, self.counter });
     }
 };
@@ -602,14 +606,14 @@ pub const GpuTimer = struct {
         return .{
             .stream = stream,
             .label = label,
-            .start_ns = if (active) BreadcrumbScope.monotonicNs() else 0,
+            .start_ns = if (active) monotonicNs() else 0,
             .is_active = active,
         };
     }
 
     pub fn stop(self: *GpuTimer) f64 {
         if (!self.is_active) return 0.0;
-        const elapsed_ns = BreadcrumbScope.monotonicNs() -| self.start_ns;
+        const elapsed_ns = monotonicNs() -| self.start_ns;
         const ms = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms;
         dbg.printLevel(.detail, "[gpu_timer] {s}: {d:.3}ms\n", .{ self.label, ms });
         return ms;
@@ -625,9 +629,9 @@ pub const GpuTimer = struct {
 //   dbg.printLevel(.info, "[perf] took {d:.2}ms\n", .{elapsed / std.time.ns_per_ms});
 
 pub fn measureNs(comptime fn_ptr: anytype) u64 {
-    const start = BreadcrumbScope.monotonicNs();
+    const start = monotonicNs();
     fn_ptr();
-    return BreadcrumbScope.monotonicNs() -| start;
+    return monotonicNs() -| start;
 }
 
 /// Instancia global (se lee de env en `init()`; leerla antes devuelve off).

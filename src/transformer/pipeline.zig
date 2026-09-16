@@ -286,10 +286,13 @@ pub const InferencePipeline = struct {
     fa_engine: *AttentionEngine,
     /// 7.2 (lane-f): eps del RMSNorm final (model_config).
     rms_eps: f32 = 1e-5,
+    /// IO para timestamps (std.Io.Clock.now).
+    io: std.Io,
 
     const Self = @This();
 
     pub fn init(
+        io: std.Io,
         allocator: std.mem.Allocator,
         layers: []TransformerLayer,
         kv_manager: *KVCacheManager,
@@ -318,6 +321,7 @@ pub const InferencePipeline = struct {
             .num_layers = @intCast(layers.len),
             .fa_config = fa_config,
             .fa_engine = fa_engine,
+            .io = io,
         };
     }
 
@@ -332,8 +336,8 @@ pub const InferencePipeline = struct {
         matmul_engine: *matmul.MatmulEngine,
         output_norm: ?Tensor(f32),
     ) !PrefillResult {
-        const scope = debugz.BreadcrumbScope.init("pipeline", "prefill");
-        defer scope.exit();
+        const scope = debugz.BreadcrumbScope.init(self.io, "pipeline", "prefill");
+        defer scope.exit(self.io);
 
         const batch_size: usize = 1;
         const seq_len = prompt_tokens.len;
@@ -467,8 +471,8 @@ pub const InferencePipeline = struct {
         matmul_engine: *matmul.MatmulEngine,
         output_norm: ?Tensor(f32),
     ) !PrefillResult {
-        const scope = debugz.BreadcrumbScope.init("pipeline", "recurrentPrefill");
-        defer scope.exit();
+        const scope = debugz.BreadcrumbScope.init(self.io, "pipeline", "recurrentPrefill");
+        defer scope.exit(self.io);
 
         const batch_size: usize = 1;
         const seq_len = prompt_tokens.len;
@@ -550,8 +554,8 @@ pub const InferencePipeline = struct {
         matmul_engine: *matmul.MatmulEngine,
         output_norm: ?Tensor(f32),
     ) !Tensor(f16) {
-        const scope = debugz.BreadcrumbScope.init("pipeline", "prefillPPL");
-        defer scope.exit();
+        const scope = debugz.BreadcrumbScope.init(self.io, "pipeline", "prefillPPL");
+        defer scope.exit(self.io);
 
         const batch_size: usize = 1;
         const seq_len = prompt_tokens.len;
@@ -619,8 +623,8 @@ pub const InferencePipeline = struct {
         config: GenerationConfig,
         output_norm: ?Tensor(f32),
     ) !GenerationResult {
-        const scope = debugz.BreadcrumbScope.init("pipeline", "generate");
-        defer scope.exit();
+        const scope = debugz.BreadcrumbScope.init(self.io, "pipeline", "generate");
+        defer scope.exit(self.io);
 
         var tokens: std.ArrayList(u32) = .empty;
         errdefer tokens.deinit(self.allocator);

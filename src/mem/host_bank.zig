@@ -3,6 +3,7 @@
 //! (para acceso zero-copy desde GPU), lockear en RAM (para acceso CPU sin paginación),
 //! o dejar como página normal. Adaptado de la semántica FreeToken host_banks.py.
 //! Incluye soporte para pin-after-fill (allocate PAGEABLE, fill, then pin as PINNED).
+const builtin = @import("builtin");
 const std = @import("std");
 const debugz = @import("debug");
 const cudaz = @import("cudaz");
@@ -457,6 +458,7 @@ pub const HostBank = struct {
 /// `dst.len` debe ser múltiplo de 4096 (contrato ftw.zig); el tail corto
 /// lo gestiona el caller vía fd buffered.
 fn readIouringDirect(fd: c_int, dst: []u8) !void {
+    if (builtin.target.os.tag != .linux) return error.IouringUnavailable;
     var zbuf: [64]u8 = undefined;
     const pz = std.fmt.bufPrintZ(&zbuf, "/proc/self/fd/{d}", .{fd}) catch return error.OpenFailed;
     const ofd = open64(pz.ptr, 0o40000); // O_RDONLY|O_DIRECT

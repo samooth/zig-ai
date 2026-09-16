@@ -1932,6 +1932,7 @@ pub fn build(b: *std.Build) void {
         tmod.addImport("matmul", matmul_mod);
         tmod.addImport("fa", fa_mod);
         tmod.addImport("transformer", transformer_mod);
+        tmod.addImport("pipeline", pipeline_mod);
         tmod.addImport("kv_cache", kv_cache_mod);
         tmod.addImport("gguf", gguf_mod); // lane-kvc P1: dequant i2_s test fixture
         tmod.addImport("cudaz", cudaz_mod);
