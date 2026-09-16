@@ -2,7 +2,7 @@
     .name = .zig_ai_engine,
     .version = "0.2.0",
     .minimum_zig_version = "0.16.0",
-    .fingerprint = 0x39f58c0c31c5805,
+    .fingerprint = 0x39f58c044acdf6f,
     .dependencies = .{
         .httpx = .{
             .url = "https://github.com/samooth/httpx.zig/archive/310bf66.tar.gz",
@@ -19,5 +19,7 @@
         "README.md",
         "config.json.example",
         "tui",
+        "tools",
+        "scripts",
     },
 }

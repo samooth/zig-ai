@@ -3,3 +3,63 @@ zig-out/
 zig-cache/
 /archive/
 /root
+zig-0.16.0-resource-map/
+/test_*
+*.o
+.opencode/
+.lanes/
+
+# Binarios de bench/tools compilados (no commitear)
+bench_bw
+bench_kv_quant
+test
+tests/test_host_bank
+tests/test_import
+tests/test_import2
+tests/test_host_bank
+# Backups locales de ficheros en curso (devs' safety copies)
+*.bak
+*.bak2
+*.bak3
+*.backup
+*.backup2
+*.broken_backup
+*.simpleback
+# Plan docs locales (coordinación, no público en repo)
+.kilo/
+# Lock file de bench (runtime)
+.bench.lock
+# Scratch de tests
+test.txt
+tests/scratch.zig
+# Scripts python de migración puntual
+demo_replace.py
+replace_int.py
+# Ficheros de planos/doc locales (no incluir en repo)
+# 2026-09-14: docs locales (no públicos, sin referencias en tracked)
+docs/archive/
+zig-pkg/
+
+# Docs de trabajo locales (no públicos)
+internal/
+.run-tokens/
+# KT-B fixtures de test (regenerados por writeIdentityKtb, no commitear)
+tests/corpora/*.ktb
+.zig-cache-wt/
+.zig-pkg-wt/
+
+# MDs de trabajo locales (2026-09-14: fuera del repo)
+AGENTS.md
+TODO.md
+TODO.en.md
+HANDOFFS.md
+BENCHMARKS.md
+LESSONS_AI.md
+LESSONS_ZIG.md
+b1-research/
+.kilo/
+# AGENTS.md raíz: stub público que apunta a internal/ (el completo es local)
+bench-history.csv
+gpu_kernels
+libdebug.a
+tests/fixtures/
