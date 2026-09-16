@@ -879,6 +879,9 @@ pub const HybridLayer = struct {
             if (self.rlt_w_gate) |w_gate| {
                 const d = self.params.n_embd;
                 const gate_bytes = d * 2 * d * @sizeOf(f32);
+                std.debug.assert(w_gate.data.len >= d * 2 * d);
+                std.debug.assert(@intFromPtr(w_gate.data.ptr) != 0);
+                debugz.dbg.printLevel(.detail, "[rlt] capa {d}: upload w_gate ptr={x} len={d} bytes={d}\n", .{ self.layer_idx, @intFromPtr(w_gate.data.ptr), w_gate.data.len, gate_bytes });
                 const d_gate_ptr = try cudaz.cuMemAlloc(gate_bytes);
                 try cudaz.cuMemcpyHtoD(d_gate_ptr, @intFromPtr(w_gate.data.ptr), gate_bytes);
                 g.g_rlt_gate_dev = d_gate_ptr;
@@ -886,6 +889,9 @@ pub const HybridLayer = struct {
             if (self.rlt_w_state) |ws| {
                 const d = self.params.n_embd;
                 const state_bytes = d * d * @sizeOf(f32);
+                std.debug.assert(ws.data.len >= d * d);
+                std.debug.assert(@intFromPtr(ws.data.ptr) != 0);
+                debugz.dbg.printLevel(.detail, "[rlt] capa {d}: upload w_state ptr={x} len={d} bytes={d}\n", .{ self.layer_idx, @intFromPtr(ws.data.ptr), ws.data.len, state_bytes });
                 const d_state_ptr = try cudaz.cuMemAlloc(state_bytes);
                 try cudaz.cuMemcpyHtoD(d_state_ptr, @intFromPtr(ws.data.ptr), state_bytes);
                 g.g_rlt_state_dev = d_state_ptr;
@@ -956,6 +962,8 @@ pub const HybridLayer = struct {
         try HybridLayer.ensureGpu(self);
         const g = &self.gpu.?;
         try g.ensureN(n);
+        try cudaz.cuStreamSynchronize(lk.stream); // DEBUG: catch previous stream error
+        debugz.dbg.printLevel(.detail, "[hybrid] capa {d}: forwardGPU start n={d} rlt_alpha={d}\n", .{ self.layer_idx, n, self.rlt_alpha });
 
         // === RLT: Gated merge feedback (decode-only, before first norm) ===
         if (n == 1 and self.rlt_alpha > 0 and g.rlt_weights_uploaded and g.g_rlt_gate_dev != 0) {
@@ -970,8 +978,15 @@ pub const HybridLayer = struct {
                 p.n_embd,
                 self.rlt_alpha,
             );
+            debugz.dbg.printLevel(.detail, "[rlt] capa {d}: mergeFeedback lanzado, sync...\n", .{self.layer_idx});
+            try cudaz.cuStreamSynchronize(lk.stream); // DEBUG: catch launch error early
+            debugz.dbg.printLevel(.detail, "[rlt] capa {d}: sync OK\n", .{self.layer_idx});
             // Copy merged result back to x for the rest of the forward
-            try lk.add(g.g_norm.ptr(), 0, x.ptr(), p.n_embd); // x = g_norm + 0 (copy)
+            const dst_ptr: *anyopaque = @ptrFromInt(x.ptr());
+            const src_ptr: *const anyopaque = @ptrFromInt(g.g_norm.ptr());
+            const stream_any: *anyopaque = @as(*anyopaque, @ptrCast(lk.stream));
+            const copy_status = cublas.cudaMemcpyAsync(dst_ptr, src_ptr, p.n_embd * @sizeOf(f32), cublas.cudaMemcpyDeviceToDevice, stream_any);
+            if (copy_status != 0) return error.CudaError;
         }
 
         try lk.rmsNorm(x.ptr(), @intFromPtr(g.g_attn_norm.dev_ptr), g.g_norm.ptr(), n, p.n_embd, p.rms_eps);
@@ -1119,45 +1134,60 @@ pub const HybridLayer = struct {
         const p = self.params;
         const d: usize = p.n_embd;
 
-        // Check CLI/env override first
+        // ── Determine alpha ──────────────────────────────────────────────
+        // Priority: CLI override > sidecar metadata > main GGUF metadata > 0
         if (debugz.dbg.rlt_feedback) |override| {
             if (!override) {
-                // Force OFF
                 self.rlt_alpha = 0;
                 return;
             }
-            // Force ON — use default alpha if GGUF doesn't specify
-            if (g.getMeta("rlt.feedback_alpha")) |v| {
-                self.rlt_alpha = v.asF32() orelse 0.1;
-            } else {
-                self.rlt_alpha = 0.1;
-            }
+            self.rlt_alpha = 0.1;
         } else {
             // Auto: read alpha from metadata (default 0 = OFF)
+            self.rlt_alpha = 0;
             if (g.getMeta("rlt.feedback_alpha")) |v| {
                 self.rlt_alpha = v.asF32() orelse 0.0;
             }
         }
+        // Sidecar metadata takes precedence (trained alpha)
+        if (sidecar) |sc| {
+            if (sc.getMeta("rlt.feedback_alpha")) |v| {
+                self.rlt_alpha = v.asF32() orelse self.rlt_alpha;
+            }
+        }
         if (self.rlt_alpha == 0) return; // OFF — skip weight loading
 
+        // ── Determine source file (sidecar only if it has the tensors) ───
         // Load gate projection: [d, 2d] → transposed to [2d, d]
         const gate_name = try std.fmt.allocPrint(self.allocator, "blk.{d}.rlt.feedback_gate.weight", .{self.layer_idx});
         defer self.allocator.free(gate_name);
         const state_name = try std.fmt.allocPrint(self.allocator, "blk.{d}.rlt.feedback_state.weight", .{self.layer_idx});
         defer self.allocator.free(state_name);
-        const src_g = if (sidecar) |sc| blk: {
-            if (sc.getTensor(gate_name)) |_| break :blk sc;
-            break :blk g;
-        } else g;
-        if (src_g.getTensor(gate_name)) |_| {
-            self.rlt_w_gate = try loadGgufF32(self.allocator, src_g, "", gate_name);
+
+        // Try main model first, then fall back to sidecar
+        const gate_src = blk: {
+            if (g.getTensor(gate_name)) |_| break :blk g;
+            if (sidecar) |sc| {
+                if (sc.getTensor(gate_name)) |_| break :blk sc;
+            }
+            break :blk null;
+        };
+        if (gate_src) |src| {
+            self.rlt_w_gate = try loadGgufF32(self.allocator, src, "", gate_name);
         } else {
-            // No gate weight → disable feedback
+            // No gate weight anywhere → disable feedback
             self.rlt_alpha = 0;
             return;
         }
-        if (src_g.getTensor(state_name)) |_| {
-            self.rlt_w_state = try loadGgufF32(self.allocator, src_g, "", state_name);
+        const state_src = blk: {
+            if (g.getTensor(state_name)) |_| break :blk g;
+            if (sidecar) |sc| {
+                if (sc.getTensor(state_name)) |_| break :blk sc;
+            }
+            break :blk null;
+        };
+        if (state_src) |src| {
+            self.rlt_w_state = try loadGgufF32(self.allocator, src, "", state_name);
         } else {
             self.rlt_alpha = 0;
             return;
@@ -1388,6 +1418,11 @@ fn loadGgufF32(
     defer allocator.free(full);
     const info = g.getTensor(full) orelse return HybridLayerError.WeightFileNotFound;
     const numel: usize = @intCast(info.numel());
+    debugz.dbg.printLevel(.detail, "[loadGgufF32] {s} dims=[", .{full});
+    for (info.dims[0..info.n_dims]) |d| {
+        debugz.dbg.printLevel(.detail, "{d} ", .{d});
+    }
+    debugz.dbg.printLevel(.detail, "] dtype={} numel={d}\n", .{info.dtype, numel});
 
     const f32buf = try allocator.alloc(f32, numel);
     defer allocator.free(f32buf);

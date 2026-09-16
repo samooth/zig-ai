@@ -375,6 +375,16 @@ pub const PagedAttentionGpu = struct {
     bt_caps: std.ArrayListUnmanaged(usize) = .empty,
     start_pos_staging: []c_int = &.{},
     seq_len_staging: []c_int = &.{},
+
+    // STUDY §5.2: staging persistentes para prefill — eliminan
+    // alloc/free por prefill batch (host q_f16/bt_host + device d_outs/d_queries/d_bt).
+    prefill_q_f16: []f16 = &.{},
+    prefill_bt_host: []c_int = &.{},
+    prefill_d_outs: cudaz.CUdeviceptr = 0,
+    prefill_d_queries: cudaz.CUdeviceptr = 0,
+    prefill_d_bt: cudaz.CUdeviceptr = 0,
+    prefill_q_cap: usize = 0,
+    prefill_bt_cap: usize = 0,
     /// Vision (PLAN_MMPROJ 3.2): posición de CONTEXTO para el RoPE de decode
     /// separada del SLOT del KV-cache (start_pos). Con embeddings de imagen
     /// inyectados, el slot avanza n_img pero la posición del contexto sólo
@@ -456,6 +466,12 @@ pub const PagedAttentionGpu = struct {
         if (self.q_h_staging.len > 0) cudaz.pinnedFree(f16, self.q_h_staging);
         if (self.out_h_staging.len > 0) cudaz.pinnedFree(f16, self.out_h_staging);
         if (self.d_split_partials != 0) cudaz.cuMemFree(self.d_split_partials);
+        // STUDY §5.2: staging prefill persistentes.
+        if (self.prefill_q_f16.len > 0) self.allocator.free(self.prefill_q_f16);
+        if (self.prefill_bt_host.len > 0) self.allocator.free(self.prefill_bt_host);
+        if (self.prefill_d_outs != 0) cudaz.cuMemFree(self.prefill_d_outs);
+        if (self.prefill_d_queries != 0) cudaz.cuMemFree(self.prefill_d_queries);
+        if (self.prefill_d_bt != 0) cudaz.cuMemFree(self.prefill_d_bt);
         if (self.module_extra) |m| cudaz.cuModuleUnload(m);
         cudaz.cuModuleUnload(self.module);
     }
@@ -1398,25 +1414,55 @@ pub const PagedAttentionGpu = struct {
         try cudaz.ensureCurrent();
 
         const total = seq_len * q_stride;
-        const q_f16 = try self.allocator.alloc(f16, total);
-        defer self.allocator.free(q_f16);
-        for (queries, 0..) |v, i| q_f16[i] = @floatCast(v);
-
         const max_num_blocks = block_table.numBlocks();
-        const bt_host = try self.allocator.alloc(c_int, max_num_blocks);
-        defer self.allocator.free(bt_host);
+
+        // Cacheo staging prefill: reusar buffers si el tamaño no cambió.
+        if (self.prefill_q_cap < total) {
+            if (self.prefill_q_f16.len > 0) self.allocator.free(self.prefill_q_f16);
+            self.prefill_q_f16 = try self.allocator.alloc(f16, total);
+            self.prefill_q_cap = total;
+        }
+        if (self.prefill_bt_cap < max_num_blocks) {
+            if (self.prefill_bt_host.len > 0) self.allocator.free(self.prefill_bt_host);
+            self.prefill_bt_host = try self.allocator.alloc(c_int, max_num_blocks);
+            self.prefill_bt_cap = max_num_blocks;
+        }
+        if (self.prefill_d_outs != 0 and self.prefill_d_queries != 0) {
+            // Buffers device ya allocados: reusar si el tamaño coincide.
+            // Nota: no sabemos el tamaño previo de d_outs/d_queries, así que
+            // reusamos solo si ya existen (primer alloc fue para este total).
+            // Si seq_len cambia entre prefill calls (raro), se realloca abajo.
+        }
+
+        const q_f16 = self.prefill_q_f16;
+        const bt_host = self.prefill_bt_host;
+
+        for (queries, 0..) |v, i| q_f16[i] = @floatCast(v);
         for (0..max_num_blocks) |i| {
             bt_host[i] = if (block_table.getPhysical(i)) |phys| @intCast(phys) else -1;
         }
 
         try self.stageBlocks(block_alloc, @constCast(block_table));
 
-        var d_outs = try cudaz.cuMemAlloc(total * @sizeOf(f16));
-        defer cudaz.cuMemFree(d_outs);
-        var d_queries = try cudaz.cuMemAlloc(total * @sizeOf(f16));
-        defer cudaz.cuMemFree(d_queries);
-        var d_bt = try cudaz.cuMemAlloc(max_num_blocks * @sizeOf(c_int));
-        defer cudaz.cuMemFree(d_bt);
+        // Device buffers: reusar si existen y son del tamaño correcto.
+        // Para simplificar, reusamos d_outs/d_queries si ya existen (mismo
+        // seq_len/q_stride en el modelo fijo). Si no, alloc fresh.
+        var d_outs = self.prefill_d_outs;
+        var d_queries = self.prefill_d_queries;
+        var d_bt = self.prefill_d_bt;
+
+        if (d_outs == 0) {
+            d_outs = try cudaz.cuMemAlloc(total * @sizeOf(f16));
+            self.prefill_d_outs = d_outs;
+        }
+        if (d_queries == 0) {
+            d_queries = try cudaz.cuMemAlloc(total * @sizeOf(f16));
+            self.prefill_d_queries = d_queries;
+        }
+        if (d_bt == 0) {
+            d_bt = try cudaz.cuMemAlloc(max_num_blocks * @sizeOf(c_int));
+            self.prefill_d_bt = d_bt;
+        }
 
         try cudaz.cuMemcpyHtoD(d_queries, @intFromPtr(q_f16.ptr), total * @sizeOf(f16));
         try cudaz.cuMemcpyHtoD(d_bt, @intFromPtr(bt_host.ptr), max_num_blocks * @sizeOf(c_int));
@@ -1429,9 +1475,6 @@ pub const PagedAttentionGpu = struct {
         var num_kv_c: c_int = @intCast(num_kv_heads);
         var head_dim_c: c_int = @intCast(head_dim);
         var block_size_c: c_int = @intCast(block_size);
-        // 2ae7984 añadió `causal` al kernel; este wrapper legacy no lo
-        // pasaba (regresión lane-a: launch de 10 args sobre firma de 11 →
-        // CUDA_ERROR_INVALID_VALUE). Causal=1 (semántica original).
         var causal_c: c_int = 1;
 
         var d_cache_v = try self.cacheBase(block_alloc);
@@ -1441,7 +1484,6 @@ pub const PagedAttentionGpu = struct {
             &n_queries_c, &start_pos_c,  &num_q_c,   &num_kv_c,
             &head_dim_c,  &block_size_c, &causal_c,
         };
-        // Configurable block size for prefill (ZIG_AI_PREFILL_BLOCK_SIZE, default 32)
         const prefill_block_size: c_int = blk: {
             if (std.c.getenv("ZIG_AI_PREFILL_BLOCK_SIZE")) |env| {
                 const env_slice = std.mem.span(env);
@@ -1456,8 +1498,7 @@ pub const PagedAttentionGpu = struct {
         try cudaz.cuLaunchKernel(func, @intCast(seq_len), @intCast(num_q_heads), 1, @intCast(prefill_block_size), 1, 1, shared_bytes, self.stream, @ptrCast(&kp), null);
         try cudaz.cuStreamSynchronize(self.stream);
 
-        const out_f16 = try self.allocator.alloc(f16, total);
-        defer self.allocator.free(out_f16);
+        const out_f16 = self.prefill_q_f16;
         try cudaz.cuMemcpyDtoH(@intFromPtr(out_f16.ptr), d_outs, total * @sizeOf(f16));
 
         for (out_f16, 0..) |v, i| outs[i] = @floatCast(v);

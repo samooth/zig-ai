@@ -124,17 +124,17 @@ extern "c" fn cudaMalloc(devPtr: **anyopaque, size: usize) i32;
 extern "c" fn cudaFree(devPtr: *anyopaque) i32;
 extern "c" fn cudaMallocAsync(devPtr: **anyopaque, size: usize, stream: *anyopaque) i32;
 extern "c" fn cudaFreeAsync(devPtr: *anyopaque, stream: *anyopaque) i32;
-extern "c" fn cudaMemcpyAsync(dst: *anyopaque, src: *const anyopaque, size: usize, kind: i32, stream: *anyopaque) i32;
-extern "c" fn cudaMemcpy(dst: *anyopaque, src: *const anyopaque, size: usize, kind: i32) i32;
+pub extern "c" fn cudaMemcpyAsync(dst: *anyopaque, src: *const anyopaque, size: usize, kind: i32, stream: *anyopaque) i32;
+pub extern "c" fn cudaMemcpy(dst: *anyopaque, src: *const anyopaque, size: usize, kind: i32) i32;
 extern "c" fn cudaStreamCreate(stream: **anyopaque) i32;
 extern "c" fn cudaStreamDestroy(stream: *anyopaque) i32;
 extern "c" fn cudaStreamSynchronize(stream: *anyopaque) i32;
 extern "c" fn cudaDeviceSynchronize() i32;
 extern "c" fn cudaGetDeviceCount(count: *i32) i32;
 
-const cudaMemcpyHostToDevice = 1;
-const cudaMemcpyDeviceToHost = 2;
-const cudaMemcpyDeviceToDevice = 3;
+pub const cudaMemcpyHostToDevice = 1;
+pub const cudaMemcpyDeviceToHost = 2;
+pub const cudaMemcpyDeviceToDevice = 3;
 
 const CUBLAS_OP_N: c_int = 0;
 const CUBLAS_OP_T: c_int = 1;

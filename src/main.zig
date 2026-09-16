@@ -594,8 +594,11 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args, stdout: anyty
             params.dump_logits_target_path = try nextValue(&it, "--dump-logits-target");
         } else if (std.mem.eql(u8, arg, "--swa")) {
             params.swa = try nextInt(&it, "--swa");
+        } else if (std.mem.eql(u8, arg, "--kv-offload")) {
+            params.kv_offload = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             try printHelp(stdout);
+            try stdout.flush();
             std.process.exit(0);
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
             // R0 release v0.1.0: stamping con git sha a compile-time.
@@ -804,6 +807,7 @@ fn printHelp(stdout: anytype) !void {
         \\  --dump-lm-head <path>      Vuelca lm_head f32 (d×vocab) a .bin para entrenamiento RLT
          \\  --dump-logits-target <path> Vuelca logits target (T×vocab f32) a .bin para entrenamiento RLT MSE
          \\  --swa <n>                   Cap ventana sliding-window attention por capa (0 = full context)
+         \\  --kv-offload                Forzar offload KV a CPU/RAM host (reduce VRAM pico)
          \\  -jinja                     Usar plantilla chat jinja del tokenizer
         \\  -h, --help                  Muestra esta ayuda
         \\
@@ -825,7 +829,7 @@ fn printHelp(stdout: anytype) !void {
         \\
         \\                                  SUBCOMANDOS
         \\  kld                          Mide KL-divergence del pipeline KV vs BF16
-        \\                              (lane-b3 P3.5; ver `zig-ai-engine kld --help`)
+        \\                              (ver `zig-ai-engine kld --help`)
         \\
     , .{});
 }

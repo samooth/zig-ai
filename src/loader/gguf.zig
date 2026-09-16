@@ -66,6 +66,9 @@ pub const GgmlType = enum(u32) {
     mxfp4 = 39,
     q1_0 = 41,
     q2_0 = 42,
+    iq1_xs = 64,
+    iq1_xxs = 65,
+    iq1_xxxs = 66,
 
     pub fn fromRaw(raw: u32) GgufError!GgmlType {
         return std.enums.fromInt(GgmlType, raw) orelse GgufError.UnsupportedDtype;
@@ -85,6 +88,9 @@ pub const GgmlType = enum(u32) {
             .tq2_0 => 256,
             .q1_0 => 128,
             .q2_0 => 64,
+            .iq1_xs => 256,
+            .iq1_xxs => 256,
+            .iq1_xxxs => 256,
             .i2_s => 128, // BitNet: grupo de 128 valores → 32 bytes
             .mxfp4 => 32,
             else => 1,
@@ -127,6 +133,9 @@ pub const GgmlType = enum(u32) {
             .tq2_0 => 66, // qs[64] + f16 d
             .q1_0 => 18,  // f16 d + qs[16] (128/8)
             .q2_0 => 18,  // f16 d + qs[16] (64/4)
+            .iq1_xs => 46,  // f16 d + qs[32] + qh[8] + sc[4]
+            .iq1_xxs => 42, // f16 d + qs[32] + qh[8]
+            .iq1_xxxs => 38, // f16 d + qs[32] + sc[4]
             .i2_s => 32, // 128 valores × 2 bits / 8 (escala va APARTE al final del tensor)
             .mxfp4 => 17, // e8m0 + qs[16]
         };
@@ -915,6 +924,125 @@ pub fn dequantQ2_0(bytes: []const u8, out: []f32) void {
             const q = (qs[byte_idx] >> @intCast(bit_shift)) & 0x3;
             out[i + j] = @as(f32, @floatFromInt(@as(i32, q) - 1)) * d;
         }
+    }
+}
+
+
+/// IQ1_XS: 1.4375 bpw, QK=256, 46B/block [d f16][qs 32B][qh 8B][sc 4B].
+///   Dequant: y[j] = d * ls * (grid[idx][j] + delta * IQ1S_DELTA)
+///   idx = qs[l] | (((qh[ib] >> 2*l) & 3) << 8) — 10-bit index
+pub fn dequantIq1_xs(bytes: []const u8, out: []f32) void {
+    const qk = 256;
+    const block_bytes = 46;
+    const grids = @import("iq1xs_grids.zig");
+    var i: usize = 0;
+    var nb: usize = 0;
+    while (i < out.len) : (i += qk) {
+        const base = nb * block_bytes;
+        const d_bits = std.mem.readInt(u16, bytes[base..][0..2], .little);
+        const d: f32 = @floatCast(@as(f16, @bitCast(d_bits)));
+        const qs = bytes[base + 2 .. base + 34];
+        const qh = bytes[base + 34 .. base + 42];
+        const sc = bytes[base + 42 .. base + 46];
+        var ib: usize = 0;
+        while (ib < 8) : (ib += 1) {
+            const ib_u3: u3 = @intCast(ib);
+            const nib = (sc[ib / 2] >> @as(u3, 4 * (@as(u3, ib_u3) & 1))) & 0xf;
+            const ls = 2 * (nib & 7) + 1;
+            const delta: i32 = -1 + 2 * @as(i32, (nib >> 3) & 1);
+            var l: usize = 0;
+            while (l < 4) : (l += 1) {
+                const l_u3: u3 = @intCast(l);
+                const idx: usize = qs[ib * 4 + l] | ((@as(usize, (qh[ib] >> @as(u3, 2 * l_u3)) & 3) << 8));
+                const g = grids.iq1_xs_grid[idx];
+                var j: usize = 0;
+                while (j < 8) : (j += 1) {
+                    const j_u6: u6 = @intCast(j);
+                    const raw: u8 = @intCast((g >> @as(u6, 8 * j_u6)) & 0xFF);
+                    const gv: f32 = @floatFromInt(@as(i8, @bitCast(raw)));
+                    out[i + ib * 32 + l * 8 + j] = d * @as(f32, @floatFromInt(ls)) * (gv + @as(f32, @floatFromInt(delta)) * grids.IQ1S_DELTA);
+                }
+            }
+        }
+        nb += 1;
+    }
+}
+
+/// IQ1_XXS: 1.3125 bpw, QK=256, 42B/block [d f16][qs 32B][qh 8B].
+///   Dequant: y[j] = d * ls * (grid[idx][j] + delta * IQ1S_DELTA)
+///   qh[ib] bits 0-3: index-high (1 bit per group l)
+///   qh[ib] bits 4-6: scale (ls = 2*scale + 1)
+///   qh[ib] bit 7: delta sign (0=+1, 1=-1)
+///   idx = qs[l] | (((qh[ib] >> l) & 1) << 8) — 9-bit index
+pub fn dequantIq1_xxs(bytes: []const u8, out: []f32) void {
+    const qk = 256;
+    const block_bytes = 42;
+    const grids = @import("iq1xs_grids.zig");
+    var i: usize = 0;
+    var nb: usize = 0;
+    while (i < out.len) : (i += qk) {
+        const base = nb * block_bytes;
+        const d_bits = std.mem.readInt(u16, bytes[base..][0..2], .little);
+        const d: f32 = @floatCast(@as(f16, @bitCast(d_bits)));
+        const qs = bytes[base + 2 .. base + 34];
+        const qh = bytes[base + 34 .. base + 42];
+        var ib: usize = 0;
+        while (ib < 8) : (ib += 1) {
+            const ls = 2 * ((qh[ib] >> 4) & 7) + 1;
+            const delta: i32 = -1 + 2 * @as(i32, (qh[ib] >> 7) & 1);
+            var l: usize = 0;
+            while (l < 4) : (l += 1) {
+                const l_u3: u3 = @intCast(l);
+                const idx: usize = qs[ib * 4 + l] | ((@as(usize, (qh[ib] >> l_u3) & 1) << 8));
+                const g = grids.iq1_xxs_grid[idx];
+                var j: usize = 0;
+                while (j < 8) : (j += 1) {
+                    const j_u6: u6 = @intCast(j);
+                    const raw: u8 = @intCast((g >> @as(u6, 8 * j_u6)) & 0xFF);
+                    const gv: f32 = @floatFromInt(@as(i8, @bitCast(raw)));
+                    out[i + ib * 32 + l * 8 + j] = d * @as(f32, @floatFromInt(ls)) * (gv + @as(f32, @floatFromInt(delta)) * grids.IQ1S_DELTA);
+                }
+            }
+        }
+        nb += 1;
+    }
+}
+
+/// IQ1_XXXS: 1.1875 bpw, QK=256, 38B/block [d f16][qs 32B][sc 4B].
+///   Dequant: y[j] = d * ls * (grid[idx][j] + delta * IQ1S_DELTA)
+///   idx = qs[l] — 8-bit index, no qh
+pub fn dequantIq1_xxxs(bytes: []const u8, out: []f32) void {
+    const qk = 256;
+    const block_bytes = 38;
+    const grids = @import("iq1xs_grids.zig");
+    var i: usize = 0;
+    var nb: usize = 0;
+    while (i < out.len) : (i += qk) {
+        const base = nb * block_bytes;
+        const d_bits = std.mem.readInt(u16, bytes[base..][0..2], .little);
+        const d: f32 = @floatCast(@as(f16, @bitCast(d_bits)));
+        const qs = bytes[base + 2 .. base + 34];
+        const sc = bytes[base + 34 .. base + 38];
+        var ib: usize = 0;
+        while (ib < 8) : (ib += 1) {
+            const ib_u3: u3 = @intCast(ib);
+            const nib = (sc[ib / 2] >> @as(u3, ib_u3 & 1)) & 0xf;
+            const ls = 2 * (nib & 7) + 1;
+            const delta: i32 = -1 + 2 * @as(i32, (nib >> 3) & 1);
+            var l: usize = 0;
+            while (l < 4) : (l += 1) {
+                const idx: usize = qs[ib * 4 + l];
+                const g = grids.iq1_xxxs_grid[idx];
+                var j: usize = 0;
+                while (j < 8) : (j += 1) {
+                    const j_u6: u6 = @intCast(j);
+                    const raw: u8 = @intCast((g >> @as(u6, 8 * j_u6)) & 0xFF);
+                    const gv: f32 = @floatFromInt(@as(i8, @bitCast(raw)));
+                    out[i + ib * 32 + l * 8 + j] = d * @as(f32, @floatFromInt(ls)) * (gv + @as(f32, @floatFromInt(delta)) * grids.IQ1S_DELTA);
+                }
+            }
+        }
+        nb += 1;
     }
 }
 
@@ -2480,6 +2608,9 @@ pub fn dequantBlock(dtype: GgmlType, bytes: []const u8, out: []f32, elems: usize
         .i2_s => dequantI2_S(bytes, o),
         .q1_0 => dequantQ1_0(bytes, o),
         .q2_0 => dequantQ2_0(bytes, o),
+        .iq1_xs => dequantIq1_xs(bytes, o),
+        .iq1_xxs => dequantIq1_xxs(bytes, o),
+        .iq1_xxxs => dequantIq1_xxxs(bytes, o),
     }
 }
 
@@ -2489,6 +2620,7 @@ pub fn dequantBlock(dtype: GgmlType, bytes: []const u8, out: []f32, elems: usize
 ///   no cuantizados:  f32, f16, bf16, f64, i8, i16, i32, i64
 ///   GGML estándar:   q8_0, q8_1, q4_0, q4_1, q5_0, q5_1, q4_k, q5_k, q6_k
 ///   IQ (unsloth):    iq4_xs, iq3_s
+///   IQ1-narrow:      iq1_xs, iq1_xxs, iq1_xxxs
 ///   Peso 1/2 bit:    q1_0, q2_0
 /// Cualquier otro tipo (q2_k, q3_k, q8_k, iq4_nl, iq2_xxs, iq2_s, iq1_s,
 /// iq3_xxs, iq1_m, mxfp4, tq1_0, tq2_0, ...) devuelve `UnsupportedDtype`.
@@ -2520,6 +2652,9 @@ pub fn dequantTensor(info: *const TensorInfo, bytes: []const u8, out: []f32) Ggu
         .i2_s => dequantI2_S(bytes, out),
         .q1_0 => dequantQ1_0(bytes, out),
         .q2_0 => dequantQ2_0(bytes, out),
+        .iq1_xs => dequantIq1_xs(bytes, out),
+        .iq1_xxs => dequantIq1_xxs(bytes, out),
+        .iq1_xxxs => dequantIq1_xxxs(bytes, out),
         else => return GgufError.UnsupportedDtype,
     }
 }

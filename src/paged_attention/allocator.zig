@@ -154,7 +154,6 @@ pub const BlockAllocator = struct {
         @memcpy(dst, src);
         @memset(self.memory_pool[block_id * self.block_bytes ..][0..self.block_bytes], 0);
         block.is_cpu = true;
-        debugz.dbg.printLevel(.detail, "[kv_offload] swapToCpu block={d} bytes={d}\n", .{ block_id, self.block_bytes });
     }
 
     pub fn swapFromCpu(self: *Self, block_id: usize) !void {
@@ -165,7 +164,6 @@ pub const BlockAllocator = struct {
         const dst = self.memory_pool[block_id * self.block_bytes ..][0..self.block_bytes];
         @memcpy(dst, src);
         block.is_cpu = false;
-        debugz.dbg.printLevel(.detail, "[kv_offload] swapFromCpu block={d} bytes={d}\n", .{ block_id, self.block_bytes });
     }
 
     /// Update LRU timestamp for a block (call on every access).
@@ -306,9 +304,15 @@ pub const CpuOffloadManager = struct {
     const Self = @This();
 
     pub fn init(block_alloc: *BlockAllocator, check_interval: u32, min_free_blocks: usize) Self {
+        const enabled = block_alloc.cpu_pool != null;
+        if (enabled and debugz.dbg.at(.info)) {
+            debugz.dbg.printLevel(.info, "[kv_offload] enabled interval={d} min_free={d} total_blocks={d}\n", .{
+                check_interval, min_free_blocks, block_alloc.numTotal(),
+            });
+        }
         return .{
             .block_alloc = block_alloc,
-            .enabled = block_alloc.cpu_pool != null,
+            .enabled = enabled,
             .check_interval = check_interval,
             .min_free_blocks = min_free_blocks,
         };
@@ -323,6 +327,12 @@ pub const CpuOffloadManager = struct {
 
         const free_before = self.block_alloc.numFree();
         if (free_before >= self.min_free_blocks) return;
+
+        if (debugz.dbg.at(.detail)) {
+            debugz.dbg.printLevel(.detail, "[kv_offload] check: free={d} < min_free={d}, spilling...\n", .{
+                free_before, self.min_free_blocks,
+            });
+        }
 
         const spilled = try self.block_alloc.maybeSpillToCpu(self.min_free_blocks);
         self.spilled_total += spilled;
@@ -346,7 +356,7 @@ pub const CpuOffloadManager = struct {
 
     pub fn report(self: *Self) void {
         if (!self.enabled) return;
-        debugz.dbg.printLevel(.info, "[kv_offload] spilled={d} reloaded={d} free={d}/{d}\n", .{
+        debugz.dbg.printLevel(.detail, "[kv_offload] spilled={d} reloaded={d} free={d}/{d}\n", .{
             self.spilled_total,
             self.reloaded_total,
             self.block_alloc.numFree(),

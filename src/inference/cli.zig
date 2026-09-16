@@ -155,6 +155,9 @@ pub const CliParams = struct {
     ///   0 = full context (default); >0 = cap window to this value.
     ///   CLI: --swa <n>.
     swa: usize = 0,
+    /// P0-RPERF: force KV offload to CPU/RAM host regardless of VRAM budget.
+    ///   CLI: --kv-offload.
+    kv_offload: bool = false,
     /// Models preset path (--models-preset).
     models_preset_path: ?[]const u8 = null,
     use_jinja: bool = false,
@@ -1088,6 +1091,7 @@ pub fn runHybridInferenceSink(
     stdout: anytype,
     sink: ?TokenSink,
 ) !void {
+    debugz.dbg.printLevel(.info, "[rlt] runHybridInferenceSink: rlt_sidecar_path={s}\n", .{params.rlt_sidecar_path});
     const cfg = model.config;
     const n_embd = cfg.embedding_length;
     const vocab = cfg.vocab_size;
@@ -1294,7 +1298,7 @@ pub fn runHybridInferenceSink(
         }
         max_seq_len = ctx;
 
-        enable_cpu_offload_kv = breakdown.kv_vram > total_vram_cached * 40 / 100;
+        enable_cpu_offload_kv = breakdown.kv_vram > total_vram_cached * 40 / 100 or params.kv_offload;
         if (enable_cpu_offload_kv and debugz.dbg.at(.info)) {
             try stdout.print("[+] CPU offload KV candidato (kv={d}MB > 40% de VRAM)\n", .{breakdown.kv_vram / (1024 * 1024)});
         }
@@ -2168,8 +2172,16 @@ pub fn runHybridInferenceSink(
         try stdout.flush();
     } else {
         // Eager load: load all weights up front (original behavior)
+        var rlt_sidecar_file: ?*gguf.GgufFile = null;
+        defer if (rlt_sidecar_file) |sc| sc.*.deinit();
+        if (params.rlt_sidecar_path.len > 0) {
+            var sidecar_raw = try gguf.GgufFile.fromFile(io, allocator, params.rlt_sidecar_path);
+            errdefer sidecar_raw.deinit();
+            rlt_sidecar_file = &sidecar_raw;
+            debugz.dbg.printLevel(.info, "[rlt] sidecar cargado: {s}\n", .{params.rlt_sidecar_path});
+        }
         for (0..eff_blocks) |i| {
-            try layers[i].loadWeightsFromGguf(&model.file, null);
+            try layers[i].loadWeightsFromGguf(&model.file, rlt_sidecar_file);
         }
     }
     if (streamer) |*s| {
@@ -2673,6 +2685,9 @@ pub fn runHybridInferenceSink(
         try embedding.lmHeadForward(&engine, normed16, lm_head, &logits);
 
         for (logits.data, 0..) |v, i| logits_f32[i] = @as(f32, @floatCast(v));
+        const stream_post_prefill = try matmul.MatmulEngine.sharedCudaStream();
+        try cudaz.cuStreamSynchronize(@ptrCast(stream_post_prefill.raw));
+        debugz.dbg.printLevel(.detail, "[pipeline] CPU prefill stream sync OK\n", .{});
     }
     const prefill_ns = t_prefill.read();
 
@@ -2725,8 +2740,9 @@ pub fn runHybridInferenceSink(
 
     // Server F2 T2c: el primer token (salido del prefill) también se emite.
     if (sink) |s| {
-        const piece = tok.decode(&[_]u32{first_token}, allocator) catch "";
-        defer if (piece.len > 0) allocator.free(piece);
+        var piece_buf0: [256]u8 = undefined;
+        const piece_len0 = tok.decodeOne(first_token, &piece_buf0) catch 0;
+        const piece = piece_buf0[0..piece_len0];
         _ = s.emit(first_token, piece) catch {};
     }
     const t_gen = @import("time").Timer.start();
@@ -3675,8 +3691,9 @@ pub fn runHybridInferenceSink(
                 try scheduler.appendToken(seq_id, tok_c);
                 // Server F2 T2c: emit de drafts aceptados por ronda.
                 if (sink) |s| {
-                    const piece = tok.decode(&[_]u32{tok_c}, allocator) catch "";
-                    defer if (piece.len > 0) allocator.free(piece);
+                    var piece_buf1: [256]u8 = undefined;
+                    const piece_len1 = tok.decodeOne(tok_c, &piece_buf1) catch 0;
+                    const piece = piece_buf1[0..piece_len1];
                     s.emit(tok_c, piece) catch {
                         spec_stop_hit = true;
                         break;
@@ -3687,8 +3704,9 @@ pub fn runHybridInferenceSink(
                 try gen_tokens.append(allocator, bonus);
                 try scheduler.appendToken(seq_id, bonus);
                 if (sink) |s| {
-                    const piece = tok.decode(&[_]u32{bonus}, allocator) catch "";
-                    defer if (piece.len > 0) allocator.free(piece);
+                    var piece_buf2: [256]u8 = undefined;
+                    const piece_len2 = tok.decodeOne(bonus, &piece_buf2) catch 0;
+                    const piece = piece_buf2[0..piece_len2];
                     s.emit(bonus, piece) catch {
                         spec_stop_hit = true;
                     };
@@ -4208,8 +4226,9 @@ pub fn runHybridInferenceSink(
             try scheduler.appendToken(seq_id, next_token);
             // Server F2 T2c: emisión token-por-token.
             if (sink) |s| {
-                const piece = tok.decode(&[_]u32{next_token}, allocator) catch "";
-                defer if (piece.len > 0) allocator.free(piece);
+                var piece_buf3: [256]u8 = undefined;
+                const piece_len3 = tok.decodeOne(next_token, &piece_buf3) catch 0;
+                const piece = piece_buf3[0..piece_len3];
                 s.emit(next_token, piece) catch |sig| switch (sig) {
                     error.StopSequenceHit => break,
                 };
@@ -4332,6 +4351,15 @@ pub fn runHybridInferenceSink(
 
     // Cleanup global Q4 weight cache (GPU allocations)
     layer_kernels.deinitQ4Cache();
+
+    if (perf_stage) {
+        for (ev) |e| cudaz.cuEventDestroy(e);
+        allocator.free(ev);
+        allocator.free(layer_gpu_ns);
+    }
+
+    // P0-RPERF: report KV offload metrics
+    kv_offload.report();
 }
 
 pub fn gpuKvPipelineReady(f: QuantFormat) bool {
@@ -4554,6 +4582,13 @@ pub fn runHybridPpl(
             allocator.destroy(bt);
         }
     };
+    var rlt_sidecar_ppl: ?*gguf.GgufFile = null;
+    defer if (rlt_sidecar_ppl) |sc| sc.*.deinit();
+    if (params.rlt_sidecar_path.len > 0) {
+        var sidecar_raw = try gguf.GgufFile.fromFile(io, allocator, params.rlt_sidecar_path);
+        errdefer sidecar_raw.deinit();
+        rlt_sidecar_ppl = &sidecar_raw;
+    }
     for (0..eff_blocks) |i| {
         if (cfg.isFullAttentionLayer(i)) {
             const bt = try allocator.create(paged_attn.BlockTable);
@@ -4570,7 +4605,7 @@ pub fn runHybridPpl(
             if (layer_block_tables[i]) |bt| bt else null,
             shared_gpu_ptr,
         );
-        try layers[i].loadWeightsFromGguf(&model.file, null);
+        try layers[i].loadWeightsFromGguf(&model.file, rlt_sidecar_ppl);
     }
     try stdout.print("[+] ppl híbrido: arch={s} capas={d} (attn {d}) emb={d} vocab={d} ctx={d} blocks={d}\n", .{ cfg.architecture, eff_blocks, num_attn_layers, n_embd, vocab, max_seq_len, num_blocks });
     try stdout.flush();

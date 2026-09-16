@@ -305,6 +305,38 @@ pub const BPETokenizer = struct {
         return result.toOwnedSlice(allocator);
     }
 
+    /// Decode un solo token a un buffer stack (sin allocator).
+    /// Escribe los bytes decodificados en `buf` y devuelve la longitud escrita.
+    /// Devuelve `error.BufferTooSmall` si el token no cabe en `buf`.
+    pub fn decodeOne(self: Self, token: u32, buf: []u8) !usize {
+        const str = self.vocab_inv.get(token) orelse {
+            if (buf.len < 5) return error.BufferTooSmall;
+            @memcpy(buf[0..5], "<unk>");
+            return 5;
+        };
+
+        var out_i: usize = 0;
+        var i: usize = 0;
+        while (i < str.len) {
+            const n = std.unicode.utf8ByteSequenceLength(str[i]) catch {
+                i += 1;
+                continue;
+            };
+            if (i + n > str.len) break;
+            const cpt = std.unicode.utf8Decode(str[i .. i + n]) catch {
+                i += n;
+                continue;
+            };
+            if (unicode.unicodeCptToByte(cpt)) |byte| {
+                if (out_i >= buf.len) return error.BufferTooSmall;
+                buf[out_i] = byte;
+                out_i += 1;
+            }
+            i += n;
+        }
+        return out_i;
+    }
+
     /// Crear un tokenizer dummy para tests (vocab de bytes 0-255 + algunos merges)
     pub fn initDummy(allocator: std.mem.Allocator) !Self {
         var tok = Self.init(allocator);
@@ -376,4 +408,24 @@ test "bpe decode" {
     defer allocator.free(decoded);
 
     try std.testing.expect(decoded.len > 0);
+}
+
+test "bpe decodeOne parity vs decode (single token)" {
+    const allocator = std.testing.allocator;
+    var tok = try BPETokenizer.initDummy(allocator);
+    defer tok.deinit();
+
+    // Probar cada token del vocab dummy (bytes 0-255 + BOS/EOS + unk)
+    const test_ids = &[_]u32{0, 1, 42, 127, 128, 255, 256, 257, 999};
+    for (test_ids) |id| {
+        var buf: [256]u8 = undefined;
+        const len = tok.decodeOne(id, &buf) catch 0;
+        const piece = buf[0..len];
+
+        // Comparar contra decode() de un solo token
+        const full = tok.decode(&[_]u32{id}, allocator) catch "";
+        defer allocator.free(full);
+
+        try std.testing.expectEqualSlices(u8, full, piece);
+    }
 }
