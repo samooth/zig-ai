@@ -468,29 +468,29 @@ extern "C" __global__ void l2NormHeadsKernel(
 //   B) ΔNet por columna: shfl tree + broadcast — semántica §5.6 exacta.
 //   C) rmsNorm·silu(z) sobre la slice de ESTA v-head — patrón rmsNormGateMul.
 //
-    // REQUISITOS: head_v_dim % 32 == 0; dim <= 128; n_v_heads % n_k_heads == 0.
-    // OPT-IN: DNFUSED=1 (ssm.zig). Fallback: kernels separados.
-    extern "C" __global__ __launch_bounds__(1024, 2) void deltaNetFusedKernel(
-        float* __restrict__ conv_out,         // [N, qkv_dim] — l2 K/Q IN-PLACE
-        const float* __restrict__ gate,       // [N, dt_rank]
-        const float* __restrict__ beta,       // [N, dt_rank]
-        const float* __restrict__ z,          // [N, n_v_heads*dim]
-        const float* __restrict__ ssm_norm,   // [n_v_heads*dim]
-        float* __restrict__ attn_out,          // [N, n_v_heads*dim] — OUT
-        float* __restrict__ state,             // [n_v_heads, dim*dim] persistente
-        int N, int qkv_dim, int key_dim, int n_k_heads, int n_v_heads,
-        int head_v_dim, int dt_rank, float eps)
-    {
-        const int t  = blockIdx.y;
-        const int hv = blockIdx.x;
-        if (t >= N || hv >= n_v_heads) return;
-        const int dim = head_v_dim;
-        const int hk = hv % n_k_heads;
-        const int warp = threadIdx.y;                    // 0..31
-        const int lane = threadIdx.x;                    // 0..31
-        const int flat_tid = warp * blockDim.x + lane;   // 0..1023
-        const int cpw = dim / (int)blockDim.y;           // columnas por warp (4)
-        const int rows_per_lane = (dim + blockDim.x - 1) / blockDim.x; // 4
+// REQUISITOS: head_v_dim % 32 == 0; dim <= 128; n_v_heads % n_k_heads == 0.
+// OPT-IN: DNFUSED=1 (ssm.zig). Fallback: kernels separados.
+extern "C" __global__ __launch_bounds__(512) void deltaNetFusedKernel(
+    float* __restrict__ conv_out,         // [N, qkv_dim] — l2 K/Q IN-PLACE
+    const float* __restrict__ gate,       // [N, dt_rank]
+    const float* __restrict__ beta,       // [N, dt_rank]
+    const float* __restrict__ z,          // [N, n_v_heads*dim]
+    const float* __restrict__ ssm_norm,   // [n_v_heads*dim]
+    float* __restrict__ attn_out,          // [N, n_v_heads*dim] — OUT
+    float* __restrict__ state,             // [n_v_heads, dim*dim] persistente
+    int N, int qkv_dim, int key_dim, int n_k_heads, int n_v_heads,
+    int head_v_dim, int dt_rank, float eps)
+{
+    const int t  = blockIdx.y;
+    const int hv = blockIdx.x;
+    if (t >= N || hv >= n_v_heads) return;
+    const int dim = head_v_dim;
+    const int hk = hv % n_k_heads;
+    const int warp = threadIdx.y;                    // 0..31
+    const int lane = threadIdx.x;                    // 0..31
+    const int flat_tid = warp * blockDim.x + lane;   // 0..1023
+    const int cpw = dim / (int)blockDim.y;           // columnas por warp (4)
+    const int rows_per_lane = (dim + blockDim.x - 1) / blockDim.x; // 4
 
         const float g = expf(gate[(size_t)t * dt_rank + hv]);
         const float b = beta[(size_t)t * dt_rank + hv];
@@ -7885,10 +7885,6 @@ extern "C" __global__ void mergeFeedbackKernel(
     float* __restrict__ out,
     int d, float alpha)
 {
-    // Shared memory layout:
-    // [0, d)          = r (RMSNorm of prev_state)
-    // [d, 2*d)        = gate_preact (pre-activation gate)
-    // [2*d, 3*d)      = state_proj (W_state @ r)
     extern __shared__ float smem[];
     float* r = smem;                // [d]
     float* gate_preact = smem + d;  // [d]
@@ -7904,23 +7900,21 @@ extern "C" __global__ void mergeFeedbackKernel(
     for (int offset = WARP / 2; offset > 0; offset >>= 1) {
         ss += __shfl_xor_sync(0xffffffffu, ss, offset, WARP);
     }
-    // Inter-warp reduction via shared memory
-    __shared__ float warp_sums[32];
+    // Inter-warp reduction via shared memory (use r[0] as temp for s_rms)
     int warp_id = threadIdx.x / WARP;
     int lane_id = threadIdx.x % WARP;
-    if (lane_id == 0) warp_sums[warp_id] = ss;
+    if (lane_id == 0) r[warp_id] = ss; // reuse r[0..num_warps-1] as warp_sums
     __syncthreads();
     int num_warps = (blockDim.x + WARP - 1) / WARP;
     if (warp_id == 0) {
-        ss = (lane_id < num_warps) ? warp_sums[lane_id] : 0.0f;
+        ss = (lane_id < num_warps) ? r[lane_id] : 0.0f; // read warp_sums from r[]
         for (int offset = WARP / 2; offset > 0; offset >>= 1) {
             ss += __shfl_xor_sync(0xffffffffu, ss, offset, WARP);
         }
     }
-    __shared__ float s_rms;
-    if (threadIdx.x == 0) s_rms = rsqrtf(ss / (float)d + 1e-6f);
+    if (threadIdx.x == 0) r[0] = rsqrtf(ss / (float)d + 1e-6f); // s_rms in r[0]
     __syncthreads();
-    float inv_rms = s_rms;
+    float inv_rms = r[0]; // broadcast s_rms from r[0]
     for (int i = threadIdx.x; i < d; i += blockDim.x) {
         r[i] = prev_state[i] * inv_rms;
     }
@@ -7965,5 +7959,27 @@ extern "C" __global__ void mergeFeedbackKernel(
     // Step 5: out = encoder_rep + alpha * gate * state_proj
     for (int i = threadIdx.x; i < d; i += blockDim.x) {
         out[i] = encoder_rep[i] + alpha * gate_preact[i] * state_proj[i];
+    }
+}
+
+// ─── Deepstack shuffle: [n_pos, n_embd] → [n_rows, n_embd*merge2] ───────────
+// Cada thread copia un elemento. View row i = merge2 filas consecutivas
+// del input (pixel-shuffle layout). Usado por clip_gpu.zig para el
+// deepstack de Qwen3-VL (merge2=4).
+extern "C" __global__ void deepstackShuffleKernel(
+    const float* __restrict__ x,
+    float* __restrict__ out,
+    int n_pos, int n_embd, int n_rows, int merge2)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int ds_in = n_embd * merge2;
+    int total = n_rows * ds_in;
+    if (tid < total) {
+        int view_row = tid / ds_in;
+        int off = tid % ds_in;
+        int sub_row = off / n_embd;
+        int col = off % n_embd;
+        int src_row = view_row * merge2 + sub_row;
+        out[tid] = x[src_row * n_embd + col];
     }
 }

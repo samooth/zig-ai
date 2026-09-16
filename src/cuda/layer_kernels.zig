@@ -91,19 +91,23 @@ const kernel_names = [_][:0]const u8{
     "q3kGemmM1Dp4aKernel", // a-U3 (eje §12): GEMV q3_k M=1 dp4a — cuello 3B Q3_K_S
     "q3kGemmM1Dp4aPackedKernel", // a-U3 fase 3: ídem sobre repack 128B/SB coalesced
     "q3kGemmM1Dp4aPackedQKVKernel", // a-U3 fase 3c: fusión q/k/v — 1 launch, fase-1 única
-    "q41GemmM1Dp4aKernel",    // P0-6: q4_1 M=1 dp4a
-    "q2kGemmM1Dp4aKernel",    // P0-6: q2_k M=1 dp4a
-    "iq3sGemmM1Dp4aKernel",   // P0-6: iq3_s M=1 dp4a
-    "iq2sGemmM1Dp4aKernel",   // P0-6: iq2_s M=1 dp4a
-    "iq4xsGemmM1Dp4aKernel",  // P0-6: iq4_xs M=1 dp4a
-    "iq4nlGemmM1Dp4aKernel",  // P0-6: iq4_nl M=1 dp4a
+    "q41GemmM1Dp4aKernel", // P0-6: q4_1 M=1 dp4a
+    "q2kGemmM1Dp4aKernel", // P0-6: q2_k M=1 dp4a
+    "iq3sGemmM1Dp4aKernel", // P0-6: iq3_s M=1 dp4a
+    "iq2sGemmM1Dp4aKernel", // P0-6: iq2_s M=1 dp4a
+    "iq4xsGemmM1Dp4aKernel", // P0-6: iq4_xs M=1 dp4a
+    "iq4nlGemmM1Dp4aKernel", // P0-6: iq4_nl M=1 dp4a
     "iq3xxsGemmM1Dp4aKernel", // P0-6: iq3_xxs M=1 dp4a
     "iq2xxsGemmM1Dp4aKernel", // P0-6: iq2_xxs M=1 dp4a
-    "iq2xsGemmM1Dp4aKernel",  // P0-6: iq2_xs M=1 dp4a
+    "iq2xsGemmM1Dp4aKernel", // P0-6: iq2_xs M=1 dp4a
     "prefillDeltaNetChunk_nkda_K64", // STUDY §5.2: chunked batched ΔNet prefill
     "prefillDeltaNetChunk_nkda_K128",
+    "prefillDeltaNetChunk_nkda_K256",
+    "prefillDeltaNetChunk_nkda_K512",
     "prefillDeltaNetChunk_kda_K64",
     "prefillDeltaNetChunk_kda_K128",
+    "prefillDeltaNetChunk_kda_K256",
+    "prefillDeltaNetChunk_kda_K512",
     "embeddingGatherKernel",
     "gateComputeKernel",
     "gateKernel",
@@ -189,6 +193,19 @@ pub const LayerKernels = struct {
     // rep_penalty [64]u32 en device, PRE-alocados (capture-safe, 1.3).
     philox_counter_buf: cudaz.CUdeviceptr = 0,
     penalty_ring_buf: cudaz.CUdeviceptr = 0,
+    // STUDY §5.2: scratch persistente para prefillWY — se cachea por
+    // (n_chunks, n_v_heads) y se reusa entre llamadas, eliminando
+    // 7× cuMemAlloc/cuMemFree por prefill.
+    wy_scratch_g_cs: cudaz.CUdeviceptr = 0,
+    wy_scratch_attn: cudaz.CUdeviceptr = 0,
+    wy_scratch_kq: cudaz.CUdeviceptr = 0,
+    wy_scratch_kg: cudaz.CUdeviceptr = 0,
+    wy_scratch_q_g: cudaz.CUdeviceptr = 0,
+    wy_scratch_k_cd: cudaz.CUdeviceptr = 0,
+    wy_scratch_avb: cudaz.CUdeviceptr = 0,
+    wy_scratch_g_last: cudaz.CUdeviceptr = 0,
+    wy_scratch_n_chunks: usize = 0,
+    wy_scratch_n_v_heads: usize = 0,
 
     pub fn init(stream: cudaz.CUstream) !LayerKernels {
         _ = try loadModule();
@@ -196,7 +213,15 @@ pub const LayerKernels = struct {
     }
 
     pub fn deinit(self: *LayerKernels) void {
-        _ = self;
+        if (self.wy_scratch_g_cs != 0) cudaz.cuMemFree(self.wy_scratch_g_cs);
+        if (self.wy_scratch_attn != 0) cudaz.cuMemFree(self.wy_scratch_attn);
+        if (self.wy_scratch_kq != 0) cudaz.cuMemFree(self.wy_scratch_kq);
+        if (self.wy_scratch_kg != 0) cudaz.cuMemFree(self.wy_scratch_kg);
+        if (self.wy_scratch_q_g != 0) cudaz.cuMemFree(self.wy_scratch_q_g);
+        if (self.wy_scratch_k_cd != 0) cudaz.cuMemFree(self.wy_scratch_k_cd);
+        if (self.wy_scratch_avb != 0) cudaz.cuMemFree(self.wy_scratch_avb);
+        if (self.wy_scratch_g_last != 0) cudaz.cuMemFree(self.wy_scratch_g_last);
+        self.* = .{ .stream = self.stream };
     }
 
     fn get(self: *LayerKernels, name: [:0]const u8) !cudaz.CUfunction {
@@ -551,8 +576,20 @@ pub const LayerKernels = struct {
         n_tokens: c_int, // tokens REALES de este chunk (<= K); evita OOB en chunks parciales
     ) !void {
         const func_name: [:0]const u8 = if (kda)
-            if (K == 64) "prefillDeltaNetChunk_kda_K64" else "prefillDeltaNetChunk_kda_K128"
-        else if (K == 64) "prefillDeltaNetChunk_nkda_K64" else "prefillDeltaNetChunk_nkda_K128";
+            switch (K) {
+                64 => "prefillDeltaNetChunk_kda_K64",
+                128 => "prefillDeltaNetChunk_kda_K128",
+                256 => "prefillDeltaNetChunk_kda_K256",
+                512 => "prefillDeltaNetChunk_kda_K512",
+                else => "prefillDeltaNetChunk_kda_K512",
+            }
+        else switch (K) {
+            64 => "prefillDeltaNetChunk_nkda_K64",
+            128 => "prefillDeltaNetChunk_nkda_K128",
+            256 => "prefillDeltaNetChunk_nkda_K256",
+            512 => "prefillDeltaNetChunk_nkda_K512",
+            else => "prefillDeltaNetChunk_nkda_K512",
+        };
         // STUDY §5.2: el prefill chunked vive en su PROPIO cubin (loadPrefillModule),
         // no en el cubin de layer_kernels. Bypasea la caché de funciones.
         const func = try cudaz.cuModuleGetFunction(try loadPrefillModule(), func_name);
@@ -628,38 +665,36 @@ pub const LayerKernels = struct {
         const n_cs2 = per_head2 * CS * CS;
         const n_cs_s = per_head2 * CS * S;
         const n_s_cs = per_head2 * S * CS;
-        var d_g_cs = try cudaz.cuMemAlloc(n_g_cs * 4);
-        errdefer cudaz.cuMemFree(d_g_cs);
-        var d_attn = try cudaz.cuMemAlloc(n_cs2 * 4);
-        errdefer cudaz.cuMemFree(d_attn);
-        var d_kq = try cudaz.cuMemAlloc(n_cs2 * 4);
-        errdefer cudaz.cuMemFree(d_kq);
-        var d_kg = try cudaz.cuMemAlloc(n_cs_s * 4);
-        errdefer cudaz.cuMemFree(d_kg);
-        var d_q_g = try cudaz.cuMemAlloc(n_cs_s * 4);
-        errdefer cudaz.cuMemFree(d_q_g);
-        var d_k_cd = try cudaz.cuMemAlloc(n_s_cs * 4);
-        errdefer cudaz.cuMemFree(d_k_cd);
-        var d_avb = try cudaz.cuMemAlloc(n_cs_s * 4);
-        errdefer cudaz.cuMemFree(d_avb);
-        var d_g_last = try cudaz.cuMemAlloc(per_head2 * 4);
-        errdefer cudaz.cuMemFree(d_g_last);
-        // 1.4 (lane-f): los frees del scratch DESPUÉS de lanzar K2 deben ser
-        // stream-ordenados — cuMemFree inmediato tras el launch libera la
-        // VA mientras K1/K2 están en cola (UB CUDA); en E2E la alloc de la
-        // capa siguiente robaba la VA y corrompía el scratch pendiente (el
-        // test aislado pasaba 4/4 porque su DtoH sí esperaba al stream).
-        defer {
-            cudaz.cuStreamSynchronize(self.stream) catch {};
-            cudaz.cuMemFree(d_g_cs);
-            cudaz.cuMemFree(d_attn);
-            cudaz.cuMemFree(d_kq);
-            cudaz.cuMemFree(d_kg);
-            cudaz.cuMemFree(d_q_g);
-            cudaz.cuMemFree(d_k_cd);
-            cudaz.cuMemFree(d_avb);
-            cudaz.cuMemFree(d_g_last);
+        // Cacheo STUDY WY: reusar buffers persistentes si (n_chunks, n_v_heads)
+        // coincide; si no, liberar y reallocar. Elimina 7 alloc/free por prefill.
+        if (self.wy_scratch_n_chunks != n_chunks or self.wy_scratch_n_v_heads != nvh) {
+            if (self.wy_scratch_g_cs != 0) cudaz.cuMemFree(self.wy_scratch_g_cs);
+            if (self.wy_scratch_attn != 0) cudaz.cuMemFree(self.wy_scratch_attn);
+            if (self.wy_scratch_kq != 0) cudaz.cuMemFree(self.wy_scratch_kq);
+            if (self.wy_scratch_kg != 0) cudaz.cuMemFree(self.wy_scratch_kg);
+                    if (self.wy_scratch_q_g != 0) cudaz.cuMemFree(self.wy_scratch_q_g);
+            if (self.wy_scratch_k_cd != 0) cudaz.cuMemFree(self.wy_scratch_k_cd);
+            if (self.wy_scratch_avb != 0) cudaz.cuMemFree(self.wy_scratch_avb);
+            if (self.wy_scratch_g_last != 0) cudaz.cuMemFree(self.wy_scratch_g_last);
+            self.wy_scratch_g_cs = try cudaz.cuMemAlloc(n_g_cs * 4);
+            self.wy_scratch_attn = try cudaz.cuMemAlloc(n_cs2 * 4);
+            self.wy_scratch_kq = try cudaz.cuMemAlloc(n_cs2 * 4);
+            self.wy_scratch_kg = try cudaz.cuMemAlloc(n_cs_s * 4);
+            self.wy_scratch_q_g = try cudaz.cuMemAlloc(n_cs_s * 4);
+            self.wy_scratch_k_cd = try cudaz.cuMemAlloc(n_s_cs * 4);
+            self.wy_scratch_avb = try cudaz.cuMemAlloc(n_cs_s * 4);
+            self.wy_scratch_g_last = try cudaz.cuMemAlloc(per_head2 * 4);
+            self.wy_scratch_n_chunks = n_chunks;
+            self.wy_scratch_n_v_heads = nvh;
         }
+        var d_g_cs = self.wy_scratch_g_cs;
+        var d_attn = self.wy_scratch_attn;
+        var d_kq = self.wy_scratch_kq;
+        var d_kg = self.wy_scratch_kg;
+        var d_q_g = self.wy_scratch_q_g;
+        var d_k_cd = self.wy_scratch_k_cd;
+        var d_avb = self.wy_scratch_avb;
+        var d_g_last = self.wy_scratch_g_last;
 
         var cov = conv_out;
         var gv = gate;
@@ -1010,6 +1045,22 @@ pub const LayerKernels = struct {
         const func = try self.get("vitAttnHeadKernel");
         var kp = [_]?*anyopaque{ &qv, &kv, &vv, &ov, &np1, &hd1, &kq_scale };
         try cudaz.cuLaunchKernel(func, n_u(n_pos), 1, 1, 128, 1, 1, 0, self.stream, @ptrCast(&kp), null);
+    }
+
+    /// Deepstack shuffle (Qwen3-VL): reordena x [n_pos, n_embd] (pixel-shuffle)
+    /// a out [n_rows, n_embd*merge2] donde cada view row agrupa merge2 filas
+    /// consecutivas del input. Grid: (total+255)/256; block 256.
+    pub fn deepstackShuffle(self: *LayerKernels, x: usize, out: usize, n_pos: usize, n_embd: usize, n_rows: usize, merge2: usize) !void {
+        var xv = x;
+        var ov = out;
+        var np: c_int = n_c(n_pos);
+        var ne: c_int = n_c(n_embd);
+        var nr: c_int = n_c(n_rows);
+        var m2: c_int = n_c(merge2);
+        const func = try self.get("deepstackShuffleKernel");
+        const total = n_rows * n_embd * merge2;
+        var kp = [_]?*anyopaque{ &xv, &ov, &np, &ne, &nr, &m2 };
+        try cudaz.cuLaunchKernel(func, n_u((total + 255) / 256), 1, 1, 256, 1, 1, 0, self.stream, @ptrCast(&kp), null);
     }
 
     pub fn kvAppendF16(self: *LayerKernels, k: usize, v: usize, cache: usize, bt: usize, start_pos: usize, n: usize, kv_dim: usize, n_kv_head: usize, head_dim: usize, block_size: usize) !void {
@@ -2425,8 +2476,12 @@ pub const LayerKernels = struct {
         var kp = [_]?*anyopaque{ @constCast(&scores), @constCast(&ids_out), @constCast(&vals_out), @constCast(&n_i32), @constCast(&k_i32) };
         try cudaz.cuLaunchKernel(
             func,
-            1, 1, 1,                     // grid
-            @intCast(@min(num_experts, 1024)), 1, 1, // block
+            1,
+            1,
+            1, // grid
+            @intCast(@min(num_experts, 1024)),
+            1,
+            1, // block
             @intCast(num_experts * @sizeOf(f32)), // smem
             self.stream,
             @ptrCast(&kp),
@@ -2714,4 +2769,3 @@ pub fn q4Weight(allocator: std.mem.Allocator, key: usize, bytes: []const u8) !us
     q4_cache_bytes += bytes.len;
     return dev;
 }
-

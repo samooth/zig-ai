@@ -360,7 +360,10 @@ pub fn cuMemcpyHtoDAsync(dst: CUdeviceptr, src: usize, bytes: usize, stream: CUs
 
 pub fn cuMemcpyDtoHAsync(dst: usize, src: CUdeviceptr, bytes: usize, stream: CUstream) !void {
     const res2 = cudalib.cuMemcpyDtoHAsync_v2(@ptrFromInt(dst), src, bytes, stream);
-    if (res2 != .SUCCESS) return fail(res2, @src());
+    if (res2 != .SUCCESS) {
+        std.debug.print("[cuda] cuMemcpyDtoHAsync FAILED: err={d} ({s})\n", .{@intFromEnum(res2), @tagName(res2)});
+        return fail(res2, @src());
+    }
 }
 
 pub fn cuMemsetD8(dst: CUdeviceptr, value: u8, count: usize) !void {

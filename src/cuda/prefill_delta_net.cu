@@ -211,9 +211,77 @@ extern "C" __global__ void prefillDeltaNetChunk_kda_K128(
     if (col >= S_V) return;
     const int hv = blockIdx.x;
     if (hv >= n_v_heads) return;
-    (void)t_start; // ABI: host passes it; v5 loop uses runtime n_tokens instead.
+    (void)t_start;
     float* head_state = state + hv * S_V * S_V;
     deltaNetChunkLoop<128, true>(head_state, attn_out, d_inner,
+        conv_out, q_off, k_off, v_off, qkv_stride, gate, dt_stride, beta, dt_stride_b,
+        col, threadIdx.x, hv, scale, n_v_heads, n_k_heads, head_v_dim, n_tokens);
+}
+
+extern "C" __global__ void prefillDeltaNetChunk_nkda_K256(
+    const float* conv_out, int q_off, int k_off, int v_off, int qkv_stride,
+    const float* gate, int dt_stride, const float* beta, int dt_stride_b,
+    float* state, float* attn_out, int d_inner, int t_start, float scale,
+    int n_v_heads, int n_k_heads, int head_v_dim, int n_tokens)
+{
+    const int col = blockIdx.z * blockDim.y + threadIdx.y;
+    if (col >= S_V) return;
+    const int hv = blockIdx.x;
+    if (hv >= n_v_heads) return;
+    (void)t_start;
+    float* head_state = state + hv * S_V * S_V;
+    deltaNetChunkLoop<256, false>(head_state, attn_out, d_inner,
+        conv_out, q_off, k_off, v_off, qkv_stride, gate, dt_stride, beta, dt_stride_b,
+        col, threadIdx.x, hv, scale, n_v_heads, n_k_heads, head_v_dim, n_tokens);
+}
+
+extern "C" __global__ void prefillDeltaNetChunk_nkda_K512(
+    const float* conv_out, int q_off, int k_off, int v_off, int qkv_stride,
+    const float* gate, int dt_stride, const float* beta, int dt_stride_b,
+    float* state, float* attn_out, int d_inner, int t_start, float scale,
+    int n_v_heads, int n_k_heads, int head_v_dim, int n_tokens)
+{
+    const int col = blockIdx.z * blockDim.y + threadIdx.y;
+    if (col >= S_V) return;
+    const int hv = blockIdx.x;
+    if (hv >= n_v_heads) return;
+    (void)t_start;
+    float* head_state = state + hv * S_V * S_V;
+    deltaNetChunkLoop<512, false>(head_state, attn_out, d_inner,
+        conv_out, q_off, k_off, v_off, qkv_stride, gate, dt_stride, beta, dt_stride_b,
+        col, threadIdx.x, hv, scale, n_v_heads, n_k_heads, head_v_dim, n_tokens);
+}
+
+extern "C" __global__ void prefillDeltaNetChunk_kda_K256(
+    const float* conv_out, int q_off, int k_off, int v_off, int qkv_stride,
+    const float* gate, int dt_stride, const float* beta, int dt_stride_b,
+    float* state, float* attn_out, int d_inner, int t_start, float scale,
+    int n_v_heads, int n_k_heads, int head_v_dim, int n_tokens)
+{
+    const int col = blockIdx.z * blockDim.y + threadIdx.y;
+    if (col >= S_V) return;
+    const int hv = blockIdx.x;
+    if (hv >= n_v_heads) return;
+    (void)t_start;
+    float* head_state = state + hv * S_V * S_V;
+    deltaNetChunkLoop<256, true>(head_state, attn_out, d_inner,
+        conv_out, q_off, k_off, v_off, qkv_stride, gate, dt_stride, beta, dt_stride_b,
+        col, threadIdx.x, hv, scale, n_v_heads, n_k_heads, head_v_dim, n_tokens);
+}
+
+extern "C" __global__ void prefillDeltaNetChunk_kda_K512(
+    const float* conv_out, int q_off, int k_off, int v_off, int qkv_stride,
+    const float* gate, int dt_stride, const float* beta, int dt_stride_b,
+    float* state, float* attn_out, int d_inner, int t_start, float scale,
+    int n_v_heads, int n_k_heads, int head_v_dim, int n_tokens)
+{
+    const int col = blockIdx.z * blockDim.y + threadIdx.y;
+    if (col >= S_V) return;
+    const int hv = blockIdx.x;
+    if (hv >= n_v_heads) return;
+    (void)t_start;
+    float* head_state = state + hv * S_V * S_V;
+    deltaNetChunkLoop<512, true>(head_state, attn_out, d_inner,
         conv_out, q_off, k_off, v_off, qkv_stride, gate, dt_stride, beta, dt_stride_b,
         col, threadIdx.x, hv, scale, n_v_heads, n_k_heads, head_v_dim, n_tokens);
 }

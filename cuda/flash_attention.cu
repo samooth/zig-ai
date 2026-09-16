@@ -30,7 +30,6 @@ __global__ void flash_attention_kernel(
     __half* q_smem = (__half*)smem;
     __half* k_smem = q_smem + Bq * D;
     __half* v_smem = k_smem + Bkv * D;
-    float* s_smem = (float*)(v_smem + Bkv * D);
 
     int rows_per_warp = (Bq + num_warps - 1) / num_warps;
     int q_row_start = warp_id * rows_per_warp;
