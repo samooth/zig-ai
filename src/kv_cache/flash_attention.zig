@@ -165,10 +165,6 @@ pub const KVFlashAttention = struct {
     ) !void {
         _ = self;
         _ = op;
-        _ = d_q;
-        _ = d_k;
-        _ = d_v;
-        _ = d_out;
         // Placeholder: aquí se llamaría al kernel FlashAttention
         // Implementación real requiere bindings a cutlass/flash-attn
         std.log.debug("FlashAttention forward: Q={any} K={any} V={any} -> O={any}", .{

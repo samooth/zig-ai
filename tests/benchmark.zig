@@ -27,7 +27,7 @@ fn benchmarkMatmul(allocator: std.mem.Allocator, backend: Backend, M: usize, N: 
     // Warmup
     try engine.gemmNoTrans(f32, A, B, &C);
 
-    var timer = try std.time.Timer.start();
+    var timer = @import("time").Timer.start();
     for (0..iterations) |_| {
         try engine.gemmNoTrans(f32, A, B, &C);
     }
@@ -64,7 +64,7 @@ fn benchmarkFlashAttentionCpu(allocator: std.mem.Allocator, N: usize, d: usize, 
     // Warmup
     try fa_cpu.forward(Q, K, V, &O);
 
-    var timer = try std.time.Timer.start();
+    var timer = @import("time").Timer.start();
     for (0..iterations) |_| {
         try fa_cpu.forward(Q, K, V, &O);
     }
@@ -74,13 +74,16 @@ fn benchmarkFlashAttentionCpu(allocator: std.mem.Allocator, N: usize, d: usize, 
     return avg_ms;
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
 
-    const stdout = std.io.getStdOut().writer();
+    var stdout_buffer: [0x100]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
     try stdout.print("\n", .{});
+    try stdout.flush();
     try stdout.print("=================================================\n", .{});
     try stdout.print("         Zig AI Engine — Benchmark Suite         \n", .{});
     try stdout.print("=================================================\n", .{});

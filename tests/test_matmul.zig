@@ -1,6 +1,7 @@
 const std = @import("std");
 const Tensor = @import("core").Tensor;
 const matmul = @import("matmul");
+const cudaz = @import("cudaz");
 
 const MatmulEngine = matmul.MatmulEngine;
 const Backend = matmul.Backend;
@@ -26,8 +27,8 @@ test "naive gemm" {
 
     try engine.gemmNoTrans(f32, A, B, &C);
 
-    try std.testing.expectApproxEqAbs(@as(f32, 58.0), C.at2(0, 0), 1e-6);  // 1*7+2*9+3*11
-    try std.testing.expectApproxEqAbs(@as(f32, 64.0), C.at2(0, 1), 1e-6);  // 1*8+2*10+3*12
+    try std.testing.expectApproxEqAbs(@as(f32, 58.0), C.at2(0, 0), 1e-6); // 1*7+2*9+3*11
+    try std.testing.expectApproxEqAbs(@as(f32, 64.0), C.at2(0, 1), 1e-6); // 1*8+2*10+3*12
     try std.testing.expectApproxEqAbs(@as(f32, 139.0), C.at2(1, 0), 1e-6); // 4*7+5*9+6*11
     try std.testing.expectApproxEqAbs(@as(f32, 154.0), C.at2(1, 1), 1e-6); // 4*8+5*10+6*12
 }
@@ -107,4 +108,62 @@ test "f16/bf16 conversion" {
 
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), back.at2(0, 0), 1e-3);
     try std.testing.expectApproxEqAbs(@as(f32, 4.5), back.at2(1, 1), 1e-3);
+}
+
+test "cublas gemm matches naive (no-trans)" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest; // CI sin toolkit
+    const allocator = std.testing.allocator;
+    var A = try createTestMatrix(allocator, 3, 4, &[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    defer A.deinit();
+    var B = try createTestMatrix(allocator, 4, 2, &[_]f32{ 1, 0, 0, 1, 1, 0, 0, 1 });
+    defer B.deinit();
+    var Cc = try Tensor(f32).alloc(allocator, &[_]usize{ 3, 2 });
+    defer Cc.deinit();
+    var Cg = try Tensor(f32).alloc(allocator, &[_]usize{ 3, 2 });
+    defer Cg.deinit();
+
+    var cpu = try MatmulEngine.init(allocator, .naive, .f32);
+    defer cpu.deinit();
+    var gpu = try MatmulEngine.init(allocator, .cublas, .f32);
+    defer gpu.deinit();
+
+    try cpu.gemmNoTrans(f32, A, B, &Cc);
+    try gpu.gemmNoTrans(f32, A, B, &Cg);
+    for (0..3) |i| for (0..2) |j| {
+        try std.testing.expectApproxEqAbs(Cc.at2(i, j), Cg.at2(i, j), 1e-2);
+    };
+}
+
+test "cublas linearProjection matches naive" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest; // CI sin toolkit
+    const allocator = std.testing.allocator;
+    var X = try createTestMatrix(allocator, 2, 3, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer X.deinit();
+    var W_T = try createTestMatrix(allocator, 2, 3, &[_]f32{ 1, 0, 0, 0, 1, 0 });
+    defer W_T.deinit();
+    var Yc = try Tensor(f32).alloc(allocator, &[_]usize{ 2, 2 });
+    defer Yc.deinit();
+    var Yg = try Tensor(f32).alloc(allocator, &[_]usize{ 2, 2 });
+    defer Yg.deinit();
+
+    var cpu = try MatmulEngine.init(allocator, .naive, .f32);
+    defer cpu.deinit();
+    var gpu = try MatmulEngine.init(allocator, .cublas, .f32);
+    defer gpu.deinit();
+
+    try cpu.linearProjection(f32, X, W_T, &Yc);
+    try gpu.linearProjection(f32, X, W_T, &Yg);
+    for (0..2) |i| for (0..2) |j| {
+        try std.testing.expectApproxEqAbs(Yc.at2(i, j), Yg.at2(i, j), 1e-2);
+    };
+}
+
+// ── lane-f Phase 3: GraphCapture (máquina de estados pura, sin GPU) ──────────
+test "GraphCapture: estado inicial no replayable, deinit sin exec es no-op" {
+    const gc_mod = @import("matmul").GraphCapture;
+    var gc = gc_mod.init(@as(@import("cudaz").CUstream, @ptrFromInt(0xdead)));
+    defer gc.deinit();
+    try std.testing.expectEqual(false, gc.isReplayable());
+    try std.testing.expectEqual(@as(usize, 0), gc.last_node_count);
+    try std.testing.expectEqual(@as(u64, 0), gc.generation);
 }

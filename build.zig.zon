@@ -1,8 +1,14 @@
 .{
-    .name = "zig-ai-engine",
+    .name = .zig_ai_engine,
     .version = "0.2.0",
-    .minimum_zig_version = "0.13.0",
-    .dependencies = .{},
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x39f58c0c31c5805,
+    .dependencies = .{
+        .httpx = .{
+            .url = "https://github.com/samooth/httpx.zig/archive/310bf66.tar.gz",
+            .hash = "httpx-0.1.9-8qj2eho6IgC5gqQTBLFzpT8ibtkHDE17vcmOCxNzMsWM",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
@@ -11,5 +17,7 @@
         "tests",
         "examples",
         "README.md",
+        "config.json.example",
+        "tui",
     },
 }

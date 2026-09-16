@@ -1,4 +1,3 @@
-
 //! Tipos y utilidades FP16/BF16 para Zig
 //! Zig tiene f16 nativo pero con limitaciones en algunas plataformas.
 //! Este módulo proporciona conversiones seguras y kernels básicos.
@@ -80,7 +79,7 @@ pub const F16 = extern struct {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn tensorF32ToF16(allocator: std.mem.Allocator, src: Tensor(f32)) !Tensor(f16) {
-    var dst = try Tensor(f16).alloc(allocator, src.shape);
+    const dst = try Tensor(f16).alloc(allocator, src.shape);
     for (src.data, dst.data) |s, *d| {
         d.* = @as(f16, @floatCast(s));
     }
@@ -88,7 +87,7 @@ pub fn tensorF32ToF16(allocator: std.mem.Allocator, src: Tensor(f32)) !Tensor(f1
 }
 
 pub fn tensorF16ToF32(allocator: std.mem.Allocator, src: Tensor(f16)) !Tensor(f32) {
-    var dst = try Tensor(f32).alloc(allocator, src.shape);
+    const dst = try Tensor(f32).alloc(allocator, src.shape);
     for (src.data, dst.data) |s, *d| {
         d.* = @as(f32, @floatCast(s));
     }
@@ -97,7 +96,7 @@ pub fn tensorF16ToF32(allocator: std.mem.Allocator, src: Tensor(f16)) !Tensor(f3
 
 pub fn tensorF32ToBF16(allocator: std.mem.Allocator, src: Tensor(f32)) !Tensor(u16) {
     // Almacenamos BF16 como u16
-    var dst = try Tensor(u16).alloc(allocator, src.shape);
+    const dst = try Tensor(u16).alloc(allocator, src.shape);
     for (src.data, dst.data) |s, *d| {
         const bf = BF16.fromF32(s);
         d.* = bf.bits;
@@ -106,7 +105,7 @@ pub fn tensorF32ToBF16(allocator: std.mem.Allocator, src: Tensor(f32)) !Tensor(u
 }
 
 pub fn tensorBF16ToF32(allocator: std.mem.Allocator, src: Tensor(u16)) !Tensor(f32) {
-    var dst = try Tensor(f32).alloc(allocator, src.shape);
+    const dst = try Tensor(f32).alloc(allocator, src.shape);
     for (src.data, dst.data) |s, *d| {
         const bf = BF16{ .bits = s };
         d.* = bf.toF32();
@@ -191,5 +190,3 @@ test "F16 conversion roundtrip" {
         try std.testing.expect(diff < 0.01);
     }
 }
-
-

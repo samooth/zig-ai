@@ -1,0 +1,10 @@
+
+=================================================
+     Zig AI Engine — FlashAttention + Matmul     
+=================================================
+
+Sampling: temp=1.000 top_k=0 top_p=1.000 rep_penalty=1.000 seed=42
+Backend matmul: cpu (parallel)
+[+] Cargando modelo GGUF: /ai/models/bitnet/ggml-model-i2_s.gguf
+[+] ppl: arch=bitnet-b1.58 capas=30 ctx=2048 (path legacy)
+[+] ppl: tests/corpora/ppl_wiki12k.txt = 12000 bytes, 2959 tokens (kv fp16/fp16)

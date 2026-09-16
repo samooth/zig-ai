@@ -1,12 +1,11 @@
-
 //! Tipos y utilidades compartidas del motor matmul
 
 const std = @import("std");
 
 /// Layout de memoria para matrices
 pub const Layout = enum {
-    RowMajor,   // C-style: A[i][j] = data[i*lda + j]
-    ColMajor,   // Fortran-style: A[i][j] = data[j*lda + i]
+    RowMajor, // C-style: A[i][j] = data[i*lda + j]
+    ColMajor, // Fortran-style: A[i][j] = data[j*lda + i]
 };
 
 /// Información de dimensión para GEMM
@@ -47,17 +46,20 @@ pub const TileConfig = struct {
 
 /// Detectar capacidades SIMD en comptime
 pub const SimdInfo = struct {
+    const builtin = @import("builtin");
+    const featureSetHas = std.Target.x86.featureSetHas;
+
     pub const vec_len_f32 = blk: {
-        if (@hasFeature("avx512f")) break :blk 16;
-        if (@hasFeature("avx2")) break :blk 8;
-        if (@hasFeature("sse2")) break :blk 4;
+        if (featureSetHas(builtin.cpu.features, .avx512f)) break :blk 16;
+        if (featureSetHas(builtin.cpu.features, .avx2)) break :blk 8;
+        if (featureSetHas(builtin.cpu.features, .sse2)) break :blk 4;
         break :blk 1;
     };
 
     pub const vec_len_f64 = blk: {
-        if (@hasFeature("avx512f")) break :blk 8;
-        if (@hasFeature("avx2")) break :blk 4;
-        if (@hasFeature("sse2")) break :blk 2;
+        if (featureSetHas(builtin.cpu.features, .avx512f)) break :blk 8;
+        if (featureSetHas(builtin.cpu.features, .avx2)) break :blk 4;
+        if (featureSetHas(builtin.cpu.features, .sse2)) break :blk 2;
         break :blk 1;
     };
 
@@ -69,11 +71,11 @@ pub const Timer = struct {
     start_time: i128,
 
     pub fn start() Timer {
-        return .{ .start_time = std.time.nanoTimestamp() };
+        return .{ .start_time = @import("time").Timer.now() };
     }
 
     pub fn elapsedNs(self: Timer) u64 {
-        return @intCast(std.time.nanoTimestamp() - self.start_time);
+        return @intCast(@import("time").Timer.now() - self.start_time);
     }
 
     pub fn elapsedMs(self: Timer) f64 {
@@ -105,5 +107,3 @@ pub fn tensorsApproxEq(comptime T: type, a: anytype, b: anytype, eps: T) bool {
     }
     return true;
 }
-
-

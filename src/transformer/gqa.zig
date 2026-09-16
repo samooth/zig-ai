@@ -2,13 +2,12 @@ const std = @import("std");
 const Tensor = @import("core").Tensor;
 
 /// GQA (Grouped Query Attention) — Broadcast de KV heads sin copia
-/// 
+///
 /// En lugar de expandir físicamente K/V de [batch, num_kv_heads, seq, head_dim]
 /// a [batch, num_heads, seq, head_dim] con memcpy, usamos índices lógicos.
-/// 
+///
 /// group_size = num_heads / num_kv_heads
 /// Cada KV-head sirve a `group_size` Q-heads consecutivas.
-
 pub const GQAIndices = struct {
     num_heads: usize,
     num_kv_heads: usize,
@@ -55,7 +54,7 @@ pub fn buildGQAIndex(
 /// NOTA: Preferir acceso indirecto en producción. Esta función es para tests/validación.
 pub fn expandGqaFallback(
     allocator: std.mem.Allocator,
-    src: Tensor(f16),          // [batch, num_kv_heads, seq_len, head_dim]
+    src: Tensor(f16), // [batch, num_kv_heads, seq_len, head_dim]
     num_q_heads: usize,
 ) !Tensor(f16) {
     const batch_size = src.shape[0];
@@ -73,8 +72,7 @@ pub fn expandGqaFallback(
                 for (0..seq_len) |s| {
                     const src_offset = ((b * num_kv_heads + kv_h) * seq_len + s) * head_dim;
                     const dst_offset = ((b * num_q_heads + q_h) * seq_len + s) * head_dim;
-                    @memcpy(dst.data[dst_offset..dst_offset + head_dim], 
-                            src.data[src_offset..src_offset + head_dim]);
+                    @memcpy(dst.data[dst_offset .. dst_offset + head_dim], src.data[src_offset .. src_offset + head_dim]);
                 }
             }
         }

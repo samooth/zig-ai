@@ -1,4 +1,3 @@
-
 //! Cuantización de pesos INT8 / INT4 para inferencia eficiente
 //! Implementa: simétrica, asimétrica (zero-point), y de-grupos (per-channel/per-group)
 
@@ -10,17 +9,17 @@ const Tensor = @import("core").Tensor;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub const QuantConfig = struct {
-    bits: u4,           // 8 o 4
-    symmetric: bool,    // true: zero_point = 0
-    per_channel: bool,  // true: un scale por fila/columna
-    group_size: usize,  // 0 = sin grupos, >0 = per-group (ej: 128)
+    bits: u4, // 8 o 4
+    symmetric: bool, // true: zero_point = 0
+    per_channel: bool, // true: un scale por fila/columna
+    group_size: usize, // 0 = sin grupos, >0 = per-group (ej: 128)
 };
 
 pub const QuantizedTensor = struct {
-    data: []u8,         // bytes cuantizados (2x INT4 por byte, o 1x INT8)
+    data: []u8, // bytes cuantizados (2x INT4 por byte, o 1x INT8)
     shape: []const usize,
-    scales: []f32,      // un scale por canal/grupo
-    zero_points: []i8,  // un zero_point por canal/grupo (si asimétrico)
+    scales: []f32, // un scale por canal/grupo
+    zero_points: []i8, // un zero_point por canal/grupo (si asimétrico)
     config: QuantConfig,
     allocator: std.mem.Allocator,
 
@@ -339,11 +338,13 @@ pub fn dequantizeToF32(
 pub fn gemmWithQuantizedB(
     A: Tensor(f32),
     B_q: QuantizedTensor,
-    C: *Tensor(f32),
+    C: *const Tensor(f32),
     M: usize,
     N: usize,
     K: usize,
 ) void {
+    const mc = @constCast(C);
+
     std.debug.assert(B_q.config.bits == 8);
     std.debug.assert(B_q.shape.len == 2);
     std.debug.assert(B_q.shape[0] == K and B_q.shape[1] == N);
@@ -352,7 +353,7 @@ pub fn gemmWithQuantizedB(
     const has_zp = B_q.zero_points.len > 0;
     const zp: f32 = if (has_zp) @floatFromInt(B_q.zero_points[0]) else 0;
 
-    @memset(C.data, 0);
+    @memset(mc.data, 0);
 
     for (0..M) |i| {
         for (0..N) |j| {
@@ -366,7 +367,7 @@ pub fn gemmWithQuantizedB(
                     @as(f32, @floatFromInt(qval)) * scale;
                 sum += a_val * b_val;
             }
-            C.ptr2(i, j).* = sum;
+            mc.ptr2(i, j).* = sum;
         }
     }
 }
@@ -380,7 +381,7 @@ test "INT8 symmetric quantize-dequantize" {
     var src = try Tensor(f32).alloc(allocator, &[_]usize{ 4, 4 });
     defer src.deinit();
 
-    var rng = std.rand.DefaultPrng.init(42);
+    var rng = std.Random.DefaultPrng.init(42);
     src.randUniform(&rng, -2.0, 2.0);
 
     const config = QuantConfig{ .bits = 8, .symmetric = true, .per_channel = false, .group_size = 0 };
@@ -407,7 +408,7 @@ test "INT8 per-channel quantize-dequantize" {
     var src = try Tensor(f32).alloc(allocator, &[_]usize{ 8, 16 });
     defer src.deinit();
 
-    var rng = std.rand.DefaultPrng.init(42);
+    var rng = std.Random.DefaultPrng.init(42);
     src.randUniform(&rng, -3.0, 3.0);
 
     const config = QuantConfig{ .bits = 8, .symmetric = true, .per_channel = true, .group_size = 0 };
@@ -433,7 +434,7 @@ test "INT4 symmetric quantize-dequantize" {
     var src = try Tensor(f32).alloc(allocator, &[_]usize{ 4, 4 });
     defer src.deinit();
 
-    var rng = std.rand.DefaultPrng.init(42);
+    var rng = std.Random.DefaultPrng.init(42);
     src.randUniform(&rng, -1.0, 1.0);
 
     const config = QuantConfig{ .bits = 4, .symmetric = true, .per_channel = false, .group_size = 0 };
@@ -470,7 +471,7 @@ test "GEMM with quantized weights" {
     var C_q = try Tensor(f32).alloc(allocator, &[_]usize{ M, N });
     defer C_q.deinit();
 
-    var rng = std.rand.DefaultPrng.init(42);
+    var rng = std.Random.DefaultPrng.init(42);
     A.randUniform(&rng, -1.0, 1.0);
     W.randUniform(&rng, -1.0, 1.0);
 
@@ -503,5 +504,3 @@ test "GEMM with quantized weights" {
     }
     try std.testing.expect(max_err < 1.0);
 }
-
-

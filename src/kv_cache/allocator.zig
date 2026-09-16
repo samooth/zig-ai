@@ -49,11 +49,11 @@ pub const KVPoolAllocator = struct {
         const buffer = try allocator.alloc(u8, capacity_bytes);
         errdefer allocator.free(buffer);
 
-        var free_list = std.ArrayList(usize).init(allocator);
-        errdefer free_list.deinit();
+        var free_list: std.ArrayList(usize) = .empty;
+        errdefer free_list.deinit(allocator);
 
-        var slots = std.ArrayList(CacheSlot).init(allocator);
-        errdefer slots.deinit();
+        var slots: std.ArrayList(CacheSlot) = .empty;
+        errdefer slots.deinit(allocator);
 
         var slot_map = std.AutoHashMap(u32, KVBlockDescriptor).init(allocator);
         errdefer slot_map.deinit();
@@ -73,8 +73,8 @@ pub const KVPoolAllocator = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.free_list.deinit();
-        self.slots.deinit();
+        self.free_list.deinit(self.allocator);
+        self.slots.deinit(self.allocator);
         self.slot_map.deinit();
         self.allocator.free(self.buffer);
     }
@@ -92,6 +92,8 @@ pub const KVPoolAllocator = struct {
         const num_elements = @as(usize, seq_len) * @as(usize, head_dim);
         const block_size = format.defaultBlockSize();
         const num_blocks = (num_elements + block_size - 1) / block_size;
+        // 7.3-REVERT: stride RAW (el pad 32B rompía los kernels que leen
+        // el cache con stride GGUF crudo — ver kv_quant.quantBytes)
         const byte_size = num_blocks * format.bytesPerBlock();
 
         // Intentar asignar
@@ -117,7 +119,7 @@ pub const KVPoolAllocator = struct {
             .descriptor = descriptor,
         };
 
-        try self.slots.append(slot);
+        try self.slots.append(self.allocator, slot);
         try self.slot_map.put(slot_idx, descriptor);
 
         return &self.slots.items[slot_idx];
@@ -131,7 +133,7 @@ pub const KVPoolAllocator = struct {
             if (slot.ref_count == 0) {
                 slot.occupied = false;
                 if (self.strategy == .free_list or self.strategy == .lru_evict) {
-                    self.free_list.append(slot.descriptor.byte_offset) catch {};
+                    self.free_list.append(self.allocator, slot.descriptor.byte_offset) catch {};
                 }
             }
         }
@@ -146,13 +148,19 @@ pub const KVPoolAllocator = struct {
         return self.buffer[desc.byte_offset .. desc.byte_offset + desc.byte_size];
     }
 
+    /// Tamaño en bytes del slot (o 0 si no existe).
+    pub fn slotSize(self: *Self, slot_idx: u32) usize {
+        if (slot_idx >= self.slots.items.len) return 0;
+        return self.slots.items[slot_idx].descriptor.byte_size;
+    }
+
     /// Compacta la memoria (defragmentación)
     pub fn compact(self: *Self) !void {
         if (self.strategy != .lru_evict) return;
 
         var new_offset: usize = 0;
-        var new_slots = std.ArrayList(CacheSlot).init(self.allocator);
-        defer new_slots.deinit();
+        var new_slots: std.ArrayList(CacheSlot) = .empty;
+        defer new_slots.deinit(self.allocator);
 
         // Ordenar slots por offset
         const SortCtx = struct {
@@ -181,12 +189,12 @@ pub const KVPoolAllocator = struct {
                 slot.descriptor.byte_offset = new_offset;
             }
             new_offset += desc.byte_size;
-            try new_slots.append(slot);
+            try new_slots.append(self.allocator, slot);
         }
 
         self.bump_offset = new_offset;
         self.slots.clearRetainingCapacity();
-        try self.slots.appendSlice(new_slots.items);
+        try self.slots.appendSlice(self.allocator, new_slots.items);
         self.free_list.clearRetainingCapacity();
     }
 

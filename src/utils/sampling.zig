@@ -21,7 +21,10 @@ pub const GreedySampler = struct {
         var max_val: f32 = -std.math.inf(f32);
         for (logits.data, 0..) |v, i| {
             const f = @as(f32, @floatCast(v));
-            if (f > max_val) { max_val = f; max_idx = i; }
+            if (f > max_val) {
+                max_val = f;
+                max_idx = i;
+            }
         }
         return @as(u32, @intCast(max_idx % logits.data.len));
     }
@@ -36,9 +39,9 @@ pub const TopKSampler = struct {
         const vocab_size = logits.data.len;
         const k = @min(self.k, vocab_size);
         // Find top-k indices
-        var indices = std.ArrayList(usize).init(std.heap.page_allocator);
-        defer indices.deinit();
-        for (0..vocab_size) |i| try indices.append(i);
+        var indices: std.ArrayList(usize) = .empty;
+        defer indices.deinit(std.heap.page_allocator);
+        for (0..vocab_size) |i| try indices.append(std.heap.page_allocator, i);
         // Simple bubble sort for top-k
         var top_indices: [100]usize = undefined;
         var top_values: [100]f32 = undefined;
@@ -48,7 +51,10 @@ pub const TopKSampler = struct {
             var max_val = @as(f32, @floatCast(logits.data[i]));
             for (i..vocab_size) |j| {
                 const val = @as(f32, @floatCast(logits.data[j]));
-                if (val > max_val) { max_val = val; max_idx = j; }
+                if (val > max_val) {
+                    max_val = val;
+                    max_idx = j;
+                }
             }
             top_indices[i] = max_idx;
             top_values[i] = max_val;
@@ -74,9 +80,9 @@ pub const TopPSampler = struct {
     pub fn sample(self: *TopPSampler, logits: Tensor(f16)) u32 {
         // Simplified: sort and accumulate until p threshold
         const vocab_size = logits.data.len;
-        var indices = std.ArrayList(usize).init(std.heap.page_allocator);
-        defer indices.deinit();
-        for (0..vocab_size) |i| try indices.append(i);
+        var indices: std.ArrayList(usize) = .empty;
+        defer indices.deinit(std.heap.page_allocator);
+        for (0..vocab_size) |i| try indices.append(std.heap.page_allocator, i);
         // Sort by value descending
         // (simplified - just use greedy for now)
         _ = self;
@@ -84,7 +90,10 @@ pub const TopPSampler = struct {
         var max_val: f32 = -std.math.inf(f32);
         for (logits.data, 0..) |v, i| {
             const f = @as(f32, @floatCast(v));
-            if (f > max_val) { max_val = f; max_idx = i; }
+            if (f > max_val) {
+                max_val = f;
+                max_idx = i;
+            }
         }
         return @as(u32, @intCast(max_idx));
     }
@@ -98,8 +107,8 @@ pub const TemperatureSampler = struct {
     pub fn sample(self: *TemperatureSampler, logits: Tensor(f16)) u32 {
         const vocab_size = logits.data.len;
         // Apply temperature
-        var probs = std.ArrayList(f32).init(std.heap.page_allocator);
-        defer probs.deinit();
+        var probs: std.ArrayList(f32) = .empty;
+        defer probs.deinit(std.heap.page_allocator);
         var max_val: f32 = -std.math.inf(f32);
         for (logits.data) |v| {
             const f = @as(f32, @floatCast(v));
@@ -108,7 +117,7 @@ pub const TemperatureSampler = struct {
         var sum: f32 = 0;
         for (logits.data) |v| {
             const p = @exp((@as(f32, @floatCast(v)) - max_val) / self.temperature);
-            try probs.append(p);
+            try probs.append(std.heap.page_allocator, p);
             sum += p;
         }
         // Normalize

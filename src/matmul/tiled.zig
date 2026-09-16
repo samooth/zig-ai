@@ -1,4 +1,3 @@
-
 //! GEMM con tiling en caché (algoritmo GotoBLAS simplificado)
 //! + microkernel SIMD para máximo rendimiento en CPU.
 
@@ -54,14 +53,18 @@ fn gemmPanelF32(
     A: Tensor(f32),
     B: Tensor(f32),
     C: *Tensor(f32),
-    i0: usize, i1: usize,
-    j0: usize, j1: usize,
-    k0: usize, k1: usize,
-    MR: usize, NR: usize,
+    row0: usize,
+    row1: usize,
+    j0: usize,
+    j1: usize,
+    k0: usize,
+    k1: usize,
+    MR: usize,
+    NR: usize,
 ) void {
-    var i = i0;
-    while (i < i1) : (i += MR) {
-        const i_end = @min(i + MR, i1);
+    var i = row0;
+    while (i < row1) : (i += MR) {
+        const i_end = @min(i + MR, row1);
 
         var j = j0;
         while (j < j1) : (j += NR) {
@@ -76,9 +79,12 @@ fn microKernelF32(
     A: Tensor(f32),
     B: Tensor(f32),
     C: *Tensor(f32),
-    i0: usize, i1: usize,
-    j0: usize, j1: usize,
-    k0: usize, k1: usize,
+    row0: usize,
+    row1: usize,
+    j0: usize,
+    j1: usize,
+    k0: usize,
+    k1: usize,
 ) void {
     const VecLen = SimdInfo.vec_len_f32;
     const Vec = @Vector(VecLen, f32);
@@ -88,7 +94,7 @@ fn microKernelF32(
     const max_cols = 8;
     var accum: [max_rows][max_cols]f32 = undefined;
 
-    const rows = i1 - i0;
+    const rows = row1 - row0;
     const cols = j1 - j0;
 
     for (0..rows) |ri| {
@@ -102,18 +108,20 @@ fn microKernelF32(
 
     while (k < k_vec_end) : (k += VecLen) {
         for (0..rows) |ri| {
-            const i = i0 + ri;
-            var a_vec: Vec = undefined;
+            const i = row0 + ri;
+            var a_elems: [VecLen]f32 = undefined;
             for (0..VecLen) |v| {
-                a_vec[v] = A.at2(i, k + v);
+                a_elems[v] = A.at2(i, k + v);
             }
+            const a_vec: Vec = a_elems;
 
             for (0..cols) |cj| {
                 const j = j0 + cj;
-                var b_vec: Vec = undefined;
+                var b_elems: [VecLen]f32 = undefined;
                 for (0..VecLen) |v| {
-                    b_vec[v] = B.at2(j, k + v);
+                    b_elems[v] = B.at2(j, k + v);
                 }
+                const b_vec: Vec = b_elems;
 
                 const prod = a_vec * b_vec;
                 accum[ri][cj] += @reduce(.Add, prod);
@@ -124,7 +132,7 @@ fn microKernelF32(
     // Remainder scalar
     while (k < k1) : (k += 1) {
         for (0..rows) |ri| {
-            const i = i0 + ri;
+            const i = row0 + ri;
             const a_val = A.at2(i, k);
             for (0..cols) |cj| {
                 const j = j0 + cj;
@@ -135,12 +143,10 @@ fn microKernelF32(
 
     // Escribir resultado a C
     for (0..rows) |ri| {
-        const i = i0 + ri;
+        const i = row0 + ri;
         for (0..cols) |cj| {
             const j = j0 + cj;
             C.ptr2(i, j).* += accum[ri][cj];
         }
     }
 }
-
-

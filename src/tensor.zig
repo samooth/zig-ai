@@ -1,4 +1,5 @@
 const std = @import("std");
+const debugz = @import("debug");
 
 pub const ShapeError = error{
     InvalidShape,
@@ -95,17 +96,17 @@ pub fn Tensor(comptime T: type) type {
                 .shape = shape,
                 .strides = strides,
                 .offset = offset,
-                .allocator = null,
+                .allocator = self.allocator,
                 .owns_data = false,
             };
         }
 
         pub fn deinit(self: *Self) void {
             if (self.owns_data) {
-                if (self.allocator) |alloc| {
-                    alloc.free(self.data);
-                    alloc.free(self.shape);
-                    alloc.free(self.strides);
+                if (self.allocator) |a| {
+                    a.free(self.data);
+                    a.free(self.shape);
+                    a.free(self.strides);
                 }
             }
         }
@@ -215,8 +216,7 @@ pub fn Tensor(comptime T: type) type {
         pub fn copyFrom(self: *Self, other: Self) !void {
             std.debug.assert(self.numel() == other.numel());
             if (self.isContiguous() and other.isContiguous()) {
-                @memcpy(self.data[self.offset..][0..self.numel()],
-                        other.data[other.offset..][0..other.numel()]);
+                @memcpy(self.data[self.offset..][0..self.numel()], other.data[other.offset..][0..other.numel()]);
             } else {
                 var it_dst = self.iterator();
                 var it_src = other.iterator();
@@ -240,51 +240,51 @@ pub fn Tensor(comptime T: type) type {
 
         pub fn randn(self: Self, rng: *std.Random.Xoshiro256) void {
             var it = self.iterator();
-            while (it.next()) |ptr| {
-                const u1 = rng.random().float(f32);
-                const u2 = rng.random().float(f32);
-                const r = @sqrt(-2.0 * @log(u1));
-                const theta = 2.0 * std.math.pi * u2;
-                ptr.* = @as(T, @floatCast(r * @cos(theta)));
+            while (it.next()) |p| {
+                const r1 = rng.random().float(f32);
+                const r2 = rng.random().float(f32);
+                const r = @sqrt(-2.0 * @log(r1));
+                const theta = 2.0 * std.math.pi * r2;
+                p.* = @as(T, @floatCast(r * @cos(theta)));
             }
         }
 
         pub fn randUniform(self: Self, rng: *std.Random.Xoshiro256, min: f32, max: f32) void {
             var it = self.iterator();
-            while (it.next()) |ptr| {
+            while (it.next()) |p| {
                 const f = rng.random().float(f32);
-                ptr.* = @as(T, @floatCast(min + f * (max - min)));
+                p.* = @as(T, @floatCast(min + f * (max - min)));
             }
         }
 
         pub fn printInfo(self: Self, name: []const u8) void {
-            std.debug.print("Tensor '{s}': shape=[", .{name});
-            for (self.shape, 0..) |s, i| {
-                if (i > 0) std.debug.print(",", .{});
-                std.debug.print("{d}", .{s});
-            }
-            std.debug.print("] strides=[", .{});
-            for (self.strides, 0..) |st, i| {
-                if (i > 0) std.debug.print(",", .{});
-                std.debug.print("{d}", .{st});
-            }
-            std.debug.print("] dtype={s}, numel={d}\n", .{@typeName(T), self.numel()});
+            debugz.dbg.print("Tensor '{s}': shape=[", .{name});
+for (self.shape, 0..) |s, i| {
+if (i > 0) debugz.dbg.print(",", .{});
+                  debugz.dbg.print("{d}", .{s});
+}
+              debugz.dbg.print("] strides=[", .{});
+for (self.strides, 0..) |st, i| {
+                   if (i > 0) debugz.dbg.print(",", .{});
+                   debugz.dbg.print("{d}", .{st});
+               }
+             debugz.dbg.print("] dtype={s}, numel={d}\n", .{ @typeName(T), self.numel() });
         }
 
-        pub fn printHead(self: Self, n: usize) void {
-            const limit = @min(n, self.numel());
-            std.debug.print("[", .{});
-            var it = self.iterator();
-            var i: usize = 0;
-            while (i < limit) : (i += 1) {
-                if (i > 0) std.debug.print(", ", .{});
-                std.debug.print("{d:.4}", .{it.next().?.*});
-            }
-            if (self.numel() > limit) {
-                std.debug.print(", ... ({d} more)", .{self.numel() - limit});
-            }
-            std.debug.print("]\n", .{});
-        }
+pub fn printHead(self: Self, n: usize) void {
+             const limit = @min(n, self.numel());
+             debugz.dbg.print("[", .{});
+             var it = self.iterator();
+             var i: usize = 0;
+while (i < limit) : (i += 1) {
+                  if (i > 0) debugz.dbg.print(", ", .{});
+                  debugz.dbg.print("{d:.4}", .{it.next().?.*});
+              }
+if (self.numel() > limit) {
+                 debugz.dbg.print(", ... ({d} more)", .{self.numel() - limit});
+             }
+             debugz.dbg.print("]\n", .{});
+         }
 
         // ─── Iterador sobre elementos (maneja strides) ───
 
@@ -348,7 +348,10 @@ test "tensor transpose" {
 
     var tt = try t.transpose();
     defer {
-        if (tt.allocator) |a| { a.free(tt.shape); a.free(tt.strides); }
+        if (tt.allocator) |a| {
+            a.free(tt.shape);
+            a.free(tt.strides);
+        }
     }
 
     try std.testing.expectEqual(@as(usize, 3), tt.shape[0]);
@@ -362,8 +365,10 @@ test "tensor iterator" {
     var t = try Tensor(f32).alloc(allocator, &[_]usize{ 2, 2 });
     defer t.deinit();
 
-    t.set2(0, 0, 1); t.set2(0, 1, 2);
-    t.set2(1, 0, 3); t.set2(1, 1, 4);
+    t.set2(0, 0, 1);
+    t.set2(0, 1, 2);
+    t.set2(1, 0, 3);
+    t.set2(1, 1, 4);
 
     var it = t.iterator();
     try std.testing.expectApproxEqAbs(@as(f32, 1), it.next().?.*, 1e-6);

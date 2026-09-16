@@ -7,13 +7,13 @@ const matmul = @import("matmul");
 pub fn swiGluForward(
     engine: *matmul.MatmulEngine,
     comptime T: type,
-    x: Tensor(T),              // [batch*seq, hidden_dim]
-    w_gate_t: Tensor(T),       // [intermediate_dim, hidden_dim] transpuesto
-    w_up_t: Tensor(T),         // [intermediate_dim, hidden_dim] transpuesto
-    w_down_t: Tensor(T),       // [hidden_dim, intermediate_dim] transpuesto
-    gate_buf: *Tensor(T),      // [batch*seq, intermediate_dim]
-    up_buf: *Tensor(T),        // [batch*seq, intermediate_dim]
-    output: *Tensor(T),        // [batch*seq, hidden_dim]
+    x: Tensor(T), // [batch*seq, hidden_dim]
+    w_gate_t: Tensor(T), // [intermediate_dim, hidden_dim] transpuesto
+    w_up_t: Tensor(T), // [intermediate_dim, hidden_dim] transpuesto
+    w_down_t: Tensor(T), // [hidden_dim, intermediate_dim] transpuesto
+    gate_buf: *Tensor(T), // [batch*seq, intermediate_dim]
+    up_buf: *Tensor(T), // [batch*seq, intermediate_dim]
+    output: *Tensor(T), // [batch*seq, hidden_dim]
 ) !void {
     // 1. Proyecciones paralelas
     try engine.linearProjection(T, x, w_gate_t, gate_buf);

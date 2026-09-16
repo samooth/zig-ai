@@ -1,4 +1,3 @@
-
 //! FFI a OpenBLAS / CBLAS
 //! Requiere compilar con: zig build -Dopenblas=true
 
@@ -45,10 +44,10 @@ extern "c" fn cblas_dgemm(
     ldc: i32,
 ) void;
 
-const CblasRowMajor = 101;
-const CblasColMajor = 102;
-const CblasNoTrans = 111;
-const CblasTrans = 112;
+const CblasRowMajor: i32 = 101;
+const CblasColMajor: i32 = 102;
+const CblasNoTrans: i32 = 111;
+const CblasTrans: i32 = 112;
 
 /// GEMM via OpenBLAS
 /// A: [M, K], B: [K, N], C: [M, N]
@@ -77,24 +76,36 @@ pub fn gemmOpenBlas(
     if (T == f32) {
         cblas_sgemm(
             CblasRowMajor,
-            op_a, op_b,
-            @intCast(M), @intCast(N), @intCast(K),
+            op_a,
+            op_b,
+            @intCast(M),
+            @intCast(N),
+            @intCast(K),
             alpha,
-            A.data.ptr, lda,
-            B.data.ptr, ldb,
+            A.data.ptr,
+            lda,
+            B.data.ptr,
+            ldb,
             beta,
-            C.data.ptr, ldc,
+            C.data.ptr,
+            ldc,
         );
     } else if (T == f64) {
         cblas_dgemm(
             CblasRowMajor,
-            op_a, op_b,
-            @intCast(M), @intCast(N), @intCast(K),
+            op_a,
+            op_b,
+            @intCast(M),
+            @intCast(N),
+            @intCast(K),
             alpha,
-            A.data.ptr, lda,
-            B.data.ptr, ldb,
+            A.data.ptr,
+            lda,
+            B.data.ptr,
+            ldb,
             beta,
-            C.data.ptr, ldc,
+            C.data.ptr,
+            ldc,
         );
     } else {
         @compileError("OpenBLAS solo soporta f32 y f64");
@@ -106,5 +117,3 @@ pub fn isAvailable() bool {
     // En FFI siempre asumimos disponible si se linkó
     return true;
 }
-
-

@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # LINT (advisory: 36+ archivos legacy aún no pasan zig fmt)
+  # ─────────────────────────────────────────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+      - name: zig fmt check (advisory)
+        run: zig fmt --check src/ tests/ tui/src/ kernels/ benchmarks/
+        continue-on-error: true
+
+  # ─────────────────────────────────────────────────────────────
+  # BUILD NATIVE — Linux / macOS / Windows (CPU, GitHub-hosted)
+  # Windows: solo build (POSIX APIs impiden zig build test nativo)
+  # ─────────────────────────────────────────────────────────────
+  build-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux
+          - os: macos-14
+            target: aarch64-macos
+          - os: windows-latest
+            target: x86_64-windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+      - name: Build
+        run: zig build -Dtarget=${{ matrix.target }} --summary all
+
+  # ─────────────────────────────────────────────────────────────
+  # TEST CPU — Linux (GitHub-hosted)
+  # ─────────────────────────────────────────────────────────────
+  test-cpu:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize: [Debug, ReleaseFast]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+          cache-key: ${{ matrix.optimize }}
+      - name: Test ${{ matrix.optimize }}
+        run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
+
+  # ─────────────────────────────────────────────────────────────
+  # TEST CPU — Windows (GitHub-hosted)
+  # ⚠ Riesgo conocido: src usa POSIX APIs (clock_gettime, fchmod,
+  # nanosleep, pthread) que pueden romper el build/test nativo.
+  # Primer run = diagnóstico; si falla, documentar y desactivar.
+  # ─────────────────────────────────────────────────────────────
+  test-cpu-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+      - name: Test
+        run: zig build test --summary all
+
+  # ─────────────────────────────────────────────────────────────
+  # CUDA BUILD + TEST — self-hosted Linux GPU (Docker aislado)
+  # Seguridad: SOLO push a main + workflow_dispatch (nunca PRs
+  # de forks — el workflow corre código en TU máquina).
+  # Multi-arch: sm_80/sm_86/sm_90 (compila para todas; tests
+  # solo ejecutan en el hw real sm_86).
+  # ─────────────────────────────────────────────────────────────
+  cuda:
+    needs: [lint, build-native]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CUDA 12.9.2 — multi-arch
+          - cuda: "12.9.2"
+            gpu_arch: "sm_80"
+          - cuda: "12.9.2"
+            gpu_arch: "sm_86"
+          - cuda: "12.9.2"
+            gpu_arch: "sm_90"
+          # CUDA 13.0.0 — multi-arch
+          - cuda: "13.0.0"
+            gpu_arch: "sm_80"
+          - cuda: "13.0.0"
+            gpu_arch: "sm_86"
+          - cuda: "13.0.0"
+            gpu_arch: "sm_90"
+    runs-on: [self-hosted, linux, X64]
+    container:
+      image: nvidia/cuda:${{ matrix.cuda }}-devel-ubuntu24.04
+      options: --gpus all
+    env:
+      CUDA_PATH: /usr/local/cuda
+      ZIG_AI_GPU_ARCH: ${{ matrix.gpu_arch }}
+    steps:
+      - name: Container prereqs
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends curl ca-certificates xz-utils git
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+          use-tool-cache: true
+          cache-key: ${{ matrix.cuda }}-${{ matrix.gpu_arch }}
+      - name: Build (CUDA ${{ matrix.cuda }}, ${{ matrix.gpu_arch }})
+        run: zig build --summary all
+      - name: GPU smoke tests (solo hw real sm_86)
+        if: matrix.gpu_arch == 'sm_86'
+        run: |
+          zig build test-kvarn-wht --summary all
+          zig build test-kvarn-mma --summary all
+          zig build test-quant-encode --summary all
+          zig build test-kvq --summary all
+          zig build test-pafused --summary all
+          zig build test-moe-gpu --summary all

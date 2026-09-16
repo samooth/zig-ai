@@ -32,26 +32,40 @@ pub fn applyRoPE(Q: *Tensor(f16), K: *Tensor(f16), pos: usize, d: usize) void {
     }
 }
 
-pub fn isCausalAllowed(q_pos: usize, k_pos: usize) bool { return k_pos <= q_pos; }
+pub fn isCausalAllowed(q_pos: usize, k_pos: usize) bool {
+    return k_pos <= q_pos;
+}
 
 pub fn applyCausalMask(scores: []f32, N: usize) void {
-    for (0..N) |i| for (0..N) |j| if (j > i) scores[i * N + j] = -std.math.inf(f32);
+    for (0..N) |i| {
+        for (0..N) |j| {
+            if (j > i) scores[i * N + j] = -std.math.inf(f32);
+        }
+    }
 }
 
 pub fn softmax(input: []const f32, output: []f32) void {
     std.debug.assert(input.len == output.len);
     var max_val: f32 = -std.math.inf(f32);
-    for (input) |v| if (v > max_val) max_val = v;
+    for (input) |v| {
+        if (v > max_val) max_val = v;
+    }
     var sum: f32 = 0;
-    for (input, 0..) |v, i| { output[i] = @exp(v - max_val); sum += output[i]; }
+    for (input, 0..) |v, i| {
+        output[i] = @exp(v - max_val);
+        sum += output[i];
+    }
     for (output) |*v| v.* /= sum;
 }
 
 pub const OnlineSoftmax = struct {
-    m: f32 = -std.math.inf(f32), l: f32 = 0,
+    m: f32 = -std.math.inf(f32),
+    l: f32 = 0,
     pub fn update(self: *OnlineSoftmax, scores: []const f32) void {
         var m_local: f32 = -std.math.inf(f32);
-        for (scores) |s| if (s > m_local) m_local = s;
+        for (scores) |s| {
+            if (s > m_local) m_local = s;
+        }
         const m_new = if (m_local > self.m) m_local else self.m;
         const alpha = @exp(self.m - m_new);
         var l_local: f32 = 0;
@@ -60,33 +74,39 @@ pub const OnlineSoftmax = struct {
         self.m = m_new;
     }
     pub fn normalize(self: OnlineSoftmax, accum: []f32) void {
-        for (accum) |*v| v.* /= self.l;
+        for (accum) |*v| v.* = @exp(v.* - self.m) / self.l;
     }
 };
 
 pub fn initNormal(tensor: *Tensor(f16), mean: f32, stddev: f32, seed: u64) void {
-    var rng = std.rand.DefaultPrng.init(seed);
+    var rng = std.Random.DefaultPrng.init(seed);
     for (tensor.data) |*v| {
-        const u1 = rng.random().float(f32);
-        const u2 = rng.random().float(f32);
-        const z = @sqrt(-2.0 * @log(u1)) * @cos(2.0 * std.math.pi * u2);
+        const r1 = rng.random().float(f32);
+        const r2 = rng.random().float(f32);
+        const z = @sqrt(-2.0 * @log(r1)) * @cos(2.0 * std.math.pi * r2);
         v.* = @floatCast(mean + stddev * z);
     }
 }
 
 pub fn initUniform(tensor: *Tensor(f16), min: f32, max: f32, seed: u64) void {
-    var rng = std.rand.DefaultPrng.init(seed);
+    var rng = std.Random.DefaultPrng.init(seed);
     for (tensor.data) |*v| {
         const u = rng.random().float(f32);
         v.* = @floatCast(min + u * (max - min));
     }
 }
 
-pub inline fn f16ToF32(v: f16) f32 { return @as(f32, @floatCast(v)); }
-pub inline fn f32ToF16(v: f32) f16 { return @floatCast(v); }
+pub inline fn f16ToF32(v: f16) f32 {
+    return @as(f32, @floatCast(v));
+}
+pub inline fn f32ToF16(v: f32) f16 {
+    return @floatCast(v);
+}
 
 pub fn benchmark(comptime func: anytype, args: anytype, iterations: usize) u64 {
-    var timer = std.time.Timer.start() catch unreachable;
-    for (0..iterations) |_| { @call(.auto, func, args); }
-    return timer.read() / iterations;
+    const timer = @import("time").Timer.start();
+    for (0..iterations) |_| {
+        @call(.auto, func, args);
+    }
+    return @intCast(timer.read() / @as(i128, @intCast(iterations)));
 }

@@ -1,0 +1,170 @@
+# Roadmap
+
+> Estado actual: · Versión objetivo: v0.1.0 (Qwen3.5)
+
+## Completado
+
+- [x] Hybrid attention layer (DeltaNet SSM + full attention) para Qwen3.5/LFM2.5
+- [x] GGUF model loading (parser, metadata, dequant, ModelConfig)
+- [x] MMAP loading + tensor mapping para modelos reales
+- [x] CPU inference path
+- [x] BPE tokenizer pipeline
+- [x] Q4_K/Q6_K dequantization
+- [x] QuantWeight zero-copy weights
+- [x] Gated DeltaNet SSM layer
+- [x] Small-model loading fixes (tied lm_head, Q4_1)
+- [x] CUDA bindings + runtime sampling CLI
+- [x] GPU dequant for 14 GGML types (q4_0/q4_1/q5_k/q6_k/IQ4_XS/IQ3_S)
+- [x] GPU-resident hybrid layer decode (~20-75 tok/s)
+- [x] GPU weight residency cache + dequant-once (~11x faster)
+- [x] Batched quantized GEMM kernels for prefill
+- [x] Chunked prefill for hybrid Qwen3.5
+- [x] CUFunction handle caching + decodeDevice stream optimizations
+- [x] SSM kernel fusion (sigmoid+gate, conv1d+silu)
+- [x] Vectorized greedy sampling
+- [x] CUDA graph capture + replay for decode
+- [x] Prefill UAF fix + cuGraphInstantiate crash fix
+- [x] paged-attention online-softmax rescaling fix
+- [x] Auto-detect GPU architecture
+- [x] Quantized KV cache compatible with llama.cpp (q8_0/q4_0/q4_1)
+- [x] Real quantized K/V store + dequant-on-read
+- [x] PagedKVCache integrated in hybrid attention
+- [x] PagedAttention CUDA kernels + GPU engine
+- [x] Scheduler with preemption + prefix cache
+- [x] Block allocator with COW + CPU swap
+- [x] Prefix cache block reuse + preemption/restore
+- [x] Prefix cache hit-rate metrics + CPU offload swap
+- [x] Proactive eviction of stale prefix blocks
+- [x] Persistent GPU block pool (block-granular stage/evict)
+- [x] GPU cold-block eviction by prefix-cache hit rate
+- [x] Hybrid paginated path by default
+- [x] Automatic path detection (removes --legacy)
+- [x] Q2_K/Q3_K/Q8_K dequant + real encoders
+- [x] IQ4_NL/IQ2_XXS/IQ2_XS/IQ3_XXS/IQ1_S/IQ2_S/IQ1_M/TQ1_0/TQ2_0/MXFP4 support
+- [x] DP4a kernels for 9 exotic qtypes (M=1)
+- [x] DP4a dispatch integrated in qgemmLinear
+- [x] Q4_0 split-layout dequant fix (llama.cpp parity)
+- [x] Cooperative IQ appends (512 threads, 1800x speedup)
+- [x] mmqQ8_0W GEMV kernel (97.7% parity)
+- [x] Q4_0 GEMV split-16 (dp4a)
+- [x] IQ1_S/IQ3_S fused-decode in extra cubin
+- [x] Universal prefill 19/22 formats
+- [x] Real K-quant encoders (q2_k + q3_k, no OOB)
+- [x] KV Appends: q4_0/q4_k/q8_0/IQ1_S/IQ3_S/IQ4_NL/IQ2_XXS/IQ2_XS/IQ3_XXS/IQ1_M/TQ2_0/MXFP4
+- [x] Layer streaming Phase 1+2 (AirLLM-style)
+- [x] ActivationPool in CPU forward
+- [x] VramBudget in runHybridInference
+- [x] GPU weight cache warm-up before CUDA graph capture
+- [x] LRU eviction with cache invalidation
+- [x] LayerStreamer deinit fix (use-after-free)
+- [x] cuDeviceTotalMem_v2 for VRAM >4GB
+- [x] AirLLM layer streaming user guide
+- [x] Qwen3.5 Hybrid architecture docs
+- [x] LFM2.5 architecture docs
+- [x] Central documentation index
+- [x] README CLI table
+- [x] 100/100 test pass with GGUF_MODEL_PATH
+- [x] 128-token capture matrix
+- [x] SSM fixtures fix + GPU tests on Zig 0.16
+- [x] Structured debug output (DEBUG_FORMAT=json)
+- [x] Scratch step + tag normalization
+- [x] Test runner budget cap
+- [x] CLIP ViT encoder + Qwen-VL projector
+- [x] Image/video preprocessing (stb_image + ffmpeg)
+- [x] m-rope vision embeddings
+- [x] Multi-image and video input support
+
+## Planned
+
+- [ ] Gated recurrent feedback
+- [ ] KV spill to CPU
+- [ ] Bounded SWA per decoder layer
+- [ ] K2-Horizon Grouped RMSNorm GPU
+- [ ] K2-Horizon MoVA routing GPU
+- [ ] Fused ΔNet CUDA kernel
+- [ ] Chunked batched ΔNet prefill
+- [ ] Eliminate per-token host allocs
+- [ ] KVarN D64 GPU store kernel
+- [ ] KVarN D64 portable FA
+- [ ] HostBank + q* hybrid split
+- [ ] CPU executor complete
+- [ ] q* auto-split bandwidth matching
+- [ ] Async DMA GPU↔CPU
+- [ ] Fix DFlash kvInject crash
+- [ ] DeepSeek-V4.1 complete support
+- [ ] KV-inject + denoise Phase B
+- [ ] Lookup-fill n-gram configurable
+- [ ] Adaptive draft-max A/B
+- [ ] Pre-norm embeddings MTP extraction
+- [ ] RecurrentPrefill pipeline R-3
+- [ ] R-4 A/B RLT feedback vs PPL
+- [ ] KT-A Phase 2 real capture
+- [ ] KT-D Hybrid study
+- [ ] Expert store.zig
+- [ ] K2-Horizon golden parity
+- [ ] KT-B v2 dual-load cross-model
+- [ ] R-2 --exact-replay
+- [ ] Expert prefetch N-ahead
+- [ ] Expert layerwise streaming
+- [ ] Rebuild elastic resize
+- [ ] Unified prompt-response transition
+- [ ] Encoder memory prefix caching
+- [ ] MoE bundle p2-v2 prefetch
+- [ ] Predictor neuron-level
+- [ ] Neuron split relu/down
+- [ ] Oversubscription CPU cap
+- [ ] Scoped breadcrumbs DEBUG_SCOPE
+- [ ] Unified [tag] prefixes
+- [ ] zig build dbg scratch step
+- [ ] JSON dumps DEBUG_FORMAT
+- [ ] G1 decode attn re-profiling
+- [ ] iq2-prefill gap vs q4_0
+- [ ] Dispatch compile-time per format
+- [ ] selectTileParams auto-tuning
+- [ ] CUDA Graph perf bug fix
+- [ ] lm_head MMQ split-K tiling
+- [ ] D64 bench A/B
+- [ ] 27B complete benchmark
+- [ ] MTP speculative matrix v2
+- [ ] Consolidate GPU encoder
+- [ ] Deepstack VLM support
+- [ ] Window attention VLM
+- [ ] Image embedding cache
+- [ ] Additional projectors
+- [ ] Audio support
+- [ ] Unified LFRU tier manager
+- [ ] Flip .iq1_m
+- [ ] iq1_m canonical variant
+- [ ] iq1-narrow forks
+- [ ] Full family parity R2
+- [ ] TAG v0.1.0
+- [ ] K2-Horizon golden parity
+- [ ] KT-C Latency bench A/B
+- [ ] KV-Codec step 2 tANS
+- [ ] Exact replay speculative decode
+- [ ] CSA2 sparse attention
+- [ ] mHC + Engram + DSpark
+- [ ] KV precision-tail persistence
+- [ ] Reasoning-loop guard
+- [ ] Debug recipes AGENTS.md
+- [ ] Cleanup trash test files
+- [ ] Adaptive q* per layer
+- [ ] Capability-based routing
+- [ ] KV q8_0 decode optimization
+- [ ] Decode degradation long context
+- [ ] Window attention VLM
+- [ ] Image embedding cache
+- [ ] Additional projectors
+- [ ] Audio support
+- [ ] Additional quant TQ3_1S/TQ4_1S
+- [ ] 4 KV-quant formats reactivation
+- [ ] Build IFM llama.cpp fork
+- [ ] KLD measurement tool
+- [ ] INI presets CLI
+- [ ] Cross-token state BitNet
+- [ ] Loop-guard visible output
+- [ ] Video support n_batch=2
+- [ ] Multi-image/batch processing
+- [ ] Disk as active tier io_uring
+
+[This roadmap in English](ROADMAP.md)

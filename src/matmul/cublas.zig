@@ -1,4 +1,3 @@
-
 //! FFI a NVIDIA cuBLAS — Avanzado
 //! Incluye: streams async, batch GEMM, strided GEMM, mem pool persistente,
 //! cublasGemmEx para precisión mixta FP16/BF16.
@@ -6,67 +5,118 @@
 
 const std = @import("std");
 const Tensor = @import("core").Tensor;
+const time = @import("time");
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Declaraciones externas CUDA / cuBLAS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-extern "c" fn cublasCreate(handle: **anyopaque) i32;
-extern "c" fn cublasDestroy(handle: *anyopaque) void;
-extern "c" fn cublasSetStream(handle: *anyopaque, stream: *anyopaque) i32;
-extern "c" fn cublasGetStream(handle: *anyopaque, stream: **anyopaque) i32;
+extern "c" fn cublasCreate_v2(handle: **anyopaque) i32;
+extern "c" fn cublasDestroy_v2(handle: *anyopaque) void;
+extern "c" fn cublasSetStream_v2(handle: *anyopaque, stream: *anyopaque) i32;
+extern "c" fn cublasGetStream_v2(handle: *anyopaque, stream: **anyopaque) i32;
 
-extern "c" fn cublasSgemm(
-    handle: *anyopaque, transa: i32, transb: i32,
-    m: i32, n: i32, k: i32,
-    alpha: *const f32, A: *const anyopaque, lda: i32,
-    B: *const anyopaque, ldb: i32,
-    beta: *const f32, C: *anyopaque, ldc: i32,
+extern "c" fn cublasSgemm_v2(
+    handle: *anyopaque,
+    transa: i32,
+    transb: i32,
+    m: i32,
+    n: i32,
+    k: i32,
+    alpha: *const f32,
+    A: *const anyopaque,
+    lda: i32,
+    B: *const anyopaque,
+    ldb: i32,
+    beta: *const f32,
+    C: *anyopaque,
+    ldc: i32,
 ) i32;
 
 extern "c" fn cublasHgemm(
-    handle: *anyopaque, transa: i32, transb: i32,
-    m: i32, n: i32, k: i32,
-    alpha: *const anyopaque, A: *const anyopaque, lda: i32,
-    B: *const anyopaque, ldb: i32,
-    beta: *const anyopaque, C: *anyopaque, ldc: i32,
+    handle: *anyopaque,
+    transa: i32,
+    transb: i32,
+    m: i32,
+    n: i32,
+    k: i32,
+    alpha: *const anyopaque,
+    A: *const anyopaque,
+    lda: i32,
+    B: *const anyopaque,
+    ldb: i32,
+    beta: *const anyopaque,
+    C: *anyopaque,
+    ldc: i32,
 ) i32;
 
 extern "c" fn cublasGemmEx(
     handle: *anyopaque,
-    transa: i32, transb: i32,
-    m: i32, n: i32, k: i32,
+    transa: i32,
+    transb: i32,
+    m: i32,
+    n: i32,
+    k: i32,
     alpha: *const anyopaque,
-    A: *const anyopaque, cuda_type_A: i32, lda: i32,
-    B: *const anyopaque, cuda_type_B: i32, ldb: i32,
+    A: *const anyopaque,
+    cuda_type_A: i32,
+    lda: i32,
+    B: *const anyopaque,
+    cuda_type_B: i32,
+    ldb: i32,
     beta: *const anyopaque,
-    C: *anyopaque, cuda_type_C: i32, ldc: i32,
-    compute_type: i32, algo: i32,
+    C: *anyopaque,
+    cuda_type_C: i32,
+    ldc: i32,
+    compute_type: i32,
+    algo: i32,
 ) i32;
 
 extern "c" fn cublasSgemmStridedBatched(
     handle: *anyopaque,
-    transa: i32, transb: i32,
-    m: i32, n: i32, k: i32,
+    transa: i32,
+    transb: i32,
+    m: i32,
+    n: i32,
+    k: i32,
     alpha: *const f32,
-    A: *const anyopaque, lda: i32, strideA: i64,
-    B: *const anyopaque, ldb: i32, strideB: i64,
+    A: *const anyopaque,
+    lda: i32,
+    strideA: i64,
+    B: *const anyopaque,
+    ldb: i32,
+    strideB: i64,
     beta: *const f32,
-    C: *anyopaque, ldc: i32, strideC: i64,
+    C: *anyopaque,
+    ldc: i32,
+    strideC: i64,
     batchCount: i32,
 ) i32;
 
 extern "c" fn cublasGemmStridedBatchedEx(
     handle: *anyopaque,
-    transa: i32, transb: i32,
-    m: i32, n: i32, k: i32,
+    transa: i32,
+    transb: i32,
+    m: i32,
+    n: i32,
+    k: i32,
     alpha: *const anyopaque,
-    A: *const anyopaque, cuda_type_A: i32, lda: i32, strideA: i64,
-    B: *const anyopaque, cuda_type_B: i32, ldb: i32, strideB: i64,
+    A: *const anyopaque,
+    cuda_type_A: i32,
+    lda: i32,
+    strideA: i64,
+    B: *const anyopaque,
+    cuda_type_B: i32,
+    ldb: i32,
+    strideB: i64,
     beta: *const anyopaque,
-    C: *anyopaque, cuda_type_C: i32, ldc: i32, strideC: i64,
+    C: *anyopaque,
+    cuda_type_C: i32,
+    ldc: i32,
+    strideC: i64,
     batchCount: i32,
-    compute_type: i32, algo: i32,
+    compute_type: i32,
+    algo: i32,
 ) i32;
 
 // CUDA runtime
@@ -86,8 +136,8 @@ const cudaMemcpyHostToDevice = 1;
 const cudaMemcpyDeviceToHost = 2;
 const cudaMemcpyDeviceToDevice = 3;
 
-const CUBLAS_OP_N = 0;
-const CUBLAS_OP_T = 1;
+const CUBLAS_OP_N: c_int = 0;
+const CUBLAS_OP_T: c_int = 1;
 const CUBLAS_STATUS_SUCCESS = 0;
 
 // CUDA data types para GemmEx
@@ -109,6 +159,20 @@ const CUBLAS_COMPUTE_32F_FAST_TF32 = 77;
 
 const CUBLAS_GEMM_DEFAULT = -1;
 
+/// Convierte en host la salida de cuBLAS (column-major, ldc=M) a row-major
+/// [rows, cols]: cuBLAS escribe `buf[i + rows*j] = C[i][j]`; aquí lo movemos
+/// a `C[i*cols + j]`. (No es un transpose: el shape [rows, cols] se conserva.)
+fn colMajorToRowMajor(data: []f32, rows: usize, cols: usize) !void {
+    const tmp = try std.heap.c_allocator.alloc(f32, data.len);
+    defer std.heap.c_allocator.free(tmp);
+    for (0..rows) |i| {
+        for (0..cols) |j| {
+            tmp[i * cols + j] = data[i + rows * j];
+        }
+    }
+    @memcpy(data, tmp);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CuBlasHandle — con soporte de streams
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -119,7 +183,7 @@ pub const CuBlasHandle = struct {
 
     pub fn init() !CuBlasHandle {
         var raw: *anyopaque = undefined;
-        const status = cublasCreate(&raw);
+        const status = cublasCreate_v2(&raw);
         if (status != CUBLAS_STATUS_SUCCESS) {
             std.log.err("cublasCreate failed: {}", .{status});
             return error.CuBlasInitFailed;
@@ -128,12 +192,12 @@ pub const CuBlasHandle = struct {
     }
 
     pub fn deinit(self: CuBlasHandle) void {
-        _ = cublasDestroy(self.raw);
+        _ = cublasDestroy_v2(self.raw);
     }
 
     /// Asociar un stream CUDA para operaciones async
-    pub fn setStream(self: CuBlasHandle, stream: *anyopaque) !void {
-        const status = cublasSetStream(self.raw, stream);
+    pub fn setStream(self: *CuBlasHandle, stream: *anyopaque) !void {
+        const status = cublasSetStream_v2(self.raw, stream);
         if (status != CUBLAS_STATUS_SUCCESS) return error.CuBlasSetStreamFailed;
         self.stream = stream;
     }
@@ -240,6 +304,25 @@ pub fn GpuBuffer(comptime T: type) type {
     };
 }
 
+/// Tensor que vive íntegramente en GPU (sin ida/vuelta a host por matmul).
+/// Usado por la ruta fused GPU-resident de la capa híbrida.
+pub fn GpuTensor(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        buf: GpuBuffer(T),
+
+        pub fn alloc(n: usize) !Self {
+            return .{ .buf = try GpuBuffer(T).alloc(n) };
+        }
+        pub fn ptr(self: Self) usize {
+            return @intFromPtr(self.buf.dev_ptr);
+        }
+        pub fn deinit(self: Self) void {
+            self.buf.free();
+        }
+    };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // GpuMemoryPool — gestión persistente de memoria GPU
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -258,7 +341,7 @@ pub const GpuMemoryPool = struct {
     pub fn init(allocator: std.mem.Allocator) GpuMemoryPool {
         return GpuMemoryPool{
             .allocator = allocator,
-            .blocks = std.ArrayList(Block).init(allocator),
+            .blocks = .empty,
             .stream = null,
         };
     }
@@ -267,7 +350,7 @@ pub const GpuMemoryPool = struct {
         for (self.blocks.items) |block| {
             _ = cudaFree(block.ptr);
         }
-        self.blocks.deinit();
+        self.blocks.deinit(self.allocator);
     }
 
     pub fn setStream(self: *GpuMemoryPool, stream: *anyopaque) void {
@@ -293,7 +376,7 @@ pub const GpuMemoryPool = struct {
 
         if (status != 0) return error.CudaMallocFailed;
 
-        try self.blocks.append(Block{ .ptr = ptr, .size = size, .in_use = true });
+        try self.blocks.append(self.allocator, Block{ .ptr = ptr, .size = size, .in_use = true });
         return ptr;
     }
 
@@ -308,7 +391,7 @@ pub const GpuMemoryPool = struct {
     }
 
     /// Liberar todos los bloques no en uso
-    pub defragment(self: *GpuMemoryPool) void {
+    pub fn defragment(self: *GpuMemoryPool) void {
         var i: usize = self.blocks.items.len;
         while (i > 0) : (i -= 1) {
             const block = &self.blocks.items[i - 1];
@@ -319,7 +402,9 @@ pub const GpuMemoryPool = struct {
         }
     }
 
-    pub fn stats(self: GpuMemoryPool) struct { total: usize, used: usize, free: usize } {
+    pub const PoolStats = struct { total: usize, used: usize, free: usize };
+
+    pub fn stats(self: GpuMemoryPool) PoolStats {
         var total: usize = 0;
         var used: usize = 0;
         for (self.blocks.items) |block| {
@@ -361,21 +446,29 @@ pub fn gemmCuBlasF32(
     defer d_C.free();
     try d_C.upload(C.data);
 
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    // Tensores ROW-MAJOR; cuBLAS es COLUMN-MAJOR. Un tensor row-major [R, C]
+    // se pasa como su transpuesto column-major con op='T' y leading dim = C.
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
-    const status = cublasSgemm(
+    const status = cublasSgemm_v2(
         handle.raw,
-        op_a, op_b,
-        @intCast(M), @intCast(N), @intCast(K),
+        op_a,
+        op_b,
+        @intCast(M),
+        @intCast(N),
+        @intCast(K),
         &alpha,
-        d_A.dev_ptr, lda,
-        d_B.dev_ptr, ldb,
+        d_A.dev_ptr,
+        lda,
+        d_B.dev_ptr,
+        ldb,
         &beta,
-        d_C.dev_ptr, ldc,
+        d_C.dev_ptr,
+        ldc,
     );
 
     if (status != CUBLAS_STATUS_SUCCESS) {
@@ -384,7 +477,141 @@ pub fn gemmCuBlasF32(
     }
 
     try d_C.download(C.data);
+    // cuBLAS escribe C column-major → transponer a row-major
+    try colMajorToRowMajor(C.data, M, N);
     handle.sync();
+}
+
+/// GEMM f32 donde B (los pesos) YA está residente en el device (d_B). Solo se
+/// sube A (activación, pequeña) y se descarga C. Evita re-subir los pesos en
+/// cada token de generación (el cuello de botella original de este engine).
+// ─── Scratch GPU pool compartido (evita cudaMalloc/cudaFree por cada GEMM) ───
+var g_scratch_pool: GpuMemoryPool = undefined;
+var g_scratch_pool_init = false;
+
+fn scratchPool() !*GpuMemoryPool {
+    if (!g_scratch_pool_init) {
+        g_scratch_pool = GpuMemoryPool.init(std.heap.c_allocator);
+        g_scratch_pool_init = true;
+    }
+    return &g_scratch_pool;
+}
+
+// ─── Instrumentación de rendimiento (DBG) ───
+
+pub fn gemmCuBlasF32Resident(
+    handle: CuBlasHandle,
+    A: Tensor(f32),
+    d_B: GpuBuffer(f32),
+    C: *Tensor(f32),
+    M: usize,
+    N: usize,
+    K: usize,
+    trans_a: bool,
+    trans_b: bool,
+    alpha: f32,
+    beta: f32,
+) !void {
+    std.debug.assert(A.isContiguous() and C.isContiguous());
+
+    const pool = try scratchPool();
+    const bytes_a = A.data.len * @sizeOf(f32);
+    const bytes_c = C.data.len * @sizeOf(f32);
+
+    const d_A_ptr = try pool.acquire(bytes_a);
+    defer pool.release(d_A_ptr);
+    const d_C_ptr = try pool.acquire(bytes_c);
+    defer pool.release(d_C_ptr);
+
+    // Subir A (H2D). C solo se sube si beta != 0 (los callers pasan 0, así que
+    // el resultado es puramente alpha*A*B y la subida de C es desperdicio).
+    if (cudaMemcpy(d_A_ptr, A.data.ptr, bytes_a, cudaMemcpyHostToDevice) != 0) {
+        return error.CudaMemcpyFailed;
+    }
+    if (beta != 0) {
+        if (cudaMemcpy(d_C_ptr, C.data.ptr, bytes_c, cudaMemcpyHostToDevice) != 0) {
+            return error.CudaMemcpyFailed;
+        }
+    }
+
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
+    const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
+    const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
+    const ldc: i32 = @intCast(M);
+
+    const status = cublasSgemm_v2(
+        handle.raw,
+        op_a,
+        op_b,
+        @intCast(M),
+        @intCast(N),
+        @intCast(K),
+        &alpha,
+        d_A_ptr,
+        lda,
+        d_B.dev_ptr,
+        ldb,
+        &beta,
+        d_C_ptr,
+        ldc,
+    );
+
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        std.log.err("cublasSgemm (resident) failed: {}", .{status});
+        return error.CuBlasGemmFailed;
+    }
+
+    if (cudaMemcpy(C.data.ptr, d_C_ptr, bytes_c, cudaMemcpyDeviceToHost) != 0) {
+        return error.CudaMemcpyFailed;
+    }
+    // Para M==1 (decode) column-major == row-major: no hace falta transponer.
+    if (M != 1) try colMajorToRowMajor(C.data, M, N);
+    handle.sync();
+}
+
+/// GEMM device→device: A, B y C ya viven en GPU. NO hace H2D/D2H ni sincroniza;
+/// el llamador sincroniza el stream una sola vez por token. Devuelve al
+/// retornar la GEMM está encolada en el stream por defecto de cuBLAS.
+pub fn gemmCuBlasF32Device(
+    handle: CuBlasHandle,
+    d_A: GpuBuffer(f32),
+    d_B: GpuBuffer(f32),
+    d_C: GpuBuffer(f32),
+    M: usize,
+    N: usize,
+    K: usize,
+    trans_a: bool,
+    trans_b: bool,
+    alpha: f32,
+    beta: f32,
+) !void {
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
+    const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
+    const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
+    const ldc: i32 = @intCast(M);
+
+    const status = cublasSgemm_v2(
+        handle.raw,
+        op_a,
+        op_b,
+        @intCast(M),
+        @intCast(N),
+        @intCast(K),
+        &alpha,
+        d_A.dev_ptr,
+        lda,
+        d_B.dev_ptr,
+        ldb,
+        &beta,
+        d_C.dev_ptr,
+        ldc,
+    );
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        std.log.err("cublasSgemm (device) failed: {}", .{status});
+        return error.CuBlasGemmFailed;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -408,7 +635,8 @@ pub fn gemmCuBlasF32Async(
 ) !void {
     std.debug.assert(A.isContiguous() and B.isContiguous() and C.isContiguous());
 
-    try handle.setStream(stream.raw);
+    var h = handle;
+    try h.setStream(stream.raw);
 
     const size_A = A.data.len * @sizeOf(f32);
     const size_B = B.data.len * @sizeOf(f32);
@@ -429,32 +657,40 @@ pub fn gemmCuBlasF32Async(
     const status_h2d_b = cudaMemcpyAsync(d_B_ptr, B.data.ptr, size_B, cudaMemcpyHostToDevice, stream.raw);
     if (status_h2d_b != 0) return error.CudaMemcpyAsyncFailed;
 
-    // GEMM async en stream
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    // GEMM async en stream (tensores row-major → op='T', leading dim = cols)
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
-    const status = cublasSgemm(
-        handle.raw,
-        op_a, op_b,
-        @intCast(M), @intCast(N), @intCast(K),
+    const status = cublasSgemm_v2(
+        h.raw,
+        op_a,
+        op_b,
+        @intCast(M),
+        @intCast(N),
+        @intCast(K),
         &alpha,
-        d_A_ptr, lda,
-        d_B_ptr, ldb,
+        d_A_ptr,
+        lda,
+        d_B_ptr,
+        ldb,
         &beta,
-        d_C_ptr, ldc,
+        d_C_ptr,
+        ldc,
     );
 
     if (status != CUBLAS_STATUS_SUCCESS) {
         std.log.err("cublasSgemm async failed: {}", .{status});
         return error.CuBlasGemmFailed;
     }
-
     // Download async
     const status_d2h = cudaMemcpyAsync(C.data.ptr, d_C_ptr, size_C, cudaMemcpyDeviceToHost, stream.raw);
     if (status_d2h != 0) return error.CudaMemcpyAsyncFailed;
+    stream.synchronize();
+    // cuBLAS escribe C column-major → transponer a row-major
+    try colMajorToRowMajor(C.data, M, N);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -496,7 +732,9 @@ pub fn gemmBatchF32(
         const offset = b * M * K;
         const status = cudaMemcpy(
             @ptrCast(@alignCast(@as([*]u8, @ptrCast(d_A.dev_ptr)) + offset * @sizeOf(f32))),
-            A.data.ptr, A.data.len * @sizeOf(f32), cudaMemcpyHostToDevice,
+            A.data.ptr,
+            A.data.len * @sizeOf(f32),
+            cudaMemcpyHostToDevice,
         );
         if (status != 0) return error.CudaMemcpyFailed;
     }
@@ -505,7 +743,9 @@ pub fn gemmBatchF32(
         const offset = b * K * N;
         const status = cudaMemcpy(
             @ptrCast(@alignCast(@as([*]u8, @ptrCast(d_B.dev_ptr)) + offset * @sizeOf(f32))),
-            B.data.ptr, B.data.len * @sizeOf(f32), cudaMemcpyHostToDevice,
+            B.data.ptr,
+            B.data.len * @sizeOf(f32),
+            cudaMemcpyHostToDevice,
         );
         if (status != 0) return error.CudaMemcpyFailed;
     }
@@ -514,16 +754,18 @@ pub fn gemmBatchF32(
         const offset = b * M * N;
         const status = cudaMemcpy(
             @ptrCast(@alignCast(@as([*]u8, @ptrCast(d_C.dev_ptr)) + offset * @sizeOf(f32))),
-            C.data.ptr, C.data.len * @sizeOf(f32), cudaMemcpyHostToDevice,
+            C.data.ptr,
+            C.data.len * @sizeOf(f32),
+            cudaMemcpyHostToDevice,
         );
         if (status != 0) return error.CudaMemcpyFailed;
     }
 
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
     const strideA: i64 = @intCast(M * K);
     const strideB: i64 = @intCast(K * N);
@@ -531,13 +773,22 @@ pub fn gemmBatchF32(
 
     const status = cublasSgemmStridedBatched(
         handle.raw,
-        op_a, op_b,
-        @intCast(M), @intCast(N), @intCast(K),
+        op_a,
+        op_b,
+        @intCast(M),
+        @intCast(N),
+        @intCast(K),
         &alpha,
-        d_A.dev_ptr, lda, strideA,
-        d_B.dev_ptr, ldb, strideB,
+        d_A.dev_ptr,
+        lda,
+        strideA,
+        d_B.dev_ptr,
+        ldb,
+        strideB,
         &beta,
-        d_C.dev_ptr, ldc, strideC,
+        d_C.dev_ptr,
+        ldc,
+        strideC,
         @intCast(batchCount),
     );
 
@@ -549,12 +800,13 @@ pub fn gemmBatchF32(
     // Download batch
     for (C_batch, 0..) |C, b| {
         const offset = b * M * N;
-        const status = cudaMemcpy(
+        const copy_status = cudaMemcpy(
             C.data.ptr,
             @ptrCast(@alignCast(@as([*]u8, @ptrCast(d_C.dev_ptr)) + offset * @sizeOf(f32))),
-            C.data.len * @sizeOf(f32), cudaMemcpyDeviceToHost,
+            C.data.len * @sizeOf(f32),
+            cudaMemcpyDeviceToHost,
         );
-        if (status != 0) return error.CudaMemcpyFailed;
+        if (copy_status != 0) return error.CudaMemcpyFailed;
     }
 
     handle.sync();
@@ -602,21 +854,30 @@ pub fn gemmStridedF32(
     defer d_C.free();
     try d_C.upload(C_flat[0..total_C]);
 
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
     const status = cublasSgemmStridedBatched(
         handle.raw,
-        op_a, op_b,
-        @intCast(M), @intCast(N), @intCast(K),
+        op_a,
+        op_b,
+        @intCast(M),
+        @intCast(N),
+        @intCast(K),
         &alpha,
-        d_A.dev_ptr, lda, strideA,
-        d_B.dev_ptr, ldb, strideB,
+        d_A.dev_ptr,
+        lda,
+        strideA,
+        d_B.dev_ptr,
+        ldb,
+        strideB,
         &beta,
-        d_C.dev_ptr, ldc, strideC,
+        d_C.dev_ptr,
+        ldc,
+        strideC,
         @intCast(batchCount),
     );
 
@@ -662,21 +923,30 @@ pub fn gemmExF16F32(
     defer d_C.free();
     try d_C.upload(C.data);
 
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
     const status = cublasGemmEx(
         handle.raw,
-        op_a, op_b,
-        @intCast(M), @intCast(N), @intCast(K),
+        op_a,
+        op_b,
+        @intCast(M),
+        @intCast(N),
+        @intCast(K),
         &alpha,
-        d_A.dev_ptr, CUDA_R_16F, lda,
-        d_B.dev_ptr, CUDA_R_16F, ldb,
+        d_A.dev_ptr,
+        CUDA_R_16F,
+        lda,
+        d_B.dev_ptr,
+        CUDA_R_16F,
+        ldb,
         &beta,
-        d_C.dev_ptr, CUDA_R_32F, ldc,
+        d_C.dev_ptr,
+        CUDA_R_32F,
+        ldc,
         CUBLAS_COMPUTE_32F_FAST_16F,
         CUBLAS_GEMM_DEFAULT,
     );
@@ -719,21 +989,30 @@ pub fn gemmExBF16F32(
     defer d_C.free();
     try d_C.upload(C.data);
 
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
     const status = cublasGemmEx(
         handle.raw,
-        op_a, op_b,
-        @intCast(M), @intCast(N), @intCast(K),
+        op_a,
+        op_b,
+        @intCast(M),
+        @intCast(N),
+        @intCast(K),
         &alpha,
-        d_A.dev_ptr, CUDA_R_16BF, lda,
-        d_B.dev_ptr, CUDA_R_16BF, ldb,
+        d_A.dev_ptr,
+        CUDA_R_16BF,
+        lda,
+        d_B.dev_ptr,
+        CUDA_R_16BF,
+        ldb,
         &beta,
-        d_C.dev_ptr, CUDA_R_32F, ldc,
+        d_C.dev_ptr,
+        CUDA_R_32F,
+        ldc,
         CUBLAS_COMPUTE_32F_FAST_16BF,
         CUBLAS_GEMM_DEFAULT,
     );
@@ -781,7 +1060,9 @@ pub fn gemmBatchExF16F32(
         const offset = b * M * K;
         const status = cudaMemcpy(
             @ptrCast(@alignCast(@as([*]u8, @ptrCast(d_A.dev_ptr)) + offset * @sizeOf(f16))),
-            A.data.ptr, A.data.len * @sizeOf(f16), cudaMemcpyHostToDevice,
+            A.data.ptr,
+            A.data.len * @sizeOf(f16),
+            cudaMemcpyHostToDevice,
         );
         if (status != 0) return error.CudaMemcpyFailed;
     }
@@ -790,7 +1071,9 @@ pub fn gemmBatchExF16F32(
         const offset = b * K * N;
         const status = cudaMemcpy(
             @ptrCast(@alignCast(@as([*]u8, @ptrCast(d_B.dev_ptr)) + offset * @sizeOf(f16))),
-            B.data.ptr, B.data.len * @sizeOf(f16), cudaMemcpyHostToDevice,
+            B.data.ptr,
+            B.data.len * @sizeOf(f16),
+            cudaMemcpyHostToDevice,
         );
         if (status != 0) return error.CudaMemcpyFailed;
     }
@@ -799,16 +1082,18 @@ pub fn gemmBatchExF16F32(
         const offset = b * M * N;
         const status = cudaMemcpy(
             @ptrCast(@alignCast(@as([*]u8, @ptrCast(d_C.dev_ptr)) + offset * @sizeOf(f32))),
-            C.data.ptr, C.data.len * @sizeOf(f32), cudaMemcpyHostToDevice,
+            C.data.ptr,
+            C.data.len * @sizeOf(f32),
+            cudaMemcpyHostToDevice,
         );
         if (status != 0) return error.CudaMemcpyFailed;
     }
 
-    const op_a = if (trans_a) CUBLAS_OP_T else CUBLAS_OP_N;
-    const op_b = if (trans_b) CUBLAS_OP_T else CUBLAS_OP_N;
+    const op_a = if (trans_a) CUBLAS_OP_N else CUBLAS_OP_T;
+    const op_b = if (trans_b) CUBLAS_OP_N else CUBLAS_OP_T;
     const lda: i32 = if (trans_a) @intCast(M) else @intCast(K);
     const ldb: i32 = if (trans_b) @intCast(K) else @intCast(N);
-    const ldc: i32 = @intCast(N);
+    const ldc: i32 = @intCast(M);
 
     const strideA: i64 = @intCast(M * K);
     const strideB: i64 = @intCast(K * N);
@@ -816,13 +1101,25 @@ pub fn gemmBatchExF16F32(
 
     const status = cublasGemmStridedBatchedEx(
         handle.raw,
-        op_a, op_b,
-        @intCast(M), @intCast(N), @intCast(K),
+        op_a,
+        op_b,
+        @intCast(M),
+        @intCast(N),
+        @intCast(K),
         &alpha,
-        d_A.dev_ptr, CUDA_R_16F, lda, strideA,
-        d_B.dev_ptr, CUDA_R_16F, ldb, strideB,
+        d_A.dev_ptr,
+        CUDA_R_16F,
+        lda,
+        strideA,
+        d_B.dev_ptr,
+        CUDA_R_16F,
+        ldb,
+        strideB,
         &beta,
-        d_C.dev_ptr, CUDA_R_32F, ldc, strideC,
+        d_C.dev_ptr,
+        CUDA_R_32F,
+        ldc,
+        strideC,
         @intCast(batchCount),
         CUBLAS_COMPUTE_32F_FAST_16F,
         CUBLAS_GEMM_DEFAULT,
@@ -836,12 +1133,13 @@ pub fn gemmBatchExF16F32(
     // Download
     for (C_batch, 0..) |C, b| {
         const offset = b * M * N;
-        const status = cudaMemcpy(
+        const copy_status = cudaMemcpy(
             C.data.ptr,
             @ptrCast(@alignCast(@as([*]u8, @ptrCast(d_C.dev_ptr)) + offset * @sizeOf(f32))),
-            C.data.len * @sizeOf(f32), cudaMemcpyDeviceToHost,
+            C.data.len * @sizeOf(f32),
+            cudaMemcpyDeviceToHost,
         );
-        if (status != 0) return error.CudaMemcpyFailed;
+        if (copy_status != 0) return error.CudaMemcpyFailed;
     }
 
     handle.sync();
@@ -863,4 +1161,55 @@ pub fn gemmCuBlasSimple(
     try gemmCuBlasF32(handle, A, B, C, M, N, K, false, false, 1.0, 0.0);
 }
 
+/// GEMM 100% device→device (PLAN_MMPROJ 10.2 device-resident ViT):
+/// A, B y C ya viven en GPU — cero H2D/D2H. Convención del repo:
+/// row-major + op invertida (ver gemmCuBlasF32). C = A·Bᵀ si trans_b.
+/// GEMM row-major device-resident: C_rm[M,N] = op(A)·op(B) con
+/// A row-major [M,K] (trans_a=false) o [K,M] (trans_a=true, op(A)=Aᵀ);
+/// B row-major [K,N] (trans_b=false) o [N,K] (trans_b=true, op(B)=Bᵀ).
+///
+/// 10.2-bisect (lane-mmproj): cuBLAS es COLUMN-major ⇒ para escribir C
+/// row-major hay que computar Cᵀ = op(B)ᵀ·op(A)ᵀ con m=N, n=M (el truco
+/// clásico row-major, matrices intercambiadas). La versión anterior pasaba
+/// m=M, n=N directamente ⇒ el resultado quedaba en memoria TRANSUESTO
+/// ([N,M] leído como [M,N]) — cos-sim 0.2-0.5 del encoder GPU, E2E
+/// semi-coherente por mezcla determinista de features. Diagnóstico: QKV
+/// r0[0] idéntico CPU/GPU + scramble total tras él (firma de transposición).
+pub fn gemmF32DeviceResident(
+    handle: CuBlasHandle,
+    d_a: *anyopaque,
+    d_b: *anyopaque,
+    d_c: *anyopaque,
+    M: usize,
+    N: usize,
+    K: usize,
+    trans_a: bool,
+    trans_b: bool,
+) !void {
+    // Primer factor (slot A de cuBLAS): op(B)ᵀ [N,K]
+    const op_p: c_int = if (trans_b) 1 else 0; // T=1, N=0
+    const lda_p: i32 = if (trans_b) @intCast(K) else @intCast(N);
+    // Segundo factor (slot B de cuBLAS): op(A)ᵀ [K,M]
+    const op_q: c_int = if (trans_a) 1 else 0;
+    const lda_q: i32 = if (trans_a) @intCast(M) else @intCast(K);
 
+    const alpha: f32 = 1.0;
+    const beta: f32 = 0.0;
+    const status = cublasSgemm_v2(
+        handle.raw,
+        op_p,
+        op_q,
+        @intCast(N), // m
+        @intCast(M), // n
+        @intCast(K), // k
+        &alpha,
+        d_b, // primero B
+        lda_p,
+        d_a, // luego A
+        lda_q,
+        &beta,
+        d_c,
+        @intCast(N), // ldc = N (C col-major [N,M] == C row-major [M,N])
+    );
+    if (status != 0) return error.CuBlasError;
+}
