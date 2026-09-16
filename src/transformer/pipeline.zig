@@ -71,8 +71,26 @@ pub const Sampler = struct {
     top_p: f32 = 1.0,
     repetition_penalty: f32 = 1.0,
 
-    /// Muestrea un token dado los logits y el historial ya generado
-    /// (usado para repetition penalty).
+    work_buf: []f32 = &.{},
+    vals_buf: []f32 = &.{},
+    idx_buf: []usize = &.{},
+    probs_buf: []f32 = &.{},
+
+    fn initScratch(self: *Sampler, allocator: std.mem.Allocator, vocab_size: usize) !void {
+        self.work_buf = try allocator.alloc(f32, vocab_size);
+        self.vals_buf = try allocator.alloc(f32, vocab_size);
+        self.idx_buf = try allocator.alloc(usize, vocab_size);
+        self.probs_buf = try allocator.alloc(f32, vocab_size);
+    }
+
+    fn deinitScratch(self: *Sampler, allocator: std.mem.Allocator) void {
+        if (self.work_buf.len > 0) allocator.free(self.work_buf);
+        if (self.vals_buf.len > 0) allocator.free(self.vals_buf);
+        if (self.idx_buf.len > 0) allocator.free(self.idx_buf);
+        if (self.probs_buf.len > 0) allocator.free(self.probs_buf);
+        self.* = .{};
+    }
+
     pub fn sample(self: Sampler, logits: []const f32, rng: *std.Random.Xoshiro256, history: []const u32) u32 {
         const vocab = logits.len;
 
@@ -102,10 +120,7 @@ pub const Sampler = struct {
             return @as(u32, @intCast(logits.len - 1));
         }
 
-        const alloc = std.heap.page_allocator;
-
-        var work = alloc.alloc(f32, vocab) catch @panic("sampler OOM");
-        defer alloc.free(work);
+        var work = self.work_buf;
         @memcpy(work, logits);
 
         // 1. Repetition penalty: penaliza tokens ya generados
@@ -128,8 +143,7 @@ pub const Sampler = struct {
 
         // 4. Top-k: descarta lo que está por debajo del k-ésimo valor
         if (self.top_k > 0 and self.top_k < vocab) {
-            var vals = alloc.alloc(f32, vocab) catch @panic("sampler OOM");
-            defer alloc.free(vals);
+            var vals = self.vals_buf;
             @memcpy(vals, work);
             const k = self.top_k;
             for (0..k) |i| {
@@ -152,8 +166,7 @@ pub const Sampler = struct {
         }
 
         // 5. Top-p (nucleus): ordenar descendente y acumular hasta p
-        var idx = alloc.alloc(usize, vocab) catch @panic("sampler OOM");
-        defer alloc.free(idx);
+        var idx = self.idx_buf;
         for (0..vocab) |i| idx[i] = i;
 
         // Candidatos (work != -inf)
@@ -177,8 +190,7 @@ pub const Sampler = struct {
         // Softmax estable sobre candidatos
         var max_val: f32 = -std.math.inf(f32);
         for (0..cand_count) |i| max_val = @max(max_val, work[idx[i]]);
-        var probs = alloc.alloc(f32, cand_count) catch @panic("sampler OOM");
-        defer alloc.free(probs);
+        var probs = self.probs_buf;
         var sum: f32 = 0;
         for (0..cand_count) |i| {
             probs[i] = @exp(work[idx[i]] - max_val);
@@ -637,6 +649,10 @@ pub const InferencePipeline = struct {
         hidden_2d_strides[0] = self.hidden_dim;
         hidden_2d_strides[1] = 1;
 
+        var sampler = config.sampler;
+        try sampler.initScratch(self.allocator, self.vocab_size);
+        defer sampler.deinitScratch(self.allocator);
+
         for (0..config.max_new_tokens) |_| {
             const last_token = tokens.items[tokens.items.len - 1];
 
@@ -687,7 +703,7 @@ pub const InferencePipeline = struct {
             try embedding.lmHeadForwardSourceF32(matmul_engine, hidden_2d, lm_head_source, self.hidden_dim, self.vocab_size, &logits);
 
             // Samplear
-            const next_token = config.sampler.sample(logits.data, &rng, tokens.items);
+            const next_token = sampler.sample(logits.data, &rng, tokens.items);
             try tokens.append(self.allocator, next_token);
             current_pos += 1;
 

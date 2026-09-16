@@ -45,6 +45,34 @@ pub const GpuBlockWeights = struct {
 
 };
 
+/// Pesos deepstack de un bloque (Qwen3-VL). Subida única.
+pub const GpuDeepstackWeights = struct {
+    norm_w: GpuBuffer,
+    norm_b: GpuBuffer, // [ds_in] (zeros si RMS)
+    fc1_w: GpuBuffer, // [n_ff, ds_in] W_T row-major
+    fc1_b: GpuBuffer, // [n_ff]
+    fc2_w: GpuBuffer, // [ds_out_dim, n_ff] W_T row-major
+    fc2_b: GpuBuffer, // [ds_out_dim]
+    n_ff: usize,
+    ds_in: usize, // n_embd * merge² (4)
+    ds_out_dim: usize,
+};
+
+/// Pesos deepstack en HOST (dequantizados, referenciados por el ClipBlock).
+pub const DeepstackHostWeights = struct {
+    norm_w: []const f32,
+    norm_b: []const f32,
+    fc1_w: []const f32, // [n_ff, n_embd*4]
+    fc1_b: []const f32,
+    fc2_w: []const f32, // [ds_out_dim, n_ff]
+    fc2_b: []const f32,
+    n_ff: usize,
+    ds_in: usize,
+    ds_out_dim: usize,
+    /// Índice del bloque en `blocks` al que pertenece este deepstack.
+    block_idx: usize,
+};
+
 /// Estado GPU del encoder completo: pesos por bloque + buffers de activación
 /// persistentes (dimensionados al n_pos máx. de la imagen).
 pub const GpuClipEncoder = struct {
@@ -79,6 +107,13 @@ pub const GpuClipEncoder = struct {
     // pos_ids host staging (pinned no necesario; upload por imagen)
     pos_ids_host: [][4]i32,
 
+    // Deepstack (Qwen3-VL merge2=4)
+    has_deepstack: bool = false,
+    ds: []GpuDeepstackWeights = &[_]GpuDeepstackWeights{},
+    ds_block_idx: usize = 0,
+    d_ds_out: GpuBuffer = undefined,
+    d_ds_view: GpuBuffer = undefined,
+
     const Self = @This();
 
     /// Construye el estado GPU desde los pesos HOST ya dequantizados del
@@ -95,6 +130,7 @@ pub const GpuClipEncoder = struct {
         cfg_n_pos: usize,
         cfg_use_rms_norm: bool,
         cfg_eps: f32,
+        ds_host: []const DeepstackHostWeights,
     ) !Self {
         try cudaz.ensureContext();
         const handle = try cublas.CuBlasHandle.init();
@@ -105,8 +141,35 @@ pub const GpuClipEncoder = struct {
             blocks[i] = try uploadBlock(allocator, bh, cfg_n_embd);
         }
 
+        // Deepstack weights (si hay)
+        const has_ds = ds_host.len > 0;
+        const empty_ds: [0]GpuDeepstackWeights = .{};
+        const ds = if (has_ds) blk: {
+            const ds_arr = try allocator.alloc(GpuDeepstackWeights, ds_host.len);
+            for (ds_host, 0..) |dsh, i| {
+                ds_arr[i] = .{
+                    .norm_w = try upBuf(dsh.norm_w),
+                    .norm_b = if (dsh.norm_b.len > 0) try upBuf(dsh.norm_b) else try upZeros(allocator, dsh.ds_in),
+                    .fc1_w = try upBuf(dsh.fc1_w),
+                    .fc1_b = try upBuf(dsh.fc1_b),
+                    .fc2_w = try upBuf(dsh.fc2_w),
+                    .fc2_b = try upBuf(dsh.fc2_b),
+                    .n_ff = dsh.n_ff,
+                    .ds_in = dsh.ds_in,
+                    .ds_out_dim = dsh.ds_out_dim,
+                };
+            }
+            break :blk ds_arr;
+        } else @constCast(empty_ds[0..]);
+
         const A = cfg_n_pos * cfg_n_embd;
         const H = cfg_n_head * cfg_n_pos * cfg_head_dim;
+
+        // Deepstack buffers
+        const merge2: usize = 4;
+        const ds_in_dim = cfg_n_embd * merge2;
+        const ds_view_len = cfg_n_pos * ds_in_dim; // [n_pos, n_embd*4]
+        const ds_out_len = if (has_ds) ds_host[0].ds_out_dim * cfg_n_pos else 0;
 
         const s: Self = .{
             .allocator = allocator,
@@ -132,6 +195,11 @@ pub const GpuClipEncoder = struct {
             .d_pack_k = try GpuBuffer.alloc(H),
             .d_pack_v = try GpuBuffer.alloc(H),
             .d_pack_o = try GpuBuffer.alloc(H),
+            .d_ds_out = if (has_ds) try GpuBuffer.alloc(ds_out_len) else undefined,
+            .d_ds_view = if (has_ds) try GpuBuffer.alloc(ds_view_len) else undefined,
+            .has_deepstack = has_ds,
+            .ds = ds,
+            .ds_block_idx = if (has_ds) ds_host[0].block_idx else 0,
             .pos_ids_host = try allocator.alloc([4]i32, cfg_n_pos),
         };
         return s;
@@ -154,6 +222,16 @@ pub const GpuClipEncoder = struct {
         self.d_pack_o.free();
         self.allocator.free(self.pos_ids_host);
         if (self.d_pos_ids != 0) cudaz.cuMemFree(self.d_pos_ids);
+        if (self.has_deepstack) {
+            for (self.ds) |*d| {
+                inline for (@typeInfo(GpuDeepstackWeights).@"struct".fields) |f| {
+                    if (f.type != usize) @field(d, f.name).free();
+                }
+            }
+            self.allocator.free(self.ds);
+            self.d_ds_out.free();
+            self.d_ds_view.free();
+        }
     }
 
     /// Multi-imagen: redimensiona los buffers de activación si la nueva
@@ -200,6 +278,15 @@ pub const GpuClipEncoder = struct {
         self.d_pack_v = try GpuBuffer.alloc(H);
         self.d_pack_o = try GpuBuffer.alloc(H);
         self.pos_ids_host = try self.allocator.alloc([4]i32, want_n_pos);
+        if (self.has_deepstack) {
+            self.d_ds_view.free();
+            self.d_ds_out.free();
+            const merge2: usize = 4;
+            const ds_view_len = want_n_pos * self.n_embd * merge2;
+            const ds_out_len = self.ds[0].ds_out_dim * want_n_pos;
+            self.d_ds_view = try GpuBuffer.alloc(ds_view_len);
+            self.d_ds_out = try GpuBuffer.alloc(ds_out_len);
+        }
     }
 
     fn freeBlock(b: *GpuBlockWeights) void {
@@ -348,6 +435,26 @@ pub const GpuClipEncoder = struct {
 
         // residual 2: out = inp_l + ffn (en d_x)
         try self.lk.add(@intFromPtr(self.d_inp_l.dev_ptr), @intFromPtr(self.d_ffn.dev_ptr), @intFromPtr(self.d_x.dev_ptr), A);
+
+        // Deepstack (Qwen3-VL): si este bloque tiene deepstack, compute
+        // d_ds_out = fc2(GELU(fc1(LayerNorm(shuffle(d_x))))) donde
+        // shuffle: [n_pos, n_embd] -> [n_pos, n_embd*merge2].
+        if (self.has_deepstack and il == self.ds_block_idx) {
+            const dsw = &self.ds[0];
+            const ne4 = self.n_embd * 4;
+            try self.lk.deepstackShuffle(@intFromPtr(self.d_x.dev_ptr), @intFromPtr(self.d_ds_view.dev_ptr), self.n_pos, self.n_embd, self.n_pos, 4);
+            if (self.use_rms_norm) {
+                try self.lk.rmsNorm(@intFromPtr(self.d_ds_view.dev_ptr), @intFromPtr(dsw.norm_w.dev_ptr), @intFromPtr(dsw.norm_b.dev_ptr), self.n_pos, ne4, self.eps);
+            } else {
+                try self.lk.layerNormDev(@intFromPtr(self.d_ds_view.dev_ptr), @intFromPtr(dsw.norm_w.dev_ptr), @intFromPtr(dsw.norm_b.dev_ptr), @intFromPtr(self.d_ln2.dev_ptr), self.n_pos, ne4, self.eps);
+                try self.lk.add(@intFromPtr(self.d_ds_view.dev_ptr), @intFromPtr(self.d_ln2.dev_ptr), @intFromPtr(self.d_ds_view.dev_ptr), self.n_pos * ne4);
+            }
+            try cublas.gemmF32DeviceResident(self.handle, self.d_ds_view.dev_ptr, dsw.fc1_w.dev_ptr, self.d_mid.dev_ptr, self.n_pos, dsw.n_ff, ne4, false, true);
+            try self.lk.biasAddDev(@intFromPtr(self.d_mid.dev_ptr), @intFromPtr(dsw.fc1_b.dev_ptr), self.n_pos * dsw.n_ff, dsw.n_ff);
+            try self.lk.geluDev(@intFromPtr(self.d_mid.dev_ptr), self.n_pos * dsw.n_ff);
+            try cublas.gemmF32DeviceResident(self.handle, self.d_mid.dev_ptr, dsw.fc2_w.dev_ptr, self.d_ds_out.dev_ptr, self.n_pos, dsw.ds_out_dim, dsw.n_ff, false, true);
+            try self.lk.biasAddDev(@intFromPtr(self.d_ds_out.dev_ptr), @intFromPtr(dsw.fc2_b.dev_ptr), self.n_pos * dsw.ds_out_dim, dsw.ds_out_dim);
+        }
     }
 
     /// Ejecuta TODO el stack de bloques en GPU: d_x (input subido) →
@@ -402,11 +509,47 @@ pub const GpuClipEncoder = struct {
                 .ff_down_b = blk.ff_down_b orelse empty_bias[0..],
             };
         }
-        return Self.init(allocator, lk, bh, enc.n_embd, enc.blocks[0].n_ff, enc.n_head, enc.head_dim, n_pos, enc.use_rms_norm, enc.eps);
-    }
+        // Deepstack weights (si algún bloque los tiene)
+        const ds_list = blk: {
+            var count: usize = 0;
+            for (enc.blocks) |*blk| {
+                if (blk.ds) |_| count += 1;
+            }
+            if (count == 0) break :blk &[_]DeepstackHostWeights{};
+            const arr = try allocator.alloc(DeepstackHostWeights, count);
+            var idx: usize = 0;
+            for (enc.blocks, 0..) |*blk, i| {
+                if (blk.ds) |*ds| {
+                    const ds_in = ds.fc1_t.shape[1]; // [n_ff, n_embd*4]
+                    const ds_out = ds.fc2_t.shape[0]; // [ds_out_dim, n_ff]
+                    arr[idx] = .{
+                        .norm_w = ds.norm_w,
+                        .norm_b = ds.norm_b orelse &.{},
+                        .fc1_w = ds.fc1_t.data,
+                        .fc1_b = ds.fc1_b orelse &.{},
+                        .fc2_w = ds.fc2_t.data,
+                        .fc2_b = ds.fc2_b orelse &.{},
+                        .n_ff = ds.n_ff,
+                        .ds_in = ds_in,
+                        .ds_out_dim = ds_out,
+                        .block_idx = i,
+                    };
+                    idx += 1;
+                }
+             }
+             break :blk arr;
+         };
+         return Self.init(allocator, lk, bh, enc.n_embd, enc.blocks[0].n_ff, enc.n_head, enc.head_dim, n_pos, enc.use_rms_norm, enc.eps, ds_list);
+     }
 
     /// Baja el resultado final (d_x tras el último bloque) a host.
     pub fn downloadOutput(self: *Self, out: []f32) !void {
         self.d_x.download(out) catch return ClipGpuError.CudaUnavailable;
+    }
+
+    /// Baja las deepstack features (d_ds_out) a host.
+    pub fn downloadDsOutput(self: *Self, out: []f32) !void {
+        if (!self.has_deepstack) return;
+        self.d_ds_out.download(out) catch return ClipGpuError.CudaUnavailable;
     }
 };

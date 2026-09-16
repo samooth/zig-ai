@@ -741,16 +741,12 @@ pub const ClipEncoder = struct {
         scratch: []f32,
     ) !EncodedImage {
         const cfg = self.cfg;
-        // deepstack real = algún TRUE en el array (mmproj-BF16 trae 12×False
-        // — len>0 no implica deepstack; el path GPU no soporta features ds).
-        var has_ds = false;
-        for (cfg.is_deepstack_layers) |d| {
-            if (d) has_ds = true;
-        }
-        if (has_ds) {
-            // deepstack: path GPU no soportado aún — CPU
-            return self.encode(allocator, rgb, width, height, scratch);
-        }
+        const has_ds = blk: {
+            for (cfg.is_deepstack_layers) |d| {
+                if (d) break :blk true;
+            }
+            break :blk false;
+        };
         const t0 = timez.Timer.start();
 
         // ── 1. Preprocess + conv + shuffle + pe + pre_ln (host, barato)
@@ -826,6 +822,12 @@ pub const ClipEncoder = struct {
         // sync implícito: downloadOutput ya es copia síncrona del d_x.
         // (cuMemcpyDtoH sincroniza el stream de los kernels previos).
         try gpu.downloadOutput(cur); // resultado vuelve al buffer host `cur`
+        if (has_ds and gpu.has_deepstack) {
+            const ds_rows = n_pos / (self.merge * self.merge);
+            const ds_dim = gpu.ds[0].ds_out_dim;
+            const ds_buf = scratch[5 * n_pos * n_embd .. 5 * n_pos * n_embd + ds_rows * ds_dim];
+            try gpu.downloadDsOutput(ds_buf);
+        }
         if (debugz.dbg.perf_mm) {
             debugz.dbg.printLevel(.info, "[mmproj-perf] {d} blocks GPU: {d} ms (n_pos={d})\n", .{ self.blocks.len, @divTrunc(t_blocks.read(), std.time.ns_per_ms), n_pos });
         }
@@ -837,9 +839,24 @@ pub const ClipEncoder = struct {
             return EncoderError.OutOfMemory;
         errdefer allocator.free(embeddings);
 
+        const ds_feats = if (has_ds and gpu.has_deepstack) blk: {
+            const ds_rows = n_pos / (self.merge * self.merge);
+            const ds_dim = gpu.ds[0].ds_out_dim;
+            const ds_buf = scratch[5 * n_pos * n_embd .. 5 * n_pos * n_embd + ds_rows * ds_dim];
+            const f = allocator.alloc(f32, ds_rows * ds_dim) catch return EncoderError.OutOfMemory;
+            @memcpy(f, ds_buf);
+            const s = allocator.alloc([]f32, 1) catch return EncoderError.OutOfMemory;
+            s[0] = f;
+            break :blk s;
+        } else &.{};
+        defer if (ds_feats.len > 0) {
+            allocator.free(ds_feats[0]);
+            allocator.free(ds_feats);
+        };
+
         self.projector.project(
             cur,
-            &.{}, // sin deepstack
+            ds_feats,
             embeddings,
             n_pos,
             n_embd,
@@ -872,13 +889,12 @@ pub const ClipEncoder = struct {
         scratch: []f32,
     ) !EncodedImage {
         const cfg = self.cfg;
-        var has_ds = false;
-        for (cfg.is_deepstack_layers) |d| {
-            if (d) has_ds = true;
-        }
-        if (has_ds) {
-            return self.encodePair(allocator, rgb0, rgb1, width, height, scratch);
-        }
+        const has_ds = blk: {
+            for (cfg.is_deepstack_layers) |d| {
+                if (d) break :blk true;
+            }
+            break :blk false;
+        };
         const w1 = self.patch_w1 orelse return EncoderError.MissingWeights;
         const t0 = timez.Timer.start();
 
@@ -958,6 +974,12 @@ pub const ClipEncoder = struct {
         try gpu.uploadInput(cur);
         try gpu.runBlocks();
         try gpu.downloadOutput(cur);
+        if (has_ds and gpu.has_deepstack) {
+            const ds_rows = n_pos / (self.merge * self.merge);
+            const ds_dim = gpu.ds[0].ds_out_dim;
+            const ds_buf = scratch[6 * n_pos * n_embd .. 6 * n_pos * n_embd + ds_rows * ds_dim];
+            try gpu.downloadDsOutput(ds_buf);
+        }
         if (debugz.dbg.perf_mm) {
             debugz.dbg.printLevel(.info, "[mmproj-perf] {d} blocks GPU (par): {d} ms (n_pos={d})\n", .{ self.blocks.len, @divTrunc(t_blocks.read(), std.time.ns_per_ms), n_pos });
         }
@@ -968,9 +990,24 @@ pub const ClipEncoder = struct {
             return EncoderError.OutOfMemory;
         errdefer allocator.free(embeddings);
 
+        const ds_feats = if (has_ds and gpu.has_deepstack) blk: {
+            const ds_rows = n_pos / (self.merge * self.merge);
+            const ds_dim = gpu.ds[0].ds_out_dim;
+            const ds_buf = scratch[6 * n_pos * n_embd .. 6 * n_pos * n_embd + ds_rows * ds_dim];
+            const f = allocator.alloc(f32, ds_rows * ds_dim) catch return EncoderError.OutOfMemory;
+            @memcpy(f, ds_buf);
+            const s = allocator.alloc([]f32, 1) catch return EncoderError.OutOfMemory;
+            s[0] = f;
+            break :blk s;
+        } else &.{};
+        defer if (ds_feats.len > 0) {
+            allocator.free(ds_feats[0]);
+            allocator.free(ds_feats);
+        };
+
         self.projector.project(
             cur,
-            &.{},
+            ds_feats,
             embeddings,
             n_pos,
             n_embd,

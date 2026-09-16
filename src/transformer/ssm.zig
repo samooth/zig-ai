@@ -77,6 +77,42 @@ pub fn ssmStageReport() void {
 }
 
 pub const SsmLayer = struct {
+    /// Buffers de activación persistentes para forward CPU (evitan alloc/free
+    /// por llamada). Tamaño fijo para decode (N=1); prefill N>1 usa alloc
+    /// dinámico porque los tensores crecen con N.
+    const FwdBuffers = struct {
+        qkv: []f32, // [qkv_dim]
+        z: []f32, // [d_inner]
+        beta: []f32, // [dt_rank]
+        gate: []f32, // [dt_rank]
+        conv_in: []f32, // [(d_conv-1+1) * qkv_dim] = d_conv * qkv_dim
+        conv_out: []f32, // [qkv_dim]
+        attn_out: []f32, // [d_inner]
+
+        fn init(allocator: std.mem.Allocator, p: SsmParams) !FwdBuffers {
+            const qkv_dim = p.qkvDim();
+            return .{
+                .qkv = try allocator.alloc(f32, qkv_dim),
+                .z = try allocator.alloc(f32, p.d_inner),
+                .beta = try allocator.alloc(f32, p.dt_rank),
+                .gate = try allocator.alloc(f32, p.dt_rank),
+                .conv_in = try allocator.alloc(f32, p.d_conv * qkv_dim),
+                .conv_out = try allocator.alloc(f32, qkv_dim),
+                .attn_out = try allocator.alloc(f32, p.d_inner),
+            };
+        }
+
+        fn deinit(self: *FwdBuffers, allocator: std.mem.Allocator) void {
+            allocator.free(self.qkv);
+            allocator.free(self.z);
+            allocator.free(self.beta);
+            allocator.free(self.gate);
+            allocator.free(self.conv_in);
+            allocator.free(self.conv_out);
+            allocator.free(self.attn_out);
+        }
+    };
+
     allocator: std.mem.Allocator,
     layer_idx: usize,
     params: SsmParams,
@@ -100,6 +136,11 @@ pub const SsmLayer = struct {
     scratch_qkv: []f32, // qkv_dim * n_embd
     scratch_z: []f32, // value_dim * n_embd
     scratch_out: []f32, // n_embd * value_dim
+
+    // Buffers de activación persistentes para forward CPU (evitan alloc/free
+    // por llamada). Se allocan una sola vez en init y se reutilizan.
+    // Tamaño fijo para decode (N=1); prefill con N>1 cae al alloc dinámico.
+    fwd_buf: ?FwdBuffers = null,
 
     // Estado recurrente
     conv_state: []f32, // [d_conv-1, qkv_dim] por secuencia
@@ -164,6 +205,7 @@ pub const SsmLayer = struct {
             .conv_state = conv_state,
             .s_state = s_state,
             .gpu = null,
+            .fwd_buf = null,
         };
         return out_self;
     }
@@ -176,6 +218,7 @@ pub const SsmLayer = struct {
         self.allocator.free(self.scratch_out);
         self.allocator.free(self.conv_state);
         self.allocator.free(self.s_state);
+        if (self.fwd_buf) |*b| b.deinit(self.allocator);
         self.w_beta.deinit();
         self.w_alpha.deinit();
         self.dt_bias.deinit();
@@ -197,6 +240,13 @@ pub const SsmLayer = struct {
         self.scratch_qkv = try self.allocator.alloc(f32, qkv_dim * p.n_embd);
         self.scratch_z = try self.allocator.alloc(f32, p.d_inner * p.n_embd);
         self.scratch_out = try self.allocator.alloc(f32, p.n_embd * p.d_inner);
+    }
+
+    /// Inicializa los buffers persistentes de forward CPU (decode N=1).
+    /// Para prefill N>1 se mantiene el alloc dinámico original.
+    fn ensureFwdBuf(self: *Self) !void {
+        if (self.fwd_buf != null) return;
+        self.fwd_buf = try FwdBuffers.init(self.allocator, self.params);
     }
 
     /// Elementos f32 del estado recurrente GPU (s_state + conv_state).
@@ -318,6 +368,12 @@ pub const SsmLayer = struct {
         const head_v_dim = p.d_state;
         const N = n;
 
+        // Buffers persistentes para decode (N=1): eliminan alloc/free por token.
+        // Prefill N>1 mantiene el alloc dinámico original.
+        const use_persistent = N == 1;
+        if (use_persistent) try self.ensureFwdBuf();
+        const fb = if (use_persistent) self.fwd_buf.? else null;
+
         // 1. qkv = attn_qkv @ X → [N, qkv_dim]
         // T1 fix regresión CPU: consumidor f32 garantiza scratch lleno.
         try self.ensureScratchFilled();
@@ -331,8 +387,11 @@ pub const SsmLayer = struct {
             .allocator = null,
             .owns_data = false,
         };
-        var qkv = try Tensor(f32).alloc(self.allocator, &.{ N, qkv_dim });
-        defer qkv.deinit();
+        const qkv_data = if (use_persistent) fb.?.qkv else try self.allocator.alloc(f32, N * qkv_dim);
+        defer if (!use_persistent) self.allocator.free(qkv_data);
+        var qkv_shape = [_]usize{ N, qkv_dim };
+        var qkv_strides = [_]usize{ qkv_dim, 1 };
+        var qkv = Tensor(f32){ .data = qkv_data, .shape = &qkv_shape, .strides = &qkv_strides, .offset = 0, .allocator = null, .owns_data = false };
         try self.matmul_engine.linearProjection(f32, x, w_qkv32, &qkv);
 
         // 2. z = attn_gate @ X → [N, value_dim] (peso ya dequantizado en load)
@@ -346,20 +405,29 @@ pub const SsmLayer = struct {
             .allocator = null,
             .owns_data = false,
         };
-        var z = try Tensor(f32).alloc(self.allocator, &.{ N, p.d_inner });
-        defer z.deinit();
+        const z_data = if (use_persistent) fb.?.z else try self.allocator.alloc(f32, N * p.d_inner);
+        defer if (!use_persistent) self.allocator.free(z_data);
+        var z_shape = [_]usize{ N, p.d_inner };
+        var z_strides = [_]usize{ p.d_inner, 1 };
+        var z = Tensor(f32){ .data = z_data, .shape = &z_shape, .strides = &z_strides, .offset = 0, .allocator = null, .owns_data = false };
         try self.matmul_engine.linearProjection(f32, x, w_z32, &z);
 
         // 3. beta = sigmoid(ssm_beta @ X) → [N, dt_rank]
-        var beta = try Tensor(f32).alloc(self.allocator, &.{ N, p.dt_rank });
-        defer beta.deinit();
+        const beta_data = if (use_persistent) fb.?.beta else try self.allocator.alloc(f32, N * p.dt_rank);
+        defer if (!use_persistent) self.allocator.free(beta_data);
+        var beta_shape = [_]usize{ N, p.dt_rank };
+        var beta_strides = [_]usize{ p.dt_rank, 1 };
+        var beta = Tensor(f32){ .data = beta_data, .shape = &beta_shape, .strides = &beta_strides, .offset = 0, .allocator = null, .owns_data = false };
         try self.matmul_engine.linearProjection(f32, x, self.w_beta, &beta);
         for (beta.data) |*v| v.* = 1.0 / (1.0 + @exp(-v.*));
 
         // 4. gate = softplus(ssm_alpha @ X + dt) * ssm_a → [N, dt_rank]
         //    El GGUF guarda ssm_a YA como -exp(A_log); el decay es exp(gate).
-        var gate = try Tensor(f32).alloc(self.allocator, &.{ N, p.dt_rank });
-        defer gate.deinit();
+        const gate_data = if (use_persistent) fb.?.gate else try self.allocator.alloc(f32, N * p.dt_rank);
+        defer if (!use_persistent) self.allocator.free(gate_data);
+        var gate_shape = [_]usize{ N, p.dt_rank };
+        var gate_strides = [_]usize{ p.dt_rank, 1 };
+        var gate = Tensor(f32){ .data = gate_data, .shape = &gate_shape, .strides = &gate_strides, .offset = 0, .allocator = null, .owns_data = false };
         try self.matmul_engine.linearProjection(f32, x, self.w_alpha, &gate);
         for (0..p.dt_rank) |h| {
             for (0..N) |t| {
@@ -370,16 +438,22 @@ pub const SsmLayer = struct {
         }
 
         // 5. Conv causal + silu → conv_out [N, qkv_dim]
-        var conv_in = try Tensor(f32).alloc(self.allocator, &.{ (p.d_conv - 1) + N, qkv_dim });
-        defer conv_in.deinit();
+        const conv_in_data = if (use_persistent) fb.?.conv_in else try self.allocator.alloc(f32, (p.d_conv - 1 + N) * qkv_dim);
+        defer if (!use_persistent) self.allocator.free(conv_in_data);
+        var conv_in_shape = [_]usize{ (p.d_conv - 1) + N, qkv_dim };
+        var conv_in_strides = [_]usize{ qkv_dim, 1 };
+        var conv_in = Tensor(f32){ .data = conv_in_data, .shape = &conv_in_shape, .strides = &conv_in_strides, .offset = 0, .allocator = null, .owns_data = false };
         for (0..p.d_conv - 1) |t| {
             for (0..qkv_dim) |c| conv_in.data[t * qkv_dim + c] = self.conv_state[t * qkv_dim + c];
         }
         for (0..N) |t| {
             for (0..qkv_dim) |c| conv_in.data[(p.d_conv - 1 + t) * qkv_dim + c] = qkv.data[t * qkv_dim + c];
         }
-        var conv_out = try Tensor(f32).alloc(self.allocator, &.{ N, qkv_dim });
-        defer conv_out.deinit();
+        const conv_out_data = if (use_persistent) fb.?.conv_out else try self.allocator.alloc(f32, N * qkv_dim);
+        defer if (!use_persistent) self.allocator.free(conv_out_data);
+        var conv_out_shape = [_]usize{ N, qkv_dim };
+        var conv_out_strides = [_]usize{ qkv_dim, 1 };
+        var conv_out = Tensor(f32){ .data = conv_out_data, .shape = &conv_out_shape, .strides = &conv_out_strides, .offset = 0, .allocator = null, .owns_data = false };
         for (0..qkv_dim) |c| {
             for (0..N) |t| {
                 var sumf: f32 = 0;
@@ -402,8 +476,11 @@ pub const SsmLayer = struct {
         self.l2NormQK(conv_out, N, key_dim, n_k_heads, head_v_dim);
 
         // 6. Recurrencia DeltaNet token por token → attn_out [N, value_dim]
-        var attn_out = try Tensor(f32).alloc(self.allocator, &.{ N, p.d_inner });
-        defer attn_out.deinit();
+        const attn_out_data = if (use_persistent) fb.?.attn_out else try self.allocator.alloc(f32, N * p.d_inner);
+        defer if (!use_persistent) self.allocator.free(attn_out_data);
+        var attn_out_shape = [_]usize{ N, p.d_inner };
+        var attn_out_strides = [_]usize{ p.d_inner, 1 };
+        var attn_out = Tensor(f32){ .data = attn_out_data, .shape = &attn_out_shape, .strides = &attn_out_strides, .offset = 0, .allocator = null, .owns_data = false };
         self.deltaNetRecurrence(conv_out, gate, beta, attn_out, N, key_dim, n_k_heads, n_v_heads, head_v_dim);
 
         // 7. rmsnorm(attn_out, ssm_norm) * silu(z) (por v-head, dims 128 contiguas)
@@ -765,6 +842,8 @@ pub const SsmLayer = struct {
         try SsmLayer.ensureGpu(self);
         const g = &self.gpu.?;
         try g.ensureN(n);
+        try cudaz.cuStreamSynchronize(lk.stream); // DEBUG
+        debugz.dbg.printLevel(.detail, "[ssm] capa {d}: forwardGPU start n={d}\n", .{ self.layer_idx, n });
 
         // Pesos qkv/z/out como Tensor(f32) sobre los scratch dequantizados.
         var w_qkv_shape = [_]usize{ qkv_dim, p.n_embd };
@@ -783,9 +862,19 @@ pub const SsmLayer = struct {
         const qt_qkv = if (quantSsmEnabled()) qgemmTypeFor(self.w_qkv.dtype()) else null;
         const qt_z = if (quantSsmEnabled()) qgemmTypeFor(self.w_z.dtype()) else null;
         if (perf_ssm) try cudaz.cuEventRecord(ev0, lk.stream);
+        try cudaz.cuStreamSynchronize(lk.stream); // DEBUG: catch previous stream error
         if (qt_qkv != null and qt_z != null) {
-            try lk.qgemmLinear(self.allocator, x.ptr(), self.w_qkv.bytes, g.qkv.ptr(), n, p.n_embd, qkv_dim, qt_qkv.?);
-            try lk.qgemmLinear(self.allocator, x.ptr(), self.w_z.bytes, g.z.ptr(), n, p.n_embd, d_inner, qt_z.?);
+            debugz.dbg.printLevel(.detail, "[ssm] capa {d}: calling qgemmLinear qkv m={d} k={d} n={d}\n", .{ self.layer_idx, n, p.n_embd, qkv_dim });
+            lk.qgemmLinear(self.allocator, x.ptr(), self.w_qkv.bytes, g.qkv.ptr(), n, p.n_embd, qkv_dim, qt_qkv.?) catch |err| {
+                debugz.dbg.printLevel(.info, "[ssm] capa {d}: qgemmLinear qkv FAILED: {s}\n", .{ self.layer_idx, @errorName(err) });
+                return err;
+            };
+            debugz.dbg.printLevel(.detail, "[ssm] capa {d}: qgemmLinear qkv OK\n", .{self.layer_idx});
+            lk.qgemmLinear(self.allocator, x.ptr(), self.w_z.bytes, g.z.ptr(), n, p.n_embd, d_inner, qt_z.?) catch |err| {
+                debugz.dbg.printLevel(.info, "[ssm] capa {d}: qgemmLinear z FAILED: {s}\n", .{ self.layer_idx, @errorName(err) });
+                return err;
+            };
+            debugz.dbg.printLevel(.detail, "[ssm] capa {d}: qgemmLinear z OK\n", .{self.layer_idx});
         } else {
             try self.ensureScratchFilled();
             try self.matmul_engine.linearProjectionDevice(x, w_qkv32, &g.qkv, n, p.n_embd, qkv_dim);
@@ -957,10 +1046,12 @@ pub const SsmLayer = struct {
     /// Copia el estado recurrente host (s_state, conv_state) — resultante del prefill
     /// CPU — a los buffers GPU persistentes. Necesario porque decode corre por GPU.
     pub fn seedGpuFromHost(self: *SsmLayer) !void {
+        debugz.dbg.printLevel(.detail, "[ssm] capa {d}: seedGpuFromHost s_state.len={d} conv.len={d}\n", .{ self.layer_idx, self.s_state.len, self.conv_state.len });
         try SsmLayer.ensureGpu(self);
         const g = &self.gpu.?;
         try cudaz.cuMemcpyHtoD(@intFromPtr(g.d_s_state.dev_ptr), @intFromPtr(self.s_state.ptr), self.s_state.len * @sizeOf(f32));
         try cudaz.cuMemcpyHtoD(@intFromPtr(g.d_conv_state.dev_ptr), @intFromPtr(self.conv_state.ptr), self.conv_state.len * @sizeOf(f32));
+        debugz.dbg.printLevel(.detail, "[ssm] capa {d}: seedGpuFromHost OK\n", .{self.layer_idx});
     }
 
     /// STUDY §5.2: prefill chunked batched ΔNet. Procesa K tokens por v-head en
@@ -1017,26 +1108,20 @@ pub const SsmLayer = struct {
         const w_alpha_dev = try self.matmul_engine.projectionDevicePtr(self.w_alpha);
         try lk.sigmoidGateProj(x.ptr(), w_beta_dev, w_alpha_dev, @intFromPtr(g.d_dt_bias.dev_ptr), @intFromPtr(g.d_ssm_a.dev_ptr), g.beta.ptr(), g.gate.ptr(), n, p.n_embd, dt_rank);
 
-        // 3. conv1d causal + silu + l2 (con fusión §5.5 opt-in).
-        if (std.c.getenv("DNCONVL2") != null) {
-            try lk.conv1dSiluL2(@intFromPtr(g.d_conv_state.dev_ptr), g.qkv.ptr(), @intFromPtr(g.d_conv1d.dev_ptr), g.conv_out.ptr(), g.conv_in.ptr(), n, qkv_dim, p.d_conv, key_dim, n_k_heads, n_v_heads, head_v_dim, p.rms_eps);
-        } else {
-            try lk.conv1dSilu(@intFromPtr(g.d_conv_state.dev_ptr), g.qkv.ptr(), @intFromPtr(g.d_conv1d.dev_ptr), g.conv_out.ptr(), g.conv_in.ptr(), n, qkv_dim, p.d_conv);
-            try lk.l2NormHeads(g.conv_out.ptr(), n, qkv_dim, key_dim, n_k_heads, head_v_dim, p.rms_eps);
-        }
+        // 3. conv1d causal + silu + l2 (conv1dSiluL2 wrapper, default-on).
+        try lk.conv1dSiluL2(@intFromPtr(g.d_conv_state.dev_ptr), g.qkv.ptr(), @intFromPtr(g.d_conv1d.dev_ptr), g.conv_out.ptr(), g.conv_in.ptr(), n, qkv_dim, p.d_conv, key_dim, n_k_heads, n_v_heads, head_v_dim, p.rms_eps);
         try cudaz.cuMemcpyDtoDAsync(@intFromPtr(g.d_conv_state.dev_ptr), g.conv_in.ptr(), (p.d_conv - 1) * qkv_dim * @sizeOf(f32), lk.stream);
 
         // 4. ΔNet chunked prefill.
-        // 1.11 (lane-c): DEFAULT K=512 fused CH ubatch-wide — 1 launch/capa
+        // 1.11 (lane-c): DEFAULT fused CH ubatch-wide — 1 launch/capa
         // para el chunk completo del prefill (ref delta-net-base.cpp:373-447
         // build_delta_net_fused con K=n_tokens; antes 8 launches K=64 + el
         // branch de cola que caía a per-token: n=100 ⇒ 1×K64 + 36 per-token).
         // El kernel procesa n_tokens runtime (v5) — la cola parcial va en el
-        // MISMO launch (sin OOB: fix §5.2 n_tokens reales). Opt-out PREFILLK
-        // (p.ej. 64 = camino clásico; 1 = per-token puro para A/B).
-        // 1.4 (lane-b): PREFILLWY=1 desvía el paso 4 al camino WY batched
-        // (prefillWYSolve+prefillWYState, oráculo prefill_wy.zig) — 2
-        // launches, GEMMs del chunk en paralelo. Mismos layouts/estado.
+        // MISMO launch (sin OOB: fix §5.2 n_tokens reales). Opt-out PREFILLCHUNKED
+        // (p.ej. PREFILLCHUNKED=1 fuerza el camino chunked; unset = WY default).
+        // 1.4 (lane-b): PREFILLWY=1 era el opt-in del camino WY batched; ahora
+        // es DEFAULT. Opt-out PREFILLWY=0.
         var K: usize = 512;
         if (std.c.getenv("PREFILLK")) |raw| {
             // parse [:0]u8 manually (Zig 0.16 doesn't allow .len on sentinel slices)
@@ -1052,10 +1137,15 @@ pub const SsmLayer = struct {
             }
             if (v != 0) K = v;
         }
-        const use_wy = blk: {
-            const raw = std.c.getenv("PREFILLWY");
+        const use_chunked = blk: {
+            const raw = std.c.getenv("PREFILLCHUNKED");
             break :blk raw != null and raw.?[0] == '1' and raw.?[1] == 0;
         };
+        const use_wy_default = blk: {
+            const raw = std.c.getenv("PREFILLWY");
+            break :blk raw == null or raw.?[0] == '1';
+        };
+        const effective_wy = !use_chunked and use_wy_default;
         const kda = false; // Qwen3.5: decay escalar por cabeza
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(S_v)));
         const q_off: c_int = 0;
@@ -1069,7 +1159,7 @@ pub const SsmLayer = struct {
         const dt_stride: c_int = @intCast(dt_rank);
 
         var t: usize = 0;
-        if (use_wy) {
+        if (effective_wy) {
             // 1.4 (lane-b): camino WY — 2 launches para TODO el prefill (K1
             // solve batched sobre n_chunks×n_v_heads, K2 state por columnas).
             // El kernel trocea n en chunks internos de 64; estado INOUT igual
