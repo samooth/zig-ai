@@ -2,7 +2,7 @@
 const std = @import("std");
 const cudaz = @import("cudaz");
 const layer_kernels = @import("layer_kernels");
-const kv_quant = @import("kv_quant");
+const kv_quant = @import("kv_cache").kv_quant;
 const pa = @import("paged_attention");
 
 fn dp4aParityTest(allocator: std.mem.Allocator, qtype: u32, fmt: pa.QuantFormat, K: usize, N: usize) !void {

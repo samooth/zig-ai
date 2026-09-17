@@ -172,6 +172,7 @@ pub fn poisonMemopsCanary() void {
 }
 
 pub fn memopsCanary() bool {
+    if (comptime builtin.target.os.tag == .windows) return false;
     if (g_memops_canary) |v| return v;
     // Probe 1: hostAlloc (pinned staging).
     const a = ext_sync.hostAlloc(64);

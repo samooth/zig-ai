@@ -1983,6 +1983,12 @@ pub fn build(b: *std.Build) void {
         }
         if (std.mem.eql(u8, tf, "src/mem/budget.zig")) {
             tmod.addImport("debug", debug_mod); // lane-f Phase 3
+            tmod.addImport("tier", tier_mod);
+        }
+        if (std.mem.eql(u8, tf, "tests/test_dp4a_parity_p05.zig") or
+            std.mem.eql(u8, tf, "tests/test_dp4a_parity_p06.zig"))
+        {
+            tmod.addImport("paged_attention", paged_attention_mod);
         }
         if (std.mem.eql(u8, tf, "tests/test_tier_manager.zig")) {
             tmod.addImport("tier_manager", tier_manager_mod);

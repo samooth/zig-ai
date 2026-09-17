@@ -147,12 +147,12 @@ test "U2-llama-stack: pila 28 capas + output_norm + lm_head — CPU ≡ GPU (gre
         bts_cpu[i] = try gpa.create(paged_attn.BlockTable);
         bts_cpu[i].* = paged_attn.BlockTable.init(gpa, block_size);
         layers_cpu[i] = try hybrid_layer.HybridLayer.init(gpa, i, hparams, true, .parallel, &kv_cpu, bts_cpu[i], null);
-        try layers_cpu[i].loadWeightsFromGguf(&model.file);
+        try layers_cpu[i].loadWeightsFromGguf(&model.file, null);
 
         bts_gpu[i] = try gpa.create(paged_attn.BlockTable);
         bts_gpu[i].* = paged_attn.BlockTable.init(gpa, block_size);
         layers_gpu[i] = try hybrid_layer.HybridLayer.init(gpa, i, hparams, true, .auto, &kv_gpu, bts_gpu[i], &paged_gpu);
-        try layers_gpu[i].loadWeightsFromGguf(&model.file);
+        try layers_gpu[i].loadWeightsFromGguf(&model.file, null);
         debugz.dbg.printLevel(.info, "[milestone] capa {d}/{d} cargada (cpu+gpu)\n", .{ i + 1, n_layers });
     }
     defer for (bts_cpu) |bt| {

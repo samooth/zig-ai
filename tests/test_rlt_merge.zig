@@ -27,7 +27,7 @@ fn rmTmp(path: []const u8) void {
 fn tmpPath(buf: []u8, prefix: []const u8) ![]const u8 {
     const ts: u64 = @intCast(@max(0, @import("time").wallClockSec()));
     const rand: u32 = @truncate(ts ^ (ts >> 32));
-    return std.fmt.bufPrint(buf, "/tmp/rltmerge_{s}_{d}.gguf", .{ prefix, rand });
+    return std.fmt.bufPrint(buf, "rltmerge_{s}_{d}.gguf", .{ prefix, rand });
 }
 
 fn writeStr(buf: *std.ArrayList(u8), a: std.mem.Allocator, s: []const u8) !void {

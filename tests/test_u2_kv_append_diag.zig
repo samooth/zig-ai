@@ -68,10 +68,10 @@ test "U2-kv-append: batched n=64 vs unrolled n=1×64 (misma HybridLayer)" {
 
     var l1 = try hybrid_layer.HybridLayer.init(gpa, layer_idx, hparams, true, .auto, &kv1, &bt1, &pg1);
     defer l1.deinit();
-    try l1.loadWeightsFromGguf(&model.file);
+    try l1.loadWeightsFromGguf(&model.file, null);
     var l2 = try hybrid_layer.HybridLayer.init(gpa, layer_idx, hparams, true, .auto, &kv2, &bt2, &pg2);
     defer l2.deinit();
-    try l2.loadWeightsFromGguf(&model.file);
+    try l2.loadWeightsFromGguf(&model.file, null);
 
     try bt1.appendTokens(kv1.block_alloc, n);
     try bt2.appendTokens(kv2.block_alloc, n);

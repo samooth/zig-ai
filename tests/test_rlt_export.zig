@@ -15,10 +15,11 @@ const export_gguf = @import("export_gguf");
 const gguf = @import("gguf");
 
 /// Nombre temporal único (std.crypto.random eliminado en 0.16 — timestamp ns).
+/// Ruta relativa al cwd — portable (no necesita /tmp/).
 fn tmpPath(buf: []u8, prefix: []const u8) ![]const u8 {
     const ts: u64 = @intCast(@max(0, @import("time").wallClockSec()));
     const rand: u32 = @truncate(ts ^ (ts >> 32));
-    return std.fmt.bufPrint(buf, "/tmp/rlt_{s}_{d}.gguf", .{ prefix, rand });
+    return std.fmt.bufPrint(buf, "rlt_{s}_{d}.gguf", .{ prefix, rand });
 }
 
 extern "c" fn unlink(path: [*:0]const u8) c_int;

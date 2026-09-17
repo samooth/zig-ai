@@ -304,7 +304,7 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     var layer = try hybrid_layer.HybridLayer.init(gpa, layer_idx, hparams, true, .auto, &paged_kv, &block_table, null);
     defer layer.deinit();
 
-    try layer.loadWeightsFromGguf(&model.file);
+    try layer.loadWeightsFromGguf(&model.file, null);
     std.debug.print("hybrid attn layer {d} loaded OK\n", .{layer_idx});
 
     // Embedding lookup de tokens de prueba

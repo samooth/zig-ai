@@ -113,11 +113,11 @@ test "U2: prefill GPU dense batched (n=64) — forwardGPU ≡ forward CPU, rel<1
 
     var lcpu = try hybrid_layer.HybridLayer.init(gpa, layer_idx, hparams, true, .parallel, &kv_cpu, &bt_cpu, null);
     defer lcpu.deinit();
-    try lcpu.loadWeightsFromGguf(&model.file);
+    try lcpu.loadWeightsFromGguf(&model.file, null);
 
     var lgpu = try hybrid_layer.HybridLayer.init(gpa, layer_idx, hparams, true, .auto, &kv_gpu, &bt_gpu, &paged_gpu);
     defer lgpu.deinit();
-    try lgpu.loadWeightsFromGguf(&model.file);
+    try lgpu.loadWeightsFromGguf(&model.file, null);
 
     var lk = try layer_kernels.LayerKernels.init(@ptrCast((try matmul.MatmulEngine.sharedCudaStream()).raw));
     defer lk.deinit();

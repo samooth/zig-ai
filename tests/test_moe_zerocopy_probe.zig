@@ -8,6 +8,7 @@
 //!
 //! Disciplina GPU: flock NB con pocos reintentos ⇒ SKIP si ocupada.
 const std = @import("std");
+const builtin = @import("builtin");
 const gguf = @import("gguf");
 const cudaz = @import("cudaz");
 const host_bank = @import("host_bank");
@@ -16,20 +17,23 @@ test "probe: HostBank sobre mmap RW (MAP_SHARED hipótesis) vs RO (known-issue)"
     const io = std.Io.Threaded.global_single_threaded.io();
 
     // Respetar disciplina sin bloquear una sesión larga.
-    const lock_dir = std.Io.Dir.cwd();
-    var waited: u32 = 0;
-    while (true) {
-        const lf = try lock_dir.createFile(io, ".bench.lock", .{ .truncate = false });
-        if (std.c.flock(lf.handle, 6) == 0) break;
-        lf.close(io);
-        waited += 10;
-        if (waited >= 30) return error.SkipZigTest;
-        std.debug.print("[probe] .bench.lock ocupada, espero {d}s…\n", .{waited});
-        var ts: std.c.timespec = .{ .sec = 10, .nsec = 0 };
-        _ = std.c.nanosleep(&ts, null);
+    // flock y nanosleep son POSIX; en Windows se omite el lock.
+    if (comptime builtin.target.os.tag != .windows) {
+        const lock_dir = std.Io.Dir.cwd();
+        var waited: u32 = 0;
+        while (true) {
+            const lf = try lock_dir.createFile(io, ".bench.lock", .{ .truncate = false });
+            if (std.c.flock(lf.handle, 6) == 0) break;
+            lf.close(io);
+            waited += 10;
+            if (waited >= 30) return error.SkipZigTest;
+            std.debug.print("[probe] .bench.lock ocupada, espero {d}s…\n", .{waited});
+            var ts: std.c.timespec = .{ .sec = 10, .nsec = 0 };
+            _ = std.c.nanosleep(&ts, null);
+        }
+        // fd deliberadamente NO cerrado hasta fin de test (close tras fallo de
+        // flock es la vía que panea; aquí flock o skip).
     }
-    // fd deliberadamente NO cerrado hasta fin de test (close tras fallo de
-    // flock es la vía que panea; aquí flock o skip).
 
     cudaz.ensureContext() catch return error.SkipZigTest; // CI sin toolkit: skip limpio
 
