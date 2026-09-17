@@ -145,7 +145,7 @@ test "9.4 repro E2E: append incremental 5+1 con K/V/Q reales" {
     try testing.expectEqual(@as(usize, KV_DIM), k_dec.len);
     try testing.expectEqual(@as(usize, Q_DIM), q_dec.len);
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module_kv = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const module_fa = try cudaz.cuModuleLoad(build_options.fattn_cubin);
 

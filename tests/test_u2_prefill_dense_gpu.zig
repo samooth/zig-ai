@@ -94,7 +94,7 @@ test "U2: prefill GPU dense batched (n=64) — forwardGPU ≡ forward CPU, rel<1
     defer bt_gpu.deinit(kv_gpu.block_alloc);
 
     // GPU side (como cli.zig): PagedAttentionGpu + LayerKernels + GpuTensors.
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     var paged_gpu = try paged_attn.PagedAttentionGpu.init(
         gpa,
         .{

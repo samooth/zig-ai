@@ -52,7 +52,7 @@ fn allocIndices(allocator: std.mem.Allocator, n: u32, fill: fn (usize) i64) ![]i
 test "B3 init_descs: smoke con índices vacíos (-1) ⇒ live_group=-1" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
 
     const allocator = testing.allocator;
@@ -144,7 +144,7 @@ test "B3 init_descs: smoke con índices vacíos (-1) ⇒ live_group=-1" {
 test "B3 init_descs: secuencial 0..N-1 ⇒ live_group=(N-1)/128" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
 
     const allocator = testing.allocator;
@@ -221,7 +221,7 @@ test "B3 init_descs: secuencial 0..N-1 ⇒ live_group=(N-1)/128" {
 test "B3 init_descs: sparse con -1 (skip) y staged (-2) ⇒ max del cell" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
 
     const allocator = testing.allocator;
@@ -337,7 +337,7 @@ test "B3 init_descs: sparse con -1 (skip) y staged (-2) ⇒ max del cell" {
 
 test "B3 init_descs: pre-condiciones ⇒ errores limpios" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);

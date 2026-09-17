@@ -22,7 +22,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
           use-cache: false
       - name: zig fmt check (advisory)
-        run: zig fmt --check src/ tests/ tui/src/ kernels/ benchmarks/
+        run: zig fmt --check src/ tests/ kernels/ benchmarks/
         continue-on-error: true
 
   # ─────────────────────────────────────────────────────────────

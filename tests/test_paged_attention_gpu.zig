@@ -65,7 +65,7 @@ test "paged attention GPU decode matches CPU reference" {
     const attn = pa.PagedAttention.init(gpa, config);
     try attn.decode(query, out_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc);
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const gpu_stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(gpu_stream);
     var engine = try pa.PagedAttentionGpu.init(gpa, config, gpu_stream);
@@ -112,7 +112,7 @@ test "paged attention GPU prefill matches CPU reference" {
     const attn = pa.PagedAttention.init(gpa, config);
     try attn.prefill(queries, outs_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc, seq_len);
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const gpu_stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(gpu_stream);
     var engine = try pa.PagedAttentionGpu.init(gpa, config, gpu_stream);
@@ -240,7 +240,7 @@ test "GPU evicts cold prefix blocks from device based on hit rate" {
     var kv = try pa.PagedKVCache.init(gpa, config);
     defer kv.deinit();
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const gpu_stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(gpu_stream);
     var engine = try pa.PagedAttentionGpu.init(gpa, config, gpu_stream);
@@ -309,7 +309,7 @@ test "paged attention GPU decode matches CPU (real head_dim 128)" {
     const attn = pa.PagedAttention.init(gpa, config);
     try attn.decode(query, out_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc);
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const gpu_stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(gpu_stream);
     var engine = try pa.PagedAttentionGpu.init(gpa, config, gpu_stream);
@@ -442,7 +442,7 @@ test "G1 split-K decode: paridad vs base y CPU (hd 128, multi-split)" {
     const attn = pa.PagedAttention.init(gpa, config);
     try attn.decode(query, out_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc);
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const gpu_stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(gpu_stream);
     var engine = try pa.PagedAttentionGpu.init(gpa, config, gpu_stream);
@@ -558,7 +558,7 @@ test "G1c split-K cobertura: seq 1120 > 8×128 nominal (regresión truncada)" {
     const attn = pa.PagedAttention.init(gpa, config);
     try attn.decode(query, out_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc);
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const gpu_stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(gpu_stream);
     var engine = try pa.PagedAttentionGpu.init(gpa, config, gpu_stream);

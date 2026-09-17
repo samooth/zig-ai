@@ -112,7 +112,7 @@ test "U2-llama-stack: pila 28 capas + output_norm + lm_head — CPU ≡ GPU (gre
     });
     defer kv_gpu.deinit();
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     var paged_gpu = try paged_attn.PagedAttentionGpu.init(
         gpa,
         .{

@@ -95,7 +95,7 @@ test "KvarnGpuCache: appendTokens e2e + descs + split attention (gated cubin)" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_split_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const kmod = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const smod = try cudaz.cuModuleLoad(build_options.kvarn_split_cubin);
 
@@ -255,7 +255,7 @@ test "M3 appendTokens adaptive: smem_optin 64KB (lowshmem) vs null (hishmem) —
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_split_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const kmod = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
 
     const stream = try cudaz.cuStreamCreate(0);

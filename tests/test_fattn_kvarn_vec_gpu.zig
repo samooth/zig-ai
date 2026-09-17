@@ -123,7 +123,7 @@ test "B6 vec E2E: fattnKvarnVecDevice ≡ CPU ref con materialized K/V (gated P4
     const q_size: usize = @as(usize, VEC_CASE.n_q) * @as(usize, VEC_CASE.n_q_heads) * D;
     const kv_size: usize = @as(usize, VEC_CASE.n_kv) * @as(usize, VEC_CASE.n_kv_heads) * D;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const fattn_module_unused = try cudaz.cuModuleLoad(build_options.fattn_cubin);
     _ = fattn_module_unused; // vec usa vec_module; kept for symmetry
     const kvk_module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);

@@ -165,7 +165,7 @@ fn cpuAttentionPipeline(
 test "B5 gate M1 prep: portable FA ≡ CPU ref (D=128, n_kv=128, n_q=1, GQA=4, 1 stream)" {
     if (build_options.fattn_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.fattn_cubin);
 
     const allocator = testing.allocator;

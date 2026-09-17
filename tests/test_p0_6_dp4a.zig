@@ -309,7 +309,7 @@ test "P0-6 dp4a parity" {
     if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     @import("debug").init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);

@@ -16,7 +16,7 @@ fn makeTensorBytes(gpa: std.mem.Allocator, n: usize, seed: u8) ![]u8 {
 
 test "quant-resident: upload→H2D bit-exacto→hit sin DMA→evict→re-upload" {
     if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
 
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

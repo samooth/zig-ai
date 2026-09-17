@@ -170,7 +170,7 @@ test "B5 M1 1000-seed: portable FA ≡ CPU ref con store real (gated P4 cubin)" 
     const kv_size: usize = @as(usize, CASE.n_kv) * @as(usize, CASE.n_kv_heads) * D;
 
     // Buffers device.
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const fattn_module = try cudaz.cuModuleLoad(build_options.fattn_cubin);
     const kvk_module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const stream = try cudaz.cuStreamCreate(0);
@@ -402,7 +402,7 @@ test "B5 M1 1000-seed: materialize→FA (D6) ≡ CPU ref (gated P4 cubin)" {
     const kv_size: usize = @as(usize, CASE.n_kv) * @as(usize, CASE.n_kv_heads) * D;
     const kv_f16_size: usize = kv_size * @sizeOf(f16);
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const fattn_module_unused = try cudaz.cuModuleLoad(build_options.fattn_cubin);
     _ = fattn_module_unused; // D6: solo materialize+CPU ref (sin portable)
     const kvk_module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);

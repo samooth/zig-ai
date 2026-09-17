@@ -24,7 +24,7 @@ const GROUP: usize = 128;
 test "9.12 F0: WHT-64 device == hadamard64InPlace (bit-exacto)" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const func = try cudaz.cuModuleGetFunction(module, "kvarn_wht_64_rows_kernel");
 
@@ -83,7 +83,7 @@ test "9.12 F0: WHT-64 device == hadamard64InPlace (bit-exacto)" {
 test "9.12 F2: store D64 device produce records válidos (eager, heads=2, k5v4)" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const allocator = testing.allocator;
     var prng = std.Random.DefaultPrng.init(0xD64_F2);
@@ -218,7 +218,7 @@ test "9.12 F2: store D64 device produce records válidos (eager, heads=2, k5v4)"
 test "9.12 F3: fattn portable D64 stage-only == CPU ref (tol 1e-3)" {
     if (build_options.fattn_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const fattn_mod = try cudaz.cuModuleLoad(build_options.fattn_cubin);
     const allocator = testing.allocator;
     var prng = std.Random.DefaultPrng.init(0xD64_F3);

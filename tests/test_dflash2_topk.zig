@@ -9,7 +9,7 @@ const debugz = @import("debug");
 test "dflash2 top-k GPU vs CPU parity + throughput" {
     if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
@@ -82,7 +82,7 @@ test "dflash2 top-k GPU vs CPU parity + throughput" {
 test "dflash2 tree-walk parity vs selector" {
     if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);

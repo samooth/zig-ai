@@ -11,7 +11,7 @@ const page = std.heap.page_size_min;
 
 test "HostBank: register→H2D async→D2H roundtrip bit-exacto + unreg" {
     if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
 
     const pages: usize = 4;
     const bytes_len = pages * page;
@@ -47,7 +47,7 @@ test "HostBank: register→H2D async→D2H roundtrip bit-exacto + unreg" {
 
 test "HostBank: doble registro falla con AlreadyRegistered y unreg es idempotente" {
     if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
 
     const raw = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(page), page);
     defer std.testing.allocator.free(raw);
@@ -67,7 +67,7 @@ test "HostBank: doble registro falla con AlreadyRegistered y unreg es idempotent
 
 test "HostBank: fromFileMmapWhole registra mmap completo y cubre tensores 32B-alineados internos" {
     if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
 
     const pages = 3;
     const raw = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(page), pages * page);

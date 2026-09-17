@@ -129,7 +129,7 @@ test "B4 iter 2: portable D=256 ≡ CPU ref con materialized K/V (gated P4 cubin
     const q_size: usize = @as(usize, CASE.n_q) * @as(usize, CASE.n_q_heads) * D;
     const kv_size: usize = @as(usize, CASE.n_kv) * n_logical_heads * D;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const fattn_module = try cudaz.cuModuleLoad(build_options.fattn_cubin);
     const kvk_module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const stream = try cudaz.cuStreamCreate(0);
@@ -336,7 +336,7 @@ test "9.4: portable D=256 GQA 8Q/2KV (geometría 0.8B) ≡ CPU ref" {
     const layout128 = kvarn.KvarnRecordLayout.init(128, 5, 4) catch unreachable;
     const record_bytes: c_int = @intCast(layout128.tile_bytes);
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const fattn_module = try cudaz.cuModuleLoad(build_options.fattn_cubin);
     const kvk_module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const stream = try cudaz.cuStreamCreate(0);

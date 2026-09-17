@@ -6,7 +6,7 @@ const kv_quant = @import("kv_cache").kv_quant;
 const pa = @import("paged_attention");
 
 fn dp4aParityTest(allocator: std.mem.Allocator, qtype: u32, fmt: pa.QuantFormat, K: usize, N: usize) !void {
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);

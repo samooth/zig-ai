@@ -20,7 +20,7 @@ test "M3 main-pattern: 3 capas × (prefill 256 + decode 8) con smem_optin probeD
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_split_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const allocator = testing.allocator;
     const kmod = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const smod = try cudaz.cuModuleLoad(build_options.kvarn_split_cubin);

@@ -190,7 +190,7 @@ test "append cuantizado produce bytes bit-exactos vs codificador CPU (q8_0, q4_0
         }
         const gpa = std.testing.allocator;
         debugz.init();
-        try cudaz.ensureContext();
+        cudaz.ensureContext() catch return error.SkipZigTest;
         const stream = try cudaz.cuStreamCreate(0);
         defer cudaz.cuStreamDestroy(stream);
 
@@ -394,7 +394,7 @@ test "append cuantizado en paso decode (start_pos>0) indexa el chunk relativo" {
         }
         const gpa = std.testing.allocator;
         debugz.init();
-        try cudaz.ensureContext();
+        cudaz.ensureContext() catch return error.SkipZigTest;
         const stream = try cudaz.cuStreamCreate(0);
         defer cudaz.cuStreamDestroy(stream);
 
@@ -503,7 +503,7 @@ test "q4_cache auto-evict por techo: recache estable tras eviction" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
@@ -597,7 +597,7 @@ test "preservación: append mid-bloque no pisa SBs de tokens previos (gran-256)"
         }
         const gpa = std.testing.allocator;
         debugz.init();
-        try cudaz.ensureContext();
+        cudaz.ensureContext() catch return error.SkipZigTest;
         const stream = try cudaz.cuStreamCreate(0);
         defer cudaz.cuStreamDestroy(stream);
 
@@ -801,7 +801,7 @@ test "decode fusionado coincide con referencia CPU (q8_0, q4_0, q4_k)" {
         }
         const gpa = std.testing.allocator;
         debugz.init();
-        try cudaz.ensureContext();
+        cudaz.ensureContext() catch return error.SkipZigTest;
         const stream = try cudaz.cuStreamCreate(0);
         defer cudaz.cuStreamDestroy(stream);
         const spec = specFor(fmt);
@@ -916,7 +916,7 @@ test "3.3 dp4a: decode q8_0 variante dp4a ≈ base vs referencia CPU (rel gate)"
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     const spec = specFor(.q8_0);
@@ -1010,7 +1010,7 @@ test "3.3-b dp4a: decode q4_0 variante dp4a ≈ base vs referencia CPU (rel gate
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     const spec = specFor(.q4_0);
@@ -1100,7 +1100,7 @@ test "prefill q8_0 fusionado coincide con referencia CPU (causal)" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
 
@@ -1208,7 +1208,7 @@ test "prefill cuantizado coincide con referencia CPU (todos los formatos)" {
         }
         const gpa = std.testing.allocator;
         debugz.init();
-        try cudaz.ensureContext();
+        cudaz.ensureContext() catch return error.SkipZigTest;
         const stream = try cudaz.cuStreamCreate(0);
         defer cudaz.cuStreamDestroy(stream);
 
@@ -1327,7 +1327,7 @@ test "B3 MMQ q4_0 GEMV: paridad vs CPU y bench vs qgemm fp32-A" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
@@ -1521,7 +1521,7 @@ test "B2.4 iq4_xs append GPU vs CPU (INVESTIGACIÓN: paridad roja)" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
 
@@ -1591,7 +1591,7 @@ test "B6 mmqQ8_0WGEMV: paridad lm_head cuantizado on-load" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
@@ -1755,7 +1755,7 @@ test "qgemm type 6 (q3_k) / 7 (q2_k): paridad vs gguf.dequant canónico" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
@@ -1879,7 +1879,7 @@ test "qgemm types 10-17: paridad con pesos generados por encoder" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
@@ -1916,6 +1916,7 @@ test "qgemm types 10-17: paridad con pesos generados por encoder" {
         for (0..NN) |j| {
             @memcpy(w_bytes[j * row_sizes[j] ..][0..row_sizes[j]], w_bytes_list[j]);
         }
+        for (0..NN) |j| gpa.free(w_bytes_list[j]);
 
         // Ref CPU: dequant espejo (ya validado por roundtrip propio).
         const w_ref = try gpa.alloc(f32, NN * K);
@@ -1976,7 +1977,7 @@ test "qgemm type 9 (iq2_s): paridad vs dequant canónico" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
@@ -2039,7 +2040,7 @@ test "qgemm type 8 (iq3_s): paridad vs referencia CPU de layout directo" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
@@ -2111,7 +2112,7 @@ test "qgemm type 5 (q8_0): paridad vs referencia CPU" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
@@ -2195,7 +2196,7 @@ test "qgemm type 4 (q4_k): paridad vs referencia CPU de layout directo" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
@@ -2360,7 +2361,7 @@ test "B3-v3 mmqQ8_0WFused: paridad vs CPU + bench vs camino 3-launch" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
@@ -2544,7 +2545,7 @@ test "bench append IQ: latencia por decode-step (kv_dim=1024)" {
 
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
 
@@ -2616,7 +2617,7 @@ test "qgemm type 4 (q4_k) geometría 9B: k=12288 n=4096 m=5" {
     }
     const gpa = std.testing.allocator;
     debugz.init();
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);

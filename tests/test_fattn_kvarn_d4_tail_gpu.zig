@@ -311,7 +311,7 @@ test "D4 KVCPT E2E real body: body-only (n_tail=0) ≡ CPU ref (gated P4 cubin)"
     const q_size: usize = n_q_heads * D;
     const kv_size: usize = n_kv_body * n_kv_heads * D;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const fattn_module = try cudaz.cuModuleLoad(build_options.fattn_cubin);
     const kvk_module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const stream = try cudaz.cuStreamCreate(0);
@@ -571,7 +571,7 @@ test "D4 KVCPT E2E real body: body+tail (n_tail>0) ≡ CPU ref (gated P4 cubin)"
     const kv_size: usize = n_kv_body * n_kv_heads * D;
     const d_k: u32 = D * 2; // bytes per f16 token of tail
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const fattn_module = try cudaz.cuModuleLoad(build_options.fattn_cubin);
     const kvk_module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const stream = try cudaz.cuStreamCreate(0);

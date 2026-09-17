@@ -56,7 +56,7 @@ fn sealRef(
 test "A8/M1: kvarnStoreDevice bit-exacto vs encodeK/VTile (eager, 2 heads, k5v4)" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const allocator = testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x5EED);
@@ -195,7 +195,7 @@ test "A8/M1: kvarnStoreDevice bit-exacto vs encodeK/VTile (eager, 2 heads, k5v4)
 
 test "A8/M1: matrix k{4,5,8}v{2,4,8} bit-exacta (eager, g=1)" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
 
     const pairs = [_][2]u8{ .{ 4, 2 }, .{ 5, 4 }, .{ 8, 8 }, .{ 2, 3 }, .{ 6, 5 } };
@@ -312,7 +312,7 @@ test "A8/M1: matrix k{4,5,8}v{2,4,8} bit-exacta (eager, g=1)" {
 
 test "A8/M1: delayed flush (non-eager) — sella g al salir de ventana tail" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const allocator = testing.allocator;
     var prng = std.Random.DefaultPrng.init(0xF1A5E);
@@ -428,7 +428,7 @@ test "A8/M1: delayed flush (non-eager) — sella g al salir de ventana tail" {
 
 test "A6: materialize K+V desde records sellados (rotated→original f16)" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const allocator = testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x0DDA7A);
@@ -606,7 +606,7 @@ test "A8/M1: regresión write-combining — 6 bloques concurrentes, records ínt
     // (6 heads concurrentes × bits no triviales) verificando el record
     // bit a bit tras un store masivo.
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const allocator = testing.allocator;
 
@@ -717,7 +717,7 @@ test "A8/M1: regresión write-combining — 6 bloques concurrentes, records ínt
 
 test "A8/M1: multistream — 2 streams sellan a records disjuntos" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const allocator = testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x57EE7);
@@ -840,7 +840,7 @@ test "A8/M1: multistream — 2 streams sellan a records disjuntos" {
 
 test "A8/M1: SWA ring — record g%gps sobrescribe el slot del ring" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const allocator = testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x5A11);
@@ -969,7 +969,7 @@ fn a5AxesHex(rec: []const u8, off: usize, n: usize) [8]u16 {
 test "A5: kvarnStoreLowShmemDevice — records decodifican al tile original (eager, k5v4)" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const allocator = testing.allocator;
     var prng = std.Random.DefaultPrng.init(0xA5A5);

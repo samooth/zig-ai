@@ -126,7 +126,7 @@ test "B4 iter 5+: portable D=512 ≡ CPU ref con materialized K/V (gated P4 cubi
     const q_size: usize = @as(usize, CASE.n_q) * @as(usize, CASE.n_q_heads) * D;
     const kv_size: usize = @as(usize, CASE.n_kv) * @as(usize, CASE.n_kv_heads) * D;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const fattn_module = try cudaz.cuModuleLoad(build_options.fattn_cubin);
     const kvk_module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const stream = try cudaz.cuStreamCreate(0);

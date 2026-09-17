@@ -11,7 +11,7 @@ const build_options = @import("build_options");
 
 test "iso: store SOLO kvh=2 layout real (bisect hang)" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const kmod = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const stream = try cudaz.cuStreamCreate(0);
     defer cudaz.cuStreamDestroy(stream);

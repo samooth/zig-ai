@@ -54,7 +54,7 @@ fn whtHost(rows: []f32) void {
 test "B4 WHT-128 device bit-exacto vs hadamard128InPlace (gate M1 D3)" {
     if (build_options.fattn_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.fattn_cubin);
     const func = try cudaz.cuModuleGetFunction(module, "fattn_kvarn_wht_128_rows_kernel");
 

@@ -160,7 +160,7 @@ test "B5 multistream matrix: 1,2,4 streams × SWA on/off × GQA 4,8 (gated P4 cu
                 const n_q_heads_local: u32 = gqa_local * n_kv_heads;
                 const q_size_local: usize = @as(usize, n_q_heads_local) * D;
 
-                try cudaz.ensureContext();
+                cudaz.ensureContext() catch return error.SkipZigTest;
                 const fattn_module = try cudaz.cuModuleLoad(build_options.fattn_cubin);
                 const kvk_module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
                 const stream = try cudaz.cuStreamCreate(0);

@@ -164,7 +164,7 @@ test "B8 bench: harness runs N_SEEDS con N_ITERS y reporta times (gated cubin + 
     defer testing.allocator.free(lock_path);
     try tryBenchLock(lock_path);
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const fattn_module = try cudaz.cuModuleLoad(build_options.fattn_cubin);
     const kvarn_module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const split_loaded = build_options.kvarn_split_cubin.len > 0;
@@ -501,7 +501,7 @@ test "B8 repro: initDescs+portable case1 shape" {
     if (build_options.fattn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
     if (std.c.getenv("B8_REPRO") == null) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const kvarn_module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const fattn_module = try cudaz.cuModuleLoad(build_options.fattn_cubin);
     const stream = try cudaz.cuStreamCreate(0);

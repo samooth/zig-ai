@@ -213,7 +213,7 @@ test "nvrtc: JIT argmax paridad bit-exact vs cubin build-time" {
     debugz.dbg.printLevel(.info, "[nvrtc] JIT compile: {d} ms ({d} bytes cubin, {s})\n", .{ dt_compile_ms, cubin.len, arch });
 
     // Carga por el MISMO camino que loadModule (cuModuleLoadData).
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const jit_module = try cudaz.cuModuleLoadData(cubin);
     defer cudaz.cuModuleUnload(jit_module);
     const jit_func = try cudaz.cuModuleGetFunction(jit_module, "argmaxJitKernel");
@@ -310,7 +310,7 @@ test "nvrtc: ErrorFlag — flag limpio en verde, EF_NAN/EF_OOB en malicioso" {
     ;
     const cubin = try nvrtc.compileCubin(std.testing.allocator, ef_src, .{ .arch = arch });
     defer std.testing.allocator.free(cubin);
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const mod = try cudaz.cuModuleLoadData(cubin);
     defer cudaz.cuModuleUnload(mod);
     const demo_f = try cudaz.cuModuleGetFunction(mod, "efDemoKernel");

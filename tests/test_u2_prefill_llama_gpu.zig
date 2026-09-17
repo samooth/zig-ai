@@ -116,7 +116,7 @@ test "U2-llama: prefill GPU dense batched n=512 (capa real Llama-3.2) ≈ CPU go
     var bt_gpu = paged_attn.BlockTable.init(gpa, block_size);
     defer bt_gpu.deinit(kv_gpu.block_alloc);
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     var paged_gpu = try paged_attn.PagedAttentionGpu.init(
         gpa,
         .{

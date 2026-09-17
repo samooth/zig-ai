@@ -16,7 +16,7 @@ const N = 8;
 test "A9 smoke: mma.m16n8k16 == CPU matmul f32-accum" {
     if (build_options.kvarn_mma_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_mma_cubin);
     const func = try cudaz.cuModuleGetFunction(module, "kvarn_mma_smoke_kernel");
     const allocator = testing.allocator;

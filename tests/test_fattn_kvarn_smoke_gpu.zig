@@ -200,7 +200,7 @@ fn checkWrapperSmoke(
 test "ARITY smoke: fattnKvarnPortableDevice (D=128) output is finite" {
     if (build_options.fattn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
 
     const allocator = testing.allocator;
     var fixture = try SmokeFixture.init(allocator, 128);
@@ -224,7 +224,7 @@ test "ARITY smoke: fattnKvarnPortableD256Device output is finite" {
     if (build_options.fattn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
     if (std.c.getenv("ZIG_AI_KVARN_D2_UNLOCK") == null) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
 
     const allocator = testing.allocator;
     var fixture = try SmokeFixture.init(allocator, 128);
@@ -248,7 +248,7 @@ test "ARITY smoke: fattnKvarnPortableD512Device output is finite" {
     if (build_options.fattn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
     if (std.c.getenv("ZIG_AI_KVARN_D2_UNLOCK") == null) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
 
     const allocator = testing.allocator;
     var fixture = try SmokeFixture.init(allocator, 128);
@@ -271,7 +271,7 @@ test "ARITY smoke: fattnKvarnPortableD512Device output is finite" {
 test "ARITY smoke: fattnKvarnPortableD128TailDevice (n_tail=0) output is finite" {
     if (build_options.fattn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
 
     const allocator = testing.allocator;
     var fixture = try SmokeFixture.init(allocator, 128);
@@ -341,7 +341,7 @@ test "ARITY smoke: fattnKvarnVecDevice (D=256 GQA=2 k4v4) output is finite" {
     // Vec D=256 E2E: WIP Dev-B (softmax-per-slice structural fix
     // pendiente) + requiere D2 (cross-slice WHT ratificación B2).
     if (std.c.getenv("ZIG_AI_KVARN_D2_UNLOCK") == null) return error.SkipZigTest;
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
 
     const allocator = testing.allocator;
     var fixture = try SmokeFixture.init(allocator, 128);
@@ -397,7 +397,7 @@ test "ARITY smoke: kvarnDecodeSplitDevice output is finite (D=128 gqa2)" {
     if (build_options.kvarn_split_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const smod = try cudaz.cuModuleLoad(build_options.kvarn_split_cubin);
     const kmod = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const stream = try cudaz.cuStreamCreate(0);

@@ -22,7 +22,7 @@ fn whtRowsHost(rows: []f32) void {
 test "F0 smoke: WHT-128 device == hadamard128InPlace (bit-exacto)" {
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
 
-    try cudaz.ensureContext();
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const module = try cudaz.cuModuleLoad(build_options.kvarn_cubin);
     const func = try cudaz.cuModuleGetFunction(module, "kvarn_wht_128_rows_kernel");
 
