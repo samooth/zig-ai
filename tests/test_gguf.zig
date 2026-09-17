@@ -419,7 +419,7 @@ test "dequant Q1_0: sign bit per weight, values ±d" {
         const byte_idx = j / 8;
         const bit_idx = j % 8;
         const sign = (bytes[2 + byte_idx] >> @intCast(bit_idx)) & 1;
-        const expected = if (sign != 0) 2.0 else -2.0;
+        const expected: f32 = if (sign != 0) 2.0 else -2.0;
         try std.testing.expectApproxEqAbs(expected, v, 1e-5);
     }
 }

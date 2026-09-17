@@ -31,7 +31,7 @@ test "BlockAllocator alloc/free" {
     defer alloc.deinit();
     try std.testing.expectEqual(@as(usize, 16), alloc.numTotal());
     try std.testing.expectEqual(@as(usize, 16), alloc.numFree());
-    const b1 = try alloc.alloc();
+    const b1 = (try alloc.alloc()) orelse return error.OutOfMemory;
     try std.testing.expectEqual(@as(usize, 15), alloc.numFree());
     alloc.acquire(b1);
     try std.testing.expectEqual(@as(u32, 1), alloc.blocks[b1].ref_count);
@@ -254,16 +254,17 @@ test "BlockAllocator CPU offload swap round-trip" {
     };
     var alloc = try pa.BlockAllocator.init(gpa, config);
     defer alloc.deinit();
-    const b = try alloc.alloc();
+    const b = (try alloc.alloc()) orelse return error.OutOfMemory;
     try std.testing.expect(!alloc.blocks[b].is_cpu);
     const dst = alloc.memory_pool[b * alloc.block_bytes ..][0..alloc.block_bytes];
     for (0..dst.len) |i| dst[i] = @intCast(i % 251);
+    const expected = try gpa.dupe(u8, dst);
+    defer gpa.free(expected);
 
     try alloc.swapToCpu(b);
     try std.testing.expect(alloc.blocks[b].is_cpu);
-    try std.testing.expectEqualSlices(u8, dst, alloc.cpu_pool.?[b * alloc.block_bytes ..][0..alloc.block_bytes]);
+    try std.testing.expectEqualSlices(u8, expected, alloc.cpu_pool.?[b * alloc.block_bytes ..][0..alloc.block_bytes]);
 
-    @memset(dst, 0);
     try alloc.swapFromCpu(b);
     try std.testing.expect(!alloc.blocks[b].is_cpu);
     for (dst, 0..) |byte, i| try std.testing.expectEqual(@as(u8, @intCast(i % 251)), byte);

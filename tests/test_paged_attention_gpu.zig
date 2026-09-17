@@ -110,7 +110,7 @@ test "paged attention GPU prefill matches CPU reference" {
     defer gpa.free(outs_gpu);
 
     const attn = pa.PagedAttention.init(gpa, config);
-    try attn.prefill(queries, outs_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc, seq_len);
+    try attn.prefill(queries, outs_cpu, kv.getBlockTable(seq_id).?, kv.block_alloc, seq_len, null);
 
     cudaz.ensureContext() catch return error.SkipZigTest;
     const gpu_stream = try cudaz.cuStreamCreate(0);
