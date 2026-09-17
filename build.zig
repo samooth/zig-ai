@@ -1604,6 +1604,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    server_json_util_mod.addImport("time", time_mod);
     const server_batching_mod = b.createModule(.{
         .root_source_file = b.path("src/server/batching.zig"),
         .target = target,

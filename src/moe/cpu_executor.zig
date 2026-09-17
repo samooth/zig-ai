@@ -53,12 +53,13 @@ extern "c" fn mmap(
 extern "c" fn munmap(addr: ?*const anyopaque, length: usize) i32;
 extern "c" fn unlink(path: [*:0]const u8) i32;
 extern "c" fn nanosleep(rqtp: *const std.c.timespec, rmtp: ?*std.c.timespec) c_int;
+extern "kernel32" fn Sleep(dwMilliseconds: u32) callconv(.c) void;
 
 const O_RDONLY: c_int = 0;
 
 fn threadSleepUs(us: u64) void {
     if (comptime builtin.target.os.tag == .windows) {
-        std.Thread.sleep(us * 1000);
+        Sleep(@intCast(@max(1, us / 1000)));
         return;
     }
     const ts: std.c.timespec = .{
