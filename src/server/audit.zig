@@ -15,6 +15,7 @@
 //! corren en N threads del httpx).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const debugz = @import("debug");
 const time = @import("time");
 
@@ -64,7 +65,8 @@ pub const Audit = struct {
             debugz.dbg.printLevel(.info, "[server] audit: NO se pudo abrir {s}: {s}\n", .{ path, @errorName(e) });
             return e;
         };
-        _ = std.c.fchmod(self.file.?.handle, 0o600);
+        if (comptime builtin.target.os.tag != .windows)
+            _ = std.c.fchmod(self.file.?.handle, 0o600);
         debugz.dbg.printLevel(.info, "[server] audit: log en {s} (full={})\n", .{ path, self.config.full });
     }
 

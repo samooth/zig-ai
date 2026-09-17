@@ -5,6 +5,7 @@
 //! camino cuda_memops se ejercita en integración (E) y verificación manual
 //! con nvidia-smi dmon (la ventana CPU debe dejar SMs libres).
 const std = @import("std");
+const builtin = @import("builtin");
 const gemv_mod = @import("moe_cpu_gemv");
 const exec_mod = @import("moe_cpu_executor");
 const ext_sync = @import("cudaz_ext_sync");
@@ -357,6 +358,7 @@ test "parseBenchBwText: válido, corrupto y campos ausentes" {
 }
 
 test "resolveFetchFracQ16: fichero real vs ausente (cap seguro)" {
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
     const a = std.testing.allocator;
     // Ausente → cap 1.
     try std.testing.expectEqual(@as(u32, 1), exec_mod.resolveFetchFracQ16(a, "/tmp/opencode/no-existe-benchbw.json"));
@@ -380,6 +382,7 @@ extern "c" fn close(fd: c_int) c_int;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 
 fn writeFixture(path: [:0]const u8) void {
+    if (comptime builtin.target.os.tag == .windows) return;
     const fd = open64(path, 0o1101, 0o644); // O_WRONLY|O_CREAT|O_TRUNC, rw-r--r--
     if (fd < 0) return;
     defer _ = close(fd);
@@ -390,6 +393,7 @@ fn writeFixture(path: [:0]const u8) void {
     _ = write(fd, body.ptr, body.len);
 }
 fn deleteFixture(path: [:0]const u8) void {
+    if (comptime builtin.target.os.tag == .windows) return;
     _ = unlink(path);
 }
 
@@ -527,6 +531,7 @@ const fixture_paths = [_][]const u8{
 };
 
 test "fixtures MoE reales: geometría + dot filas reales q4_1 (ambas variantes)" {
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
     const a = std.testing.allocator;
     var validated_any = false;
 
@@ -583,6 +588,7 @@ var checked_print: usize = 0;
 // Lectura completa de fichero vía libc (reusa externs open/read/close de
 // los helpers writeFixture/deleteFixture declarados arriba).
 fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (comptime builtin.target.os.tag == .windows) return error.FileNotFound;
     var pathz: [512]u8 = undefined;
     const pz = try std.fmt.bufPrintZ(&pathz, "{s}", .{path});
     const fd = open(pz.ptr, 0);
@@ -725,6 +731,7 @@ const gemma4_path = "/ai/models/gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf";
 extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
 
 test "gemma-4 real: banco gate_up Q6_K apilado cuadra rowBytes + dot fila real" {
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
     const a = std.testing.allocator;
     var pathz: [512]u8 = undefined;
     const pz = std.fmt.bufPrintZ(&pathz, "{s}", .{gemma4_path}) catch return error.NameTooLong;
@@ -858,6 +865,7 @@ test "gemma-4 real: banco gate_up Q6_K apilado cuadra rowBytes + dot fila real" 
 }
 
 fn preadAll(fd: c_int, buf: []u8, offset: u64) !usize {
+    if (comptime builtin.target.os.tag == .windows) return error.ShortRead;
     var total: usize = 0;
     while (total < buf.len) {
         const r = pread(fd, buf.ptr + total, buf.len - total, @intCast(offset + total));

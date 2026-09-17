@@ -9,6 +9,7 @@
 //! nvrtc_kernels.cu en runtime y lo lanza — medir la compilación es parte
 //! del test (breadcrumb [nvrtc]).
 const std = @import("std");
+const builtin = @import("builtin");
 const cudaz = @import("cudaz");
 const matmul = @import("matmul");
 const layer_kernels = @import("layer_kernels");
@@ -122,8 +123,10 @@ test "nvrtc: sondas de includes del SDK (UC-1.4)" {
         const rel = "src/cuda/nvrtc_shims";
         @memcpy(shim_dir_buf[0..rel.len], rel);
         shim_dir_buf[rel.len] = 0;
-        if (std.c.realpath(shim_dir_buf[0..rel.len :0], &shim_dir_buf)) |_| {} else {
-            @memcpy(shim_dir_buf[0..rel.len], rel);
+        if (comptime builtin.os.tag != .windows) {
+            if (std.c.realpath(shim_dir_buf[0..rel.len :0], &shim_dir_buf)) |_| {} else {
+                @memcpy(shim_dir_buf[0..rel.len], rel);
+            }
         }
     }
     const shim_dir_len = std.mem.indexOfScalar(u8, shim_dir_buf[0..], 0) orelse shim_dir_buf.len;

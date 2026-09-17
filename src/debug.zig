@@ -482,6 +482,7 @@ pub const Debug = struct {
     /// scope_set activo. Sin scope activo (`scope_count == 0`) → siempre pasa.
     /// Coste: cero cuando no hay scope activo.
     pub fn scopeMatches(self: Debug, tag: []const u8) bool {
+        if (tag.len == 0) return true;
         if (self.scope_count == 0) return true;
         for (0..8) |i| {
             if (i >= self.scope_count) return false;

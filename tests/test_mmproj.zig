@@ -932,7 +932,7 @@ test "deepstack: detectar modelos con is_deepstack_layers" {
     };
     var found_any: bool = false;
     for (paths) |p| {
-        const meta = mmproj_model.MmprojModel.load(std.Io.Threaded.global_single_threaded.io(), testing.allocator, p) catch |e| {
+        var meta = mmproj_model.MmprojModel.load(std.Io.Threaded.global_single_threaded.io(), testing.allocator, p) catch |e| {
             std.debug.print("{s}: load error: {s}\n", .{ std.fs.path.basename(p), @errorName(e) });
             continue;
         };

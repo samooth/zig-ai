@@ -25,6 +25,7 @@
 //! Referencia estudio: coderonion/zcuda (MIT) src/nvtx/safe.zig — patrón
 //! safe-wrapper; atribución, cero dependencia.
 const std = @import("std");
+const builtin = @import("builtin");
 
 const PushFn = *const fn ([*:0]const u8) callconv(.c) c_int;
 const PopFn = *const fn () callconv(.c) void;
@@ -71,12 +72,32 @@ fn dlopenSymbol(
     if (lib_name.len >= buf.len) return false;
     @memcpy(buf[0..lib_name.len], lib_name);
     buf[lib_name.len] = 0;
-    const handle = c.dlopen(buf[0..lib_name.len :0].ptr, c.RTLD_LAZY);
+    const nt_name = buf[0..lib_name.len :0].ptr;
+
+    const handle = if (comptime builtin.target.os.tag == .windows)
+        c.LoadLibraryA(nt_name)
+    else
+        c.dlopen(nt_name, c.RTLD_LAZY);
+
     if (handle == null) return false;
     const h = handle.?;
-    const p = c.dlsym(h, "nvtxRangePushA") orelse return false;
-    const q = c.dlsym(h, "nvtxRangePop") orelse return false;
-    const m = c.dlsym(h, "nvtxMarkA") orelse return false;
+
+    const symFn = if (comptime builtin.target.os.tag == .windows)
+        struct {
+            fn get(hdl: *anyopaque, name: [*:0]const u8) ?*anyopaque {
+                return c.GetProcAddress(hdl, name);
+            }
+        }.get
+    else
+        struct {
+            fn get(hdl: *anyopaque, name: [*:0]const u8) ?*anyopaque {
+                return c.dlsym(hdl, name);
+            }
+        }.get;
+
+    const p = symFn(h, "nvtxRangePushA") orelse return false;
+    const q = symFn(h, "nvtxRangePop") orelse return false;
+    const m = symFn(h, "nvtxMarkA") orelse return false;
     push.* = @ptrCast(@alignCast(p));
     pop.* = @ptrCast(@alignCast(q));
     mark_fn.* = @ptrCast(@alignCast(m));
@@ -112,12 +133,18 @@ pub fn available() bool {
     return ensureLoaded();
 }
 
-// ─── libc mínimo (dlopen/dlsym; link_libc ya es global en el repo) ───
-const c = struct {
-    extern fn dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
-    extern fn dlsym(handle: ?*anyopaque, symbol: [*:0]const u8) ?*anyopaque;
-    const RTLD_LAZY: c_int = 1; // POSIX glibc (linux)
-};
+// ─── libc mínimo — platform-conditional (link_libc ya es global en el repo) ───
+const c = if (builtin.target.os.tag == .windows)
+    struct {
+        extern "kernel32" fn LoadLibraryA(path: [*:0]const u8) ?*anyopaque;
+        extern "kernel32" fn GetProcAddress(handle: *anyopaque, symbol: [*:0]const u8) ?*anyopaque;
+    }
+else
+    struct {
+        extern fn dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
+        extern fn dlsym(handle: ?*anyopaque, symbol: [*:0]const u8) ?*anyopaque;
+        const RTLD_LAZY: c_int = 1; // POSIX glibc (linux)
+    };
 
 // ─────────────────────────────────────────────────────────────────────
 // Tests unitarios (sin GPU/lib): available() es determinista por proceso
