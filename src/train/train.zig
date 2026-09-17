@@ -8,10 +8,28 @@
 //!
 //! Backward truncado: dL/du llega del objetivo; el gradiente de los pesos
 //! es exacto para el paso t. s_prev se trata como constante (BPTT depth-1).
+const builtin = @import("builtin");
 const std = @import("std");
 const rlt = @import("rlt_layer");
 
 fn nowNs() i128 {
+    if (builtin.target.os.tag == .windows) {
+        const QPC = struct {
+            extern "kernel32" fn QueryPerformanceCounter(*i64) i32;
+            extern "kernel32" fn QueryPerformanceFrequency(*i64) i32;
+            var freq: ?i64 = null;
+            fn getFreq() i64 {
+                if (freq) |f| return f;
+                var f: i64 = undefined;
+                _ = QueryPerformanceFrequency(&f);
+                freq = f;
+                return f;
+            }
+        };
+        var counter: i64 = undefined;
+        _ = QPC.QueryPerformanceCounter(&counter);
+        return @intCast(@divTrunc(counter * std.time.ns_per_s, QPC.getFreq()));
+    }
     var ts: std.posix.timespec = undefined;
     _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
     return @as(i128, @intCast(ts.sec)) * std.time.ns_per_s + @as(i128, @intCast(ts.nsec));

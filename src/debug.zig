@@ -516,7 +516,22 @@ pub const Debug = struct {
 
 fn monotonicNs() u64 {
     if (builtin.target.os.tag == .windows) {
-        return 0;
+        // Windows: use QueryPerformanceCounter for portable monotonic time
+        const QPC = struct {
+            extern "kernel32" fn QueryPerformanceCounter(*i64) i32;
+            extern "kernel32" fn QueryPerformanceFrequency(*i64) i32;
+            var freq: ?i64 = null;
+            fn getFreq() i64 {
+                if (freq) |f| return f;
+                var f: i64 = undefined;
+                _ = QueryPerformanceFrequency(&f);
+                freq = f;
+                return f;
+            }
+        };
+        var counter: i64 = undefined;
+        _ = QPC.QueryPerformanceCounter(&counter);
+        return @intCast(@divTrunc(counter * std.time.ns_per_s, QPC.getFreq()));
     }
     var ts = std.posix.timespec{ .sec = 0, .nsec = 0 };
     _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);

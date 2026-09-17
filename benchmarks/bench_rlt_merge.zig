@@ -1,9 +1,20 @@
 // Micro-benchmark: RLT merge feedback overhead
 // Measures ns/op for mergeFeedback (CPU) across common d_model sizes.
 // No GGUF model needed — pure computation benchmark.
+const builtin = @import("builtin");
 const std = @import("std");
 
+extern "kernel32" fn QueryPerformanceCounter(lpPerformanceCount: *i64) i32;
+extern "kernel32" fn QueryPerformanceFrequency(lpFrequency: *i64) i32;
+
 fn nowNs() u64 {
+    if (builtin.target.os.tag == .windows) {
+        var counter: i64 = undefined;
+        _ = QueryPerformanceCounter(&counter);
+        var freq: i64 = undefined;
+        _ = QueryPerformanceFrequency(&freq);
+        return @intCast(@divTrunc(counter * 1_000_000_000, freq));
+    }
     var ts: std.posix.timespec = undefined;
     _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));

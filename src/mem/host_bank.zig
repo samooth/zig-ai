@@ -9,8 +9,18 @@ const debugz = @import("debug");
 const cudaz = @import("cudaz");
 const ext_mem = @import("cudaz_ext_mem");
 const ext_sync = @import("cudaz_ext_sync");
-extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
-extern "c" fn open64(path: [*:0]const u8, flags: c_int, ...) c_int;
+fn linuxOpen(path: [*:0]const u8, flags: u32) c_int {
+    if (comptime builtin.target.os.tag != .linux) return -1;
+    const rc = std.os.linux.open(path, @bitCast(flags), 0);
+    if (rc > @as(usize, @bitCast(@as(isize, -1)))) return -1;
+    return @intCast(rc);
+}
+fn linuxPread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize {
+    if (comptime builtin.target.os.tag != .linux) return -1;
+    const rc = std.os.linux.pread(fd, buf, count, offset);
+    if (rc > @as(usize, @bitCast(@as(isize, -1)))) return -1;
+    return @intCast(rc);
+}
 const ftw = @import("ftw");
 const disk_tier = @import("disk_tier");
 const os = std.posix;
@@ -386,14 +396,16 @@ pub const HostBank = struct {
         if (aligned_end < size) {
             var pbuf: [64]u8 = undefined;
             const pz = std.fmt.bufPrintZ(&pbuf, "/proc/self/fd/{d}", .{fd}) catch return error.OpenFailed;
-            const bfd = open64(pz.ptr, 0);
+            const bfd = linuxOpen(pz.ptr, 0);
             if (bfd < 0) return error.OpenFailed;
-            defer _ = std.os.linux.close(@intCast(bfd));
+            if (comptime builtin.target.os.tag == .linux) {
+                defer _ = std.os.linux.close(@intCast(bfd));
+            }
             var t: usize = 0;
             const tl = size - aligned_end;
             while (t < tl) {
                 const piece = @min(@as(usize, 1 << 20), tl - t);
-                const n = pread(bfd, dst + aligned_end + t, piece, @intCast(aligned_end + t));
+                const n = linuxPread(bfd, dst + aligned_end + t, piece, @intCast(aligned_end + t));
                 if (n <= 0) return error.ReadFailed;
                 t += @intCast(n);
             }
@@ -461,7 +473,7 @@ fn readIouringDirect(fd: c_int, dst: []u8) !void {
     if (builtin.target.os.tag != .linux) return error.IouringUnavailable;
     var zbuf: [64]u8 = undefined;
     const pz = std.fmt.bufPrintZ(&zbuf, "/proc/self/fd/{d}", .{fd}) catch return error.OpenFailed;
-    const ofd = open64(pz.ptr, 0o40000); // O_RDONLY|O_DIRECT
+    const ofd = linuxOpen(pz.ptr, 0o40000); // O_RDONLY|O_DIRECT
     if (ofd < 0) return error.OdirectUnavailable;
     defer _ = std.os.linux.close(@intCast(ofd));
 
@@ -497,7 +509,7 @@ fn readSerial(fd: c_int, dst: []u8) !void {
     var done: usize = 0;
     while (done < dst.len) {
         const chunk = @min(@as(usize, 1 << 20), dst.len - done);
-        const n = pread(fd, dst.ptr + done, chunk, @intCast(done));
+        const n = linuxPread(fd, dst.ptr + done, chunk, @intCast(done));
         if (n <= 0) return error.ReadFailed;
         done += @intCast(n);
     }

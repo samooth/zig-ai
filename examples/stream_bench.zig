@@ -15,6 +15,7 @@
 //! contabilidad de bytes y el techo secuencial.
 //!
 //! Métrica D4: bytes H2D/token = Σ pesos CUANTIZADOS (no f32).
+const builtin = @import("builtin");
 const std = @import("std");
 const time = @import("time");
 const debug = @import("debug");
@@ -85,17 +86,19 @@ pub fn main(init: std.process.Init) !void {
     var tokens: usize = 6;
     var noqwire = false;
     var overlap = false;
-    var args_it = std.process.Args.Iterator.init(init.minimal.args);
-    _ = args_it.next();
-    while (args_it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "--model=")) {
-            model_path = arg["--model=".len..];
-        } else if (std.mem.startsWith(u8, arg, "--tokens=")) {
-            tokens = try std.fmt.parseInt(usize, arg["--tokens=".len..], 10);
-        } else if (std.mem.eql(u8, arg, "--noqwire")) {
-            noqwire = true;
-        } else if (std.mem.eql(u8, arg, "--overlap")) {
-            overlap = true;
+    if (builtin.target.os.tag != .windows) {
+        var args_it = std.process.Args.Iterator.init(init.minimal.args);
+        _ = args_it.next();
+        while (args_it.next()) |arg| {
+            if (std.mem.startsWith(u8, arg, "--model=")) {
+                model_path = arg["--model=".len..];
+            } else if (std.mem.startsWith(u8, arg, "--tokens=")) {
+                tokens = try std.fmt.parseInt(usize, arg["--tokens=".len..], 10);
+            } else if (std.mem.eql(u8, arg, "--noqwire")) {
+                noqwire = true;
+            } else if (std.mem.eql(u8, arg, "--overlap")) {
+                overlap = true;
+            }
         }
     }
     const path = model_path orelse init.environ_map.get("GGUF_MODEL_PATH") orelse {
@@ -121,7 +124,7 @@ pub fn main(init: std.process.Init) !void {
     const lock_file = std.Io.Dir.cwd().createFile(io, bench_lock_path, .{ .truncate = false }) catch null;
     var have_lock = false;
     if (lock_file) |lf| {
-        if (std.c.flock(lf.handle, 2 | 4) == 0) have_lock = true else lf.close(io); // EX|NB
+        if (builtin.target.os.tag != .windows and std.c.flock(lf.handle, 2 | 4) == 0) have_lock = true else lf.close(io); // EX|NB
     }
     if (!have_lock) {
         debug.dbg.printLevel(.info, "[stream_bench] GPU ocupada (.bench.lock), sigo sin lock\n", .{});
@@ -331,7 +334,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout.flush();
 
     if (lock_file) |lf| {
-        _ = std.c.flock(lf.handle, 8);
+        if (builtin.target.os.tag != .windows) _ = std.c.flock(lf.handle, 8);
         lf.close(io);
     }
 }

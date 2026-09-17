@@ -4,6 +4,7 @@
 //! with lazy io_uring initialization (QD=32) for high-throughput
 //! sequential reads. This enables running >27B models on 8GB VRAM
 //! by keeping only active experts in host/device memory.
+const builtin = @import("builtin");
 const std = @import("std");
 const debugz = @import("debug");
 const ftw = @import("ftw");
@@ -155,7 +156,7 @@ pub const DiskTier = struct {
 
         var zbuf: [64]u8 = undefined;
         const pz = std.fmt.bufPrintZ(&zbuf, "/proc/self/fd/{d}", .{self.fd}) catch return error.OpenFailed;
-        const ofd = open64(pz.ptr, 0o40000); // O_RDONLY|O_DIRECT
+        const ofd = linuxOpen(pz.ptr, 0o40000); // O_RDONLY|O_DIRECT
         if (ofd < 0) return error.OdirectUnavailable;
         defer _ = std.os.linux.close(@intCast(ofd));
 
@@ -188,14 +189,14 @@ pub const DiskTier = struct {
     fn readPreadDirect(self: *Self, file_offset: u64, dst: []align(4096) u8) !void {
         var zbuf: [64]u8 = undefined;
         const pz = std.fmt.bufPrintZ(&zbuf, "/proc/self/fd/{d}", .{self.fd}) catch return error.OpenFailed;
-        const ofd = open64(pz.ptr, 0o40000); // O_RDONLY|O_DIRECT
+        const ofd = linuxOpen(pz.ptr, 0o40000); // O_RDONLY|O_DIRECT
         if (ofd < 0) return error.OdirectUnavailable;
         defer _ = std.os.linux.close(@intCast(ofd));
 
         var done: usize = 0;
         while (done < dst.len) {
             const chunk = @min(@as(usize, 4 << 20), dst.len - done);
-            const n = pread(ofd, dst.ptr + done, chunk, @intCast(file_offset + done));
+            const n = linuxPread(ofd, dst.ptr + done, chunk, @intCast(file_offset + done));
             if (n <= 0) return error.ReadFailed;
             done += @intCast(n);
         }
@@ -212,8 +213,18 @@ pub const DiskTier = struct {
     }
 };
 
-extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
-extern "c" fn open64(path: [*:0]const u8, flags: c_int, ...) c_int;
+fn linuxOpen(path: [*:0]const u8, flags: u32) c_int {
+    if (comptime builtin.target.os.tag != .linux) return -1;
+    const rc = std.os.linux.open(path, @bitCast(flags), 0);
+    if (rc > @as(usize, @bitCast(@as(isize, -1)))) return -1;
+    return @intCast(rc);
+}
+fn linuxPread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize {
+    if (comptime builtin.target.os.tag != .linux) return -1;
+    const rc = std.os.linux.pread(fd, buf, count, offset);
+    if (rc > @as(usize, @bitCast(@as(isize, -1)))) return -1;
+    return @intCast(rc);
+}
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 

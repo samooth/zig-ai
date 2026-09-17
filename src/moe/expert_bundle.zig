@@ -42,9 +42,20 @@ const gguf = @import("gguf");
 const gguf_moe = @import("gguf_moe");
 const debugz = @import("debug");
 
-// FFI glibc (patrón host_bank.zig:10-11 — std.posix.pread cambió en 0.16)
-extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
-extern "c" fn open64(path: [*:0]const u8, flags: c_int, ...) c_int;
+// Linux syscalls (cross-platform: guarded with comptime)
+const builtin = @import("builtin");
+fn linuxOpen(path: [*:0]const u8, flags: u32) c_int {
+    if (comptime builtin.target.os.tag != .linux) return -1;
+    const rc = std.os.linux.open(path, @bitCast(flags), 0);
+    if (rc > @as(usize, @bitCast(@as(isize, -1)))) return -1;
+    return @intCast(rc);
+}
+fn linuxPread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize {
+    if (comptime builtin.target.os.tag != .linux) return -1;
+    const rc = std.os.linux.pread(fd, buf, count, offset);
+    if (rc > @as(usize, @bitCast(@as(isize, -1)))) return -1;
+    return @intCast(rc);
+}
 
 pub const MAGIC = "ZBND";
 pub const VERSION: u32 = 3;
@@ -152,16 +163,16 @@ pub const BundleSource = struct {
         const O_RDONLY: c_int = 0;
         var pbuf: [4096]u8 = undefined;
         const pz = std.fmt.bufPrintZ(&pbuf, "{s}", .{path}) catch return BundleError.OpenFailed;
-        const fd = open64(pz.ptr, O_RDONLY);
+        const fd = linuxOpen(pz.ptr, O_RDONLY);
         if (fd < 0) return BundleError.OpenFailed;
         var hdr: Header = undefined;
-        const n = pread(fd, @ptrCast(std.mem.asBytes(&hdr).ptr), @sizeOf(Header), 0);
+        const n = linuxPread(fd, @ptrCast(std.mem.asBytes(&hdr).ptr), @sizeOf(Header), 0);
         if (n < @sizeOf(Header)) {
-            _ = std.os.linux.close(@intCast(fd));
+            if (comptime builtin.target.os.tag == .linux) _ = std.os.linux.close(@intCast(fd));
             return BundleError.InvalidMagic;
         }
         if (!std.mem.eql(u8, &hdr.magic, MAGIC)) {
-            _ = std.os.linux.close(@intCast(fd));
+            if (comptime builtin.target.os.tag == .linux) _ = std.os.linux.close(@intCast(fd));
             return BundleError.InvalidMagic;
         }
         if (hdr.version != VERSION) return BundleError.UnsupportedVersion;
@@ -169,6 +180,7 @@ pub const BundleSource = struct {
 
         // Tamaño del fichero vía statx (0.16: fstat linux wrapper eliminado).
         const len: usize = blk: {
+            if (comptime builtin.target.os.tag != .linux) return BundleError.OpenFailed;
             var sx: std.os.linux.Statx = undefined;
             const rc = std.os.linux.statx(fd, "", std.os.linux.AT.EMPTY_PATH, .{ .SIZE = true }, &sx);
             if (rc != 0) return BundleError.OpenFailed;
@@ -190,7 +202,7 @@ pub const BundleSource = struct {
             mm.destroy(self.mm_io.?);
             self.mmap = null;
         }
-        _ = std.os.linux.close(@intCast(self.fd));
+        if (comptime builtin.target.os.tag == .linux) _ = std.os.linux.close(@intCast(self.fd));
         self.allocator.free(self.path);
     }
 
@@ -210,7 +222,7 @@ pub const BundleSource = struct {
         }
         // Sin mmap: pread directo (fetch de 1 slot — camino async-friendly).
         const buf = self.allocator.alloc(u8, len) catch return BundleError.OpenFailed;
-        const n = pread(self.fd, buf.ptr, len, @intCast(off));
+        const n = linuxPread(self.fd, buf.ptr, len, @intCast(off));
         if (n < @as(isize, @intCast(len))) {
             self.allocator.free(buf);
             return BundleError.SlotOutOfRange;
@@ -231,7 +243,7 @@ pub const BundleSource = struct {
         const len: usize = self.hdr.slot_bytes[k];
         if (dst.len < len) return BundleError.SlotOutOfRange;
         const off = slotFileOffset(self.hdr, layer, k, expert);
-        const n = pread(self.fd, dst.ptr, len, @intCast(off));
+        const n = linuxPread(self.fd, dst.ptr, len, @intCast(off));
         if (n < @as(isize, @intCast(len))) return BundleError.SlotOutOfRange;
         return len;
     }

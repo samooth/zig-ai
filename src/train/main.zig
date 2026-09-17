@@ -10,6 +10,7 @@
 //!
 //! Salida: sidecar GGUF (rlt.feedback_alpha>0 + blk.0.rlt.feedback_{gate,state})
 //! que el engine carga vía loadRltWeights (hybrid_layer.zig).
+const builtin = @import("builtin");
 const std = @import("std");
 const rlt = @import("rlt_layer");
 const train_mod = @import("train");
@@ -157,7 +158,7 @@ pub fn main(init: std.process.Init) !void {
 
     // ─── Training loop ───
     var ts_start: std.posix.timespec = undefined;
-    _ = std.posix.system.clock_gettime(.MONOTONIC, &ts_start);
+    if (builtin.target.os.tag != .windows) _ = std.posix.system.clock_gettime(.MONOTONIC, &ts_start);
 
     for (0..steps) |step| {
         // Generate synthetic e[t]
@@ -191,7 +192,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var ts_end: std.posix.timespec = undefined;
-    _ = std.posix.system.clock_gettime(.MONOTONIC, &ts_end);
+    if (builtin.target.os.tag != .windows) _ = std.posix.system.clock_gettime(.MONOTONIC, &ts_end);
     const elapsed_ns = @as(u64, @intCast(ts_end.sec - ts_start.sec)) * 1_000_000_000 +| @as(u64, @intCast(ts_end.nsec -| ts_start.nsec));
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
     std.debug.print("Training complete in {d:.1}s ({d:.1} steps/s)\n", .{ elapsed_s, @as(f64, @floatFromInt(steps)) / elapsed_s });

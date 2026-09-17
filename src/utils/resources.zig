@@ -34,16 +34,37 @@ const builtin = @import("builtin");
 const debugz = @import("debug");
 
 // ============================================================================
-// Syscalls libc ya enlazada en todo el árbol (sin dependencias nuevas).
+// Linux syscalls — guarded with comptime so they don't compile on macOS/Windows
 // ============================================================================
 
-extern "c" fn open(path: [*:0]const u8, flags: i32) i32;
-extern "c" fn read(fd: i32, buf: [*]u8, count: usize) isize;
-extern "c" fn close(fd: i32) i32;
-extern "c" fn sched_getaffinity(pid: c_int, cpusetsize: usize, mask: *CpuSet) c_int;
-extern "c" fn sched_setaffinity(pid: c_int, cpusetsize: usize, mask: *const CpuSet) c_int;
-
-const O_RDONLY: c_int = 0;
+fn linuxOpen(path: [*:0]const u8, flags: u32) c_int {
+    if (comptime builtin.target.os.tag != .linux) return -1;
+    const rc = std.os.linux.open(path, @bitCast(flags), 0);
+    if (rc > @as(usize, @bitCast(@as(isize, -1)))) return -1;
+    return @intCast(rc);
+}
+fn linuxRead(fd: c_int, buf: [*]u8, count: usize) isize {
+    if (comptime builtin.target.os.tag != .linux) return -1;
+    const rc = std.os.linux.read(fd, buf, count);
+    if (rc > @as(usize, @bitCast(@as(isize, -1)))) return -1;
+    return @intCast(rc);
+}
+fn linuxClose(fd: c_int) void {
+    if (comptime builtin.target.os.tag != .linux) return;
+    _ = std.os.linux.close(@intCast(fd));
+}
+fn linuxSchedGetaffinity(pid: c_int, cpusetsize: usize, mask: *CpuSet) c_int {
+    if (comptime builtin.target.os.tag != .linux) return -1;
+    const rc = std.os.linux.sched_getaffinity(pid, cpusetsize, @ptrCast(mask));
+    if (@as(isize, @bitCast(rc)) < 0) return -1;
+    return 0;
+}
+fn linuxSchedSetaffinity(pid: c_int, cpusetsize: usize, mask: *const CpuSet) c_int {
+    if (comptime builtin.target.os.tag != .linux) return -1;
+    _ = cpusetsize;
+    std.os.linux.sched_setaffinity(pid, @ptrCast(mask)) catch return -1;
+    return 0;
+}
 
 /// Máscara de 1024 CPUs (cpu_set_t de glibc).
 pub const CpuSet = extern struct {
@@ -61,12 +82,12 @@ pub const CpuSet = extern struct {
 
 /// Lee un fichero pequeño completo (sysfs/procfs); null si no existe/vacío.
 fn readSmallFile(path: [:0]const u8, buf: []u8) ?[]const u8 {
-    const fd = open(path.ptr, O_RDONLY);
+    const fd = linuxOpen(path.ptr, 0);
     if (fd < 0) return null;
-    defer _ = close(fd);
+    defer linuxClose(fd);
     var total: usize = 0;
     while (total < buf.len) {
-        const n = read(fd, buf.ptr + total, buf.len - total);
+        const n = linuxRead(fd, buf.ptr + total, buf.len - total);
         if (n <= 0) break;
         total += @intCast(n);
     }
@@ -77,7 +98,7 @@ fn readSmallFile(path: [:0]const u8, buf: []u8) ?[]const u8 {
 /// Máscara de afinidad del proceso actual; null si el SO no la reporta.
 pub fn currentAffinity() ?CpuSet {
     var set: CpuSet = std.mem.zeroes(CpuSet);
-    const rc = sched_getaffinity(0, @sizeOf(CpuSet), &set);
+    const rc = linuxSchedGetaffinity(0, @sizeOf(CpuSet), &set);
     if (rc < 0) return null;
     return set;
 }
@@ -87,7 +108,7 @@ pub fn pinToCpu(cpu: u32) bool {
     if (cpu >= 1024) return false;
     var set: CpuSet = std.mem.zeroes(CpuSet);
     set.add(cpu);
-    return sched_setaffinity(0, @sizeOf(CpuSet), &set) == 0;
+    return linuxSchedSetaffinity(0, @sizeOf(CpuSet), &set) == 0;
 }
 
 // ============================================================================

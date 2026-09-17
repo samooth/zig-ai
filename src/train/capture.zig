@@ -16,6 +16,7 @@
 //!   [magic "RLTC" u32][version u32=1][T u32][d u32][n_layers u32]
 //!   [tokens: T×u32]
 //!   [e por capa contigua: n_layers × T × d × f32]  (capa 0 primero)
+const builtin = @import("builtin");
 const std = @import("std");
 const mem = std.mem;
 
@@ -240,7 +241,7 @@ test "capture roundtrip writer→reader" {
     const layers = [_]usize{ 0, 2 };
 
     var ts: std.posix.timespec = undefined;
-    _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+    if (builtin.target.os.tag != .windows) _ = std.posix.system.clock_gettime(.REALTIME, &ts);
     const nsec32: u32 = @truncate(@as(u64, @bitCast(ts.nsec)));
     var name_buf: [64]u8 = undefined;
     const name = try std.fmt.bufPrint(&name_buf, "/tmp/rltcap_{d}.rltcap", .{nsec32});

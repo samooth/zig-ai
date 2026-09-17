@@ -7,15 +7,23 @@
 //!
 //! Aquí lo envolvemos en una sola función `jsonStringify`.
 
+const builtin = @import("builtin");
 const std = @import("std");
 
-extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
-
-/// Devuelve un u64 aleatorio criptográficamente seguro. Reemplazo de
-/// `std.crypto.random.int(u64)` que se eliminó en Zig 0.16.
+/// Devuelve un u64 aleatorio criptográficamente seguro.
+/// Usa getrandom(2) en Linux, fallback a hash simple en otras plataformas.
 pub fn rand_u64() u64 {
     var bytes: [8]u8 = undefined;
-    arc4random_buf(&bytes, 8);
+    if (comptime builtin.target.os.tag == .linux) {
+        _ = std.os.linux.getrandom(&bytes, 8, 0);
+    } else {
+        // Fallback: hash de monotonic clock + thread id (suficiente para IDs únicos)
+        var ts: std.posix.timespec = undefined;
+        _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
+        const ns: u64 = @intCast(@as(i128, @intCast(ts.sec)) * std.time.ns_per_s + @as(i128, @intCast(ts.nsec)));
+        const tid: u64 = @intCast(std.Thread.getCurrentId());
+        bytes = @bitCast(ns ^ (tid *% 0x9E3779B97F4A7C15));
+    }
     return @bitCast(bytes);
 }
 

@@ -9,6 +9,7 @@
 //!   # breadcrumbs: MOE_DEBUG=1 · A/B gather: NOGATHER=1
 //!
 //! Sin MOE_MODEL (o si no es MoE) imprime las specs detectadas y termina 0.
+const builtin = @import("builtin");
 const std = @import("std");
 const gguf = @import("gguf");
 const gguf_moe = @import("gguf_moe");
@@ -105,14 +106,18 @@ pub fn main() !void {
         const lock_dir = std.Io.Dir.cwd();
         const lf = try lock_dir.createFile(io, ".bench.lock", .{ .truncate = false });
         var tries: u32 = 0;
-        while (std.c.flock(lf.handle, 2) != 0) {
+        while (if (builtin.target.os.tag != .windows) std.c.flock(lf.handle, 2) != 0 else false) {
             tries += 1;
             if (tries >= 3) {
                 std.debug.print("SKIP: .bench.lock ocupada (EINTR x{d})\n", .{tries});
                 return;
             }
             var ts: std.c.timespec = .{ .sec = 1, .nsec = 0 };
-            _ = std.c.nanosleep(&ts, null);
+            if (builtin.target.os.tag == .windows) {
+                std.Thread.sleep(std.time.ns_per_s);
+            } else {
+                _ = std.c.nanosleep(&ts, null);
+            }
         }
     }
 

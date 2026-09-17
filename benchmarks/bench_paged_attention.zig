@@ -3,6 +3,7 @@
 //! memoria VRAM vs num_blocks, hit-rate de prefix cache, y latencia de
 //! CPU offload (swapToCpu/swapFromCpu). Usa referencia CPU; si CUDA está
 //! disponible añade decode GPU y el pool persistente.
+const builtin = @import("builtin");
 const std = @import("std");
 const pa = @import("paged_attention");
 const cudaz = @import("cudaz");
@@ -249,13 +250,15 @@ pub fn main(init: std.process.Init) !void {
     // Parse args: --gpu-only (solo GPU), --cpu (fuerza benchmark CPU)
     var force_cpu: bool = false;
     var force_gpu_only: bool = false;
-    var args_it = std.process.Args.Iterator.init(init.minimal.args);
-    _ = args_it.next(); // skip argv[0]
-    while (args_it.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--cpu")) {
-            force_cpu = true;
-        } else if (std.mem.eql(u8, arg, "--gpu-only")) {
-            force_gpu_only = true;
+    if (builtin.target.os.tag != .windows) {
+        var args_it = std.process.Args.Iterator.init(init.minimal.args);
+        _ = args_it.next(); // skip argv[0]
+        while (args_it.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--cpu")) {
+                force_cpu = true;
+            } else if (std.mem.eql(u8, arg, "--gpu-only")) {
+                force_gpu_only = true;
+            }
         }
     }
 
