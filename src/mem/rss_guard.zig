@@ -55,9 +55,7 @@ pub const RssGuard = struct {
 };
 
 fn nowNs() i128 {
-    var ts: std.posix.timespec = undefined;
-    _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
-    return @as(i128, @intCast(ts.sec)) * std.time.ns_per_s + @as(i128, @intCast(ts.nsec));
+    return @import("time").Timer.now();
 }
 
 test "RssGuard: no trim bajo el límite" {

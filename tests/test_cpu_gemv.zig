@@ -840,16 +840,14 @@ test "executor: lote de filas no multiplo del nº workers" {
 fn benchExecutor(ex: *exec_mod.Executor, w: []const u8, K: usize, x: []const f32, out: []f32, iters: usize) f64 {
     // warmup
     for (0..3) |_| ex.gemvBlocking(.q8_0, w, K, x, out);
-    var ts0: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts0);
     var sink: f32 = 0;
+    const t0: i128 = @import("time").Timer.now();
     for (0..iters) |_| {
         ex.gemvBlocking(.q8_0, w, K, x, out);
         sink += out[0];
     }
-    var ts1: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts1);
-    const el_ns: f64 = @floatFromInt((@as(i64, ts1.sec) - ts0.sec) * 1_000_000_000 + (ts1.nsec - ts0.nsec));
+    const t1: i128 = @import("time").Timer.now();
+    const el_ns: f64 = @floatFromInt(t1 - t0);
     std.mem.doNotOptimizeAway(sink);
     return @as(f64, @floatFromInt(iters)) * @as(f64, @floatFromInt(out.len * K / 32 * 34)) / el_ns; // GB/s
 }

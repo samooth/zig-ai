@@ -4,7 +4,8 @@ const std = @import("std");
 // Windows QPC for portable high-res timing
 extern "kernel32" fn QueryPerformanceCounter(lpPerformanceCount: *i64) i32;
 extern "kernel32" fn QueryPerformanceFrequency(lpFrequency: *i64) i32;
-extern "kernel32" fn GetSystemTimeAsFileTime(lpFileTime: *extern struct { dwLowDateTime: u32, dwHighDateTime: u32 }) void;
+extern "kernel32" fn GetSystemTimeAsFileTime(lpFileTime: *FileTime) void;
+const FileTime = extern struct { dwLowDateTime: u32, dwHighDateTime: u32 };
 
 var win_qpc_freq: ?i64 = null;
 fn winFreq() i64 {
@@ -20,7 +21,7 @@ fn winNowNs() i64 {
     return @divTrunc(counter * std.time.ns_per_s, winFreq());
 }
 fn winWallSec() i64 {
-    var ft: extern struct { dwLowDateTime: u32, dwHighDateTime: u32 } = undefined;
+    var ft: FileTime = undefined;
     GetSystemTimeAsFileTime(&ft);
     const ft100ns: u64 = (@as(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
     return @intCast(@divTrunc(ft100ns - 116444736000000000, 10000000));

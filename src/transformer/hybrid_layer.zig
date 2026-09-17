@@ -537,10 +537,7 @@ pub const HybridLayer = struct {
         const dbg_at = debugz.dbg.at(.trace);
         const hlc_now = struct {
             fn ns() i128 {
-                var ts: std.posix.timespec = undefined;
-                const rc = std.posix.system.clock_gettime(.MONOTONIC, &ts);
-                if (rc != 0) return 0;
-                return @as(i128, @intCast(ts.sec)) * std.time.ns_per_s + @as(i128, @intCast(ts.nsec));
+                return @import("time").Timer.now();
             }
         }.ns;
         const t0: i128 = if (dbg_at) hlc_now() else 0;

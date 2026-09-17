@@ -43,15 +43,13 @@ test "dflash2 top-k GPU vs CPU parity + throughput" {
     try cudaz.cuStreamSynchronize(stream);
 
     // GPU timed
-    var t0: std.c.timespec = undefined;
-    var t1: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &t0);
+    const t0: i128 = @import("time").Timer.now();
     for (0..iters) |_| {
         try lk.dflash2TopK(scores_dev, ids_dev, vals_dev, num_experts, top_k);
     }
     try cudaz.cuStreamSynchronize(stream);
-    _ = std.c.clock_gettime(.MONOTONIC, &t1);
-    const gpu_ns = @as(i128, (t1.sec * 1_000_000_000 + t1.nsec) - (t0.sec * 1_000_000_000 + t0.nsec));
+    const t1: i128 = @import("time").Timer.now();
+    const gpu_ns = t1 - t0;
     const gpu_us = @as(f64, @floatFromInt(gpu_ns)) / @as(f64, iters) / 1000.0;
 
     // Read back GPU results

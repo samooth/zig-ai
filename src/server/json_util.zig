@@ -18,9 +18,7 @@ pub fn rand_u64() u64 {
         _ = std.os.linux.getrandom(&bytes, 8, 0);
     } else {
         // Fallback: hash de monotonic clock + thread id (suficiente para IDs únicos)
-        var ts: std.posix.timespec = undefined;
-        _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
-        const ns: u64 = @intCast(@as(i128, @intCast(ts.sec)) * std.time.ns_per_s + @as(i128, @intCast(ts.nsec)));
+        const ns: u64 = @intCast(@max(0, @import("time").Timer.now()));
         const tid: u64 = @intCast(std.Thread.getCurrentId());
         bytes = @bitCast(ns ^ (tid *% 0x9E3779B97F4A7C15));
     }

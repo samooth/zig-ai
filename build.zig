@@ -931,6 +931,7 @@ pub fn build(b: *std.Build) void {
     moe_cpu_executor_mod.addImport("resources", resources_mod); // coordinador: topología movida (post-freeze)
     moe_cpu_executor_mod.addImport("moe_cpu_gemv", moe_gemv_mod);
     moe_cpu_executor_mod.addImport("cudaz", cudaz_mod);
+    moe_cpu_executor_mod.addImport("time", time_mod);
 
     // === Módulo cudaz_ext_sync (Lane F3: memops front-end CUDA) ===
     const ext_sync_mod = b.createModule(.{
@@ -1183,6 +1184,7 @@ pub fn build(b: *std.Build) void {
     hybrid_layer_mod.addImport("layer_kernels", layer_kernels_mod);
     hybrid_layer_mod.addImport("fp8_kernels", fp8_kernels_mod);
     hybrid_layer_mod.addImport("debug", debug_mod);
+    hybrid_layer_mod.addImport("time", time_mod);
     // lane-e E5 (fix restore de lane-c: faltaba este addImport — el módulo
     // existe en el archivo pero hybrid_layer no podía resolver @import)
     hybrid_layer_mod.addImport("moe_layer", moe_layer_mod);

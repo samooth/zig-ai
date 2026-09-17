@@ -16,11 +16,9 @@ const gguf = @import("gguf");
 
 /// Nombre temporal único (std.crypto.random eliminado en 0.16 — timestamp ns).
 fn tmpPath(buf: []u8, prefix: []const u8) ![]const u8 {
-    var ts: std.posix.timespec = undefined;
-    _ = std.posix.system.clock_gettime(.REALTIME, &ts);
-    const nsec32: u32 = @truncate(@as(u64, @bitCast(ts.nsec)));
-    const sec32: u32 = @truncate(@as(u64, @bitCast(ts.sec)));
-    return std.fmt.bufPrint(buf, "/tmp/rlt_{s}_{d}.gguf", .{ prefix, nsec32 ^ sec32 });
+    const ts: u64 = @intCast(@max(0, @import("time").wallClockSec()));
+    const rand: u32 = @truncate(ts ^ (ts >> 32));
+    return std.fmt.bufPrint(buf, "/tmp/rlt_{s}_{d}.gguf", .{ prefix, rand });
 }
 
 extern "c" fn unlink(path: [*:0]const u8) c_int;

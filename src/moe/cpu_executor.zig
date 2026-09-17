@@ -15,6 +15,7 @@
 //!
 //! Knobs: ZIG_AI_CPU_WORKERS=N (N workers computantes; default 0 =
 //! automático: n_físicos − 1 workers + coordinador).
+const builtin = @import("builtin");
 const std = @import("std");
 const debugz = @import("debug");
 const gemv_mod = @import("moe_cpu_gemv");
@@ -56,6 +57,10 @@ extern "c" fn nanosleep(rqtp: *const std.c.timespec, rmtp: ?*std.c.timespec) c_i
 const O_RDONLY: c_int = 0;
 
 fn threadSleepUs(us: u64) void {
+    if (comptime builtin.target.os.tag == .windows) {
+        std.Thread.sleep(us * 1000);
+        return;
+    }
     const ts: std.c.timespec = .{
         .sec = @intCast(us / 1_000_000),
         .nsec = @intCast((us % 1_000_000) * 1000),
@@ -275,10 +280,7 @@ pub const Config = struct {
 };
 
 fn nowMs() i64 {
-    var ts: std.posix.timespec = undefined;
-    const rc = std.posix.system.clock_gettime(.MONOTONIC, &ts);
-    if (rc != 0) return 0;
-    return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
+    return @intCast(@divTrunc(@import("time").Timer.now(), std.time.ns_per_s * 1000));
 }
 
 /// Wrappers de staging pinned para diagnósticos externos (tests/bench).
