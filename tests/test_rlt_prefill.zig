@@ -114,7 +114,7 @@ test "recurrent prefill: each position sees same state as decode" {
     var hidden = [_]f32{ 1.0, 0.5, 0.3, 0.8, 0.2, 0.9, 0.7, 0.1, 0.4, 0.6, 1.0, 0.3, 0.8, 0.2, 0.5, 0.9, 0.1, 0.7, 0.4, 0.6, 0.9, 0.3, 0.8, 0.2, 0.5, 1.0, 0.7, 0.4, 0.1, 0.6, 0.3, 0.8, 0.9, 0.1, 0.6, 0.4, 0.8, 0.2, 0.5, 0.7, 0.3, 0.9, 0.1, 0.6, 0.4, 0.8, 0.2, 0.5, 0.3, 0.7, 0.9, 0.1, 0.4, 0.6, 0.8, 0.2, 0.5, 0.3, 0.7, 0.9, 0.1, 0.4, 0.6, 0.8 };
 
     // Save original for comparison
-    var original = hidden;
+    const original = hidden;
 
     var scratch: [16]f32 = undefined;
     recurrentPrefill(&hidden, &w, seq_len, d, &scratch);

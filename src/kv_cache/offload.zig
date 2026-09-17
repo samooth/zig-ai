@@ -119,7 +119,7 @@ pub const CpuOffloadPipeline = struct {
     ) !Self {
         var entries = std.StringHashMap(OffloadEntry).init(allocator);
         errdefer entries.deinit();
-        var lru_queue = std.ArrayList([]const u8){};
+        var lru_queue: std.ArrayList([]const u8) = .empty;
         errdefer lru_queue.deinit(allocator);
 
         var staging: ?[]u8 = null;

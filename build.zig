@@ -1968,6 +1968,7 @@ pub fn build(b: *std.Build) void {
         if (std.mem.eql(u8, tf, "src/mem/host_bank.zig")) {
             tmod.addImport("cudaz_ext_mem", cudaz_ext_mem_mod);
             tmod.addImport("cudaz_ext_sync", ext_sync_mod);
+            tmod.addImport("disk_tier", disk_tier_mod);
             tmod.addImport("ftw", ftw_mod); // lane-e E2: loadFromFtw test
             tmod.addImport("gguf", gguf_mod); // fixture GGUF del test
         }

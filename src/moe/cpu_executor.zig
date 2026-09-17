@@ -36,23 +36,73 @@ pub const hostMemAvailableBytes = resources.hostMemAvailableBytes;
 
 // ============================================================================
 // Syscalls libc ya enlazada (sin dependencias nuevas): sysfs + affinity.
+// On Windows, POSIX functions are stubbed to avoid undefined symbol errors.
 // ============================================================================
 
-extern "c" fn open(path: [*:0]const u8, flags: i32) i32;
-extern "c" fn read(fd: i32, buf: [*]u8, count: usize) isize;
-extern "c" fn write(fd: i32, buf: [*]const u8, count: usize) isize;
-extern "c" fn close(fd: i32) i32;
-extern "c" fn mmap(
-    addr: ?*const anyopaque,
-    length: usize,
-    prot: i32,
-    flags: i32,
-    fd: i32,
-    offset: i64,
-) ?*anyopaque;
-extern "c" fn munmap(addr: ?*const anyopaque, length: usize) i32;
-extern "c" fn unlink(path: [*:0]const u8) i32;
-extern "c" fn nanosleep(rqtp: *const std.c.timespec, rmtp: ?*std.c.timespec) c_int;
+const posix_c = struct {
+    extern "c" fn open(path: [*:0]const u8, flags: i32) i32;
+    extern "c" fn read(fd: i32, buf: [*]u8, count: usize) isize;
+    extern "c" fn write(fd: i32, buf: [*]const u8, count: usize) isize;
+    extern "c" fn close(fd: i32) i32;
+    extern "c" fn mmap(
+        addr: ?*const anyopaque,
+        length: usize,
+        prot: i32,
+        flags: i32,
+        fd: i32,
+        offset: i64,
+    ) ?*anyopaque;
+    extern "c" fn munmap(addr: ?*const anyopaque, length: usize) i32;
+    extern "c" fn unlink(path: [*:0]const u8) i32;
+    extern "c" fn nanosleep(rqtp: *const std.c.timespec, rmtp: ?*std.c.timespec) c_int;
+};
+const win_stubs = struct {
+    fn open(path: [*:0]const u8, flags: i32) i32 {
+        _ = path;
+        _ = flags;
+        return -1;
+    }
+    fn read(fd: i32, buf: [*]u8, count: usize) isize {
+        _ = fd;
+        _ = buf;
+        _ = count;
+        return -1;
+    }
+    fn write(fd: i32, buf: [*]const u8, count: usize) isize {
+        _ = fd;
+        _ = buf;
+        _ = count;
+        return -1;
+    }
+    fn close(fd: i32) i32 {
+        _ = fd;
+        return -1;
+    }
+    fn mmap(addr: ?*const anyopaque, length: usize, prot: i32, flags: i32, fd: i32, offset: i64) ?*anyopaque {
+        _ = addr;
+        _ = length;
+        _ = prot;
+        _ = flags;
+        _ = fd;
+        _ = offset;
+        return null;
+    }
+    fn munmap(addr: ?*const anyopaque, length: usize) i32 {
+        _ = addr;
+        _ = length;
+        return -1;
+    }
+    fn unlink(path: [*:0]const u8) i32 {
+        _ = path;
+        return -1;
+    }
+    fn nanosleep(rqtp: *const std.c.timespec, rmtp: ?*std.c.timespec) c_int {
+        _ = rqtp;
+        _ = rmtp;
+        return 0;
+    }
+};
+const c = if (builtin.target.os.tag != .windows) posix_c else win_stubs;
 extern "kernel32" fn Sleep(dwMilliseconds: u32) callconv(.c) void;
 
 const O_RDONLY: c_int = 0;
@@ -66,17 +116,17 @@ fn threadSleepUs(us: u64) void {
         .sec = @intCast(us / 1_000_000),
         .nsec = @intCast((us % 1_000_000) * 1000),
     };
-    _ = nanosleep(&ts, null);
+    _ = c.nanosleep(&ts, null);
 }
 
 /// Lee un fichero pequeño completo (sysfs/procfs); null si no existe/vacío.
 fn readSmallFile(path: [:0]const u8, buf: []u8) ?[]const u8 {
-    const fd = open(path.ptr, O_RDONLY);
+    const fd = c.open(path.ptr, O_RDONLY);
     if (fd < 0) return null;
-    defer _ = close(fd);
+    defer _ = c.close(fd);
     var total: usize = 0;
     while (total < buf.len) {
-        const n = read(fd, buf.ptr + total, buf.len - total);
+        const n = c.read(fd, buf.ptr + total, buf.len - total);
         if (n <= 0) break;
         total += @intCast(n);
     }
@@ -86,14 +136,14 @@ fn readSmallFile(path: [:0]const u8, buf: []u8) ?[]const u8 {
 
 /// Lee un fichero completo a memoria asignada (sysfs/procfs/json pequeños).
 fn readSmallFileAlloc(allocator: std.mem.Allocator, path: [:0]const u8, max_bytes: usize) ?[]u8 {
-    const fd = open(path.ptr, O_RDONLY);
+    const fd = c.open(path.ptr, O_RDONLY);
     if (fd < 0) return null;
-    defer _ = close(fd);
+    defer _ = c.close(fd);
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     var chunk: [4096]u8 = undefined;
     while (buf.items.len < max_bytes) {
-        const n = read(fd, &chunk, @min(chunk.len, max_bytes - buf.items.len));
+        const n = c.read(fd, &chunk, @min(chunk.len, max_bytes - buf.items.len));
         if (n <= 0) break;
         buf.appendSlice(allocator, chunk[0..@intCast(n)]) catch return null;
     }
@@ -185,7 +235,7 @@ pub fn memopsCanary() bool {
     var mmap_ok = false;
     var reg_ok = false;
     const tmp_path = "/tmp/cpu_executor_canary_probe.bin";
-    const fd = open(@ptrCast(tmp_path), 0x242); // O_RDWR|O_CREAT|O_TRUNC
+    const fd = c.open(@ptrCast(tmp_path), 0x242); // O_RDWR|O_CREAT|O_TRUNC
     if (fd >= 0) {
         // Probe at the production size class: 256 MiB sparse file.
         // The driver fails on large file-backed mappings (ERROR_INVALID_VALUE)
@@ -196,9 +246,9 @@ pub fn memopsCanary() bool {
         @memset(&page_buf, 0);
         var written: usize = 0;
         while (written < size) : (written += page_buf.len) {
-            _ = write(fd, &page_buf, page_buf.len);
+            _ = c.write(fd, &page_buf, page_buf.len);
         }
-        const ptr = mmap(null, size, 0x1 | 0x2, 0x02, fd, 0); // PROT_READ|PROT_WRITE, MAP_PRIVATE
+        const ptr = c.mmap(null, size, 0x1 | 0x2, 0x02, fd, 0); // PROT_READ|PROT_WRITE, MAP_PRIVATE
         if (ptr) |p| {
             if (@intFromPtr(p) != @as(usize, @bitCast(@as(isize, -1)))) {
                 mmap_ok = true;
@@ -206,11 +256,11 @@ pub fn memopsCanary() bool {
                     reg_ok = true;
                     ext_mem.hostUnregister(@ptrCast(@alignCast(p))) catch {};
                 } else |_| {}
-                _ = munmap(p, size);
+                _ = c.munmap(p, size);
             }
         }
-        _ = close(fd);
-        _ = unlink(@ptrCast(tmp_path));
+        _ = c.close(fd);
+        _ = c.unlink(@ptrCast(tmp_path));
     }
     const ok = alloc_ok and mmap_ok and reg_ok;
     g_memops_canary = ok;

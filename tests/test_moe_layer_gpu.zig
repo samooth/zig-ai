@@ -4,6 +4,7 @@
 //!
 //! Disciplina GPU: .bench.lock no-bloqueante (60 s → SKIP). Sin CUDA: SKIP.
 const std = @import("std");
+const builtin = @import("builtin");
 const gguf = @import("gguf");
 const cudaz = @import("cudaz");
 const moe_cuda = @import("moe_cuda");
@@ -63,6 +64,7 @@ const BenchLock = struct {
     file: ?std.Io.File = null,
 
     fn acquire(io: std.Io) !BenchLock {
+        if (comptime builtin.target.os.tag == .windows) return .{};
         const dir = std.Io.Dir.cwd();
         var waited: u32 = 0;
         while (true) {
@@ -77,6 +79,7 @@ const BenchLock = struct {
     }
 
     fn release(self: BenchLock, io: std.Io) void {
+        if (comptime builtin.target.os.tag == .windows) return;
         if (self.file) |f| {
             _ = std.c.flock(f.handle, 8);
             f.close(io);

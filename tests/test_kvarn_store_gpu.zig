@@ -465,7 +465,7 @@ test "A6: materialize K+V desde records sellados (rotated→original f16)" {
     defer allocator.free(want_v);
     for (0..HEADS) |h| {
         const rec = records[(1 * HEADS + h) * record_bytes ..][0..record_bytes];
-        var tile = try allocator.alloc(f32, GROUP * 128);
+        const tile = try allocator.alloc(f32, GROUP * 128);
         defer allocator.free(tile);
         try kvarn.decodeKTile(rec, k_bits, layout, tile);
         // decodeKTile produce [dim][tok] ROTADO; transpose a [tok][dim],

@@ -76,7 +76,7 @@ pub const Sampler = struct {
     idx_buf: []usize = &.{},
     probs_buf: []f32 = &.{},
 
-    fn initScratch(self: *Sampler, allocator: std.mem.Allocator, vocab_size: usize) !void {
+    pub fn initScratch(self: *Sampler, allocator: std.mem.Allocator, vocab_size: usize) !void {
         self.work_buf = try allocator.alloc(f32, vocab_size);
         self.vals_buf = try allocator.alloc(f32, vocab_size);
         self.idx_buf = try allocator.alloc(usize, vocab_size);

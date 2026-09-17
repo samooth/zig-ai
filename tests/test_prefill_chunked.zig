@@ -146,11 +146,11 @@ fn gpuChunkedDirect(
     var hv_dim_c: c_int = @intCast(head_v_dim);
     var t_start: c_int = 0;
     var n_tokens: c_int = @intCast(n);
-    var d_state_var: c_ulong = d_state;
-    var co_ptr: c_ulong = d_conv;
-    var ao_ptr: c_ulong = d_out;
-    var g_ptr: c_ulong = d_gate;
-    var b_ptr: c_ulong = d_beta;
+    var d_state_var: c_ulong = @intCast(d_state);
+    var co_ptr: c_ulong = @intCast(d_conv);
+    var ao_ptr: c_ulong = @intCast(d_out);
+    var g_ptr: c_ulong = @intCast(d_gate);
+    var b_ptr: c_ulong = @intCast(d_beta);
 
     var kp = [_]?*anyopaque{
         @ptrCast(&co_ptr),      @ptrCast(&q_off),     @ptrCast(&k_off),    @ptrCast(&v_off),     @ptrCast(&qkv_stride),

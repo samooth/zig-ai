@@ -11,6 +11,7 @@
 //!            zig build test-server-e2e
 
 const std = @import("std");
+const builtin = @import("builtin");
 const httpx = @import("httpx");
 const srv = @import("server");
 const inference = @import("inference");
@@ -18,8 +19,13 @@ const inference = @import("inference");
 const TEST_KEY = "e2e-secret-key-0123456789";
 
 extern "c" fn nanosleep(rqtp: *const std.c.timespec, rmtp: ?*std.c.timespec) c_int;
+extern "kernel32" fn Sleep(dwMilliseconds: u32) callconv(.c) void;
 
 fn sleepMs(ms: u64) void {
+    if (comptime builtin.target.os.tag == .windows) {
+        Sleep(@intCast(@max(1, ms)));
+        return;
+    }
     const ts = std.c.timespec{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) };
     _ = nanosleep(&ts, null);
 }

@@ -9,6 +9,7 @@
 //! Disciplina GPU: toda la sesión corre bajo lock exclusivo `.bench.lock`
 //! (patrón tools/bench_bw.zig). Se salta sin CUDA (error.CudaUnavailable).
 const std = @import("std");
+const builtin = @import("builtin");
 const cudaz = @import("cudaz");
 const moe_cuda = @import("moe_cuda");
 const cache_mod = @import("offload_cache");
@@ -21,6 +22,7 @@ const BenchLock = struct {
     file: ?std.Io.File = null,
 
     fn acquire(io: std.Io) !BenchLock {
+        if (comptime builtin.target.os.tag == .windows) return .{};
         const dir = std.Io.Dir.cwd();
         // LOCK_EX|LOCK_NB=6 con reintentos (60 s máx): en tests NO bloqueamos
         // indefinidamente si otro lane está en una sesión GPU larga.
@@ -38,6 +40,7 @@ const BenchLock = struct {
     }
 
     fn release(self: *BenchLock, io: std.Io) void {
+        if (comptime builtin.target.os.tag == .windows) return;
         if (self.file) |f| {
             _ = std.c.flock(f.handle, 8);
             f.close(io);

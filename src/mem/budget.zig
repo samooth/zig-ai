@@ -157,10 +157,12 @@ pub fn planLfru(budget: usize, consumers: []Consumer, clock: u64) PlanResult {
     // Build temporary LFRU metadata arrays.
     var heats: [256]u32 = undefined;
     var lasts: [256]u64 = undefined;
+    var pinned: [256]bool = undefined;
     const n = @min(consumers.len, heats.len);
     for (consumers[0..n], 0..) |c, i| {
         heats[i] = c.heat;
         lasts[i] = c.last_access;
+        pinned[i] = false;
     }
 
     var remaining_disposable = disposable;
@@ -172,7 +174,7 @@ pub fn planLfru(budget: usize, consumers: []Consumer, clock: u64) PlanResult {
             heats[0..n],
             lasts[0..n],
             clock,
-            &[_]bool{false} ** n,
+            &pinned,
         ) orelse break;
 
         const want_i = consumers[pick.slot].desired -| consumers[pick.slot].shrinkable_floor;
