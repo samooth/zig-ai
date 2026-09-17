@@ -10,8 +10,10 @@
 //! si el driver no expone memops (WDDM/vGPU/antiguo) o no hay GPU, `probe()`
 //! lo reporta y el executor cae al camino lento documentado (staging host
 //! síncrono). Sin dependencia dura de enlace en modo host-only.
+const builtin = @import("builtin");
 const std = @import("std");
 const debugz = @import("debug");
+const time = @import("time");
 
 /// Handle de stream opaco (bit-compatible con cudaz.CUstream vía usize).
 pub const Stream = *opaque {};
@@ -68,6 +70,7 @@ pub var caps_hostfunc: bool = false;
 
 fn ensureLoaded() bool {
     if (g_lib != null) return true;
+    if (comptime builtin.target.os.tag != .linux) return false;
     g_lib = std.DynLib.open("libcuda.so.1") catch |err| {
         debugz.dbg.printLevel(.info, "[cudaz_ext_sync] libcuda.so.1 no cargable: {s}\n", .{@errorName(err)});
         return false;
@@ -76,6 +79,7 @@ fn ensureLoaded() bool {
 }
 
 fn lookup(comptime T: type, name: [:0]const u8) ?T {
+    if (comptime builtin.target.os.tag != .linux) return null;
     return g_lib.?.lookup(T, name);
 }
 
@@ -241,26 +245,21 @@ pub fn benchHostFuncOverhead(n: usize) ?struct { enqueue_ns: f64, roundtrip_ns: 
     var dummy: u8 = 0;
     _ = &dummy;
 
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    var t0: i128 = @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+    var t0: i128 = time.Timer.now();
 
     for (0..n) |_| {
         _ = m.launch_host_func(st, Noop.cb, &dummy);
     }
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    var t1: i128 = @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+    var t1: i128 = time.Timer.now();
     if (m.sync_stream(st) != 0) return null;
     const enqueue_ns: f64 = @floatFromInt(t1 - t0);
 
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    t0 = @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+    t0 = time.Timer.now();
     for (0..n) |_| {
         _ = m.launch_host_func(st, Noop.cb, &dummy);
         _ = m.sync_stream(st);
     }
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    t1 = @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+    t1 = time.Timer.now();
 
     const nf: f64 = @floatFromInt(n);
     return .{

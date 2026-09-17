@@ -1,4 +1,5 @@
 const std = @import("std");
+const time = @import("time");
 const gguf = @import("gguf");
 const cudaz = @import("cudaz");
 const cublas = @import("cublas");
@@ -111,9 +112,7 @@ pub const GpuWeightPool = struct {
             .tensors = tensors,
             .bytes = estimated,
             .last_used = blk: {
-                var ts: std.c.timespec = undefined;
-                _ = std.c.clock_gettime(.MONOTONIC, &ts);
-                break :blk @intCast(@divTrunc(@as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000), 1000));
+                break :blk @intCast(@divTrunc(time.Timer.now(), std.time.ns_per_s));
             },
             .upload_event = event,
         };
@@ -140,9 +139,7 @@ pub const GpuWeightPool = struct {
     pub fn waitForLayer(self: *Self, layer_idx: usize) !void {
         if (self.resident.get(layer_idx)) |weights| {
             if (weights.upload_event) |event| try cudaz.cuEventSynchronize(event);
-            var ts: std.c.timespec = undefined;
-            _ = std.c.clock_gettime(.MONOTONIC, &ts);
-            self.resident.getPtr(layer_idx).?.last_used = @intCast(@divTrunc(@as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000), 1000));
+            self.resident.getPtr(layer_idx).?.last_used = @intCast(@divTrunc(time.Timer.now(), std.time.ns_per_s));
         }
     }
 

@@ -604,6 +604,7 @@ pub fn build(b: *std.Build) void {
     });
     kv_cache_mod.addImport("core", core_mod);
     kv_cache_mod.addImport("cudaz", cudaz_mod);
+    kv_cache_mod.addImport("time", time_mod);
     // lane-f: gpu_dequant/offload usan la Runtime API; import con nombre para
     // evitar el conflicto de módulos (mismo archivo en 'cuda_runtime' y 'kv_cache').
     kv_cache_mod.addImport("cuda_runtime", cuda_runtime_mod);
@@ -938,6 +939,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     ext_sync_mod.addImport("debug", debug_mod);
+    ext_sync_mod.addImport("time", time_mod);
     moe_cpu_executor_mod.addImport("cudaz_ext_sync", ext_sync_mod);
     host_bank_mod.addImport("cudaz_ext_sync", ext_sync_mod); // lane-e: import que usaba host_bank.zig:9 (cudaHostAlloc memops)
 
@@ -1243,6 +1245,7 @@ pub fn build(b: *std.Build) void {
     paged_attention_mod.addImport("cudaz", cudaz_mod);
     paged_attention_mod.addImport("kv_cache", kv_cache_mod);
     paged_attention_mod.addImport("debug", debug_mod);
+    paged_attention_mod.addImport("time", time_mod);
     paged_attention_mod.addOptions("build_options", paged_options);
 
     // === Módulo kvarn_kernels (lane-b1 Dev A): espejo Zig + launchers C2 ===
@@ -1375,6 +1378,7 @@ pub fn build(b: *std.Build) void {
     train_mod.addImport("rlt_layer", train_rlt_mod);
     train_mod.addImport("export_gguf", train_export_mod);
     train_mod.addImport("debug", debug_mod);
+    train_mod.addImport("time", time_mod);
 
     // === Módulo speculative (lane-c C2: driver especulativo + sampler) ===
     const speculative_mod = b.createModule(.{
@@ -1462,6 +1466,7 @@ pub fn build(b: *std.Build) void {
     gpu_weight_pool_mod.addImport("cudaz", cudaz_mod);
     gpu_weight_pool_mod.addImport("cublas", cublas_mod);
     gpu_weight_pool_mod.addImport("debug", debug_mod);
+    gpu_weight_pool_mod.addImport("time", time_mod);
     gpu_weight_pool_mod.addImport("core", core_mod);
     transformer_mod.addImport("gpu_weight_pool", gpu_weight_pool_mod);
     exe_mod.addImport("gpu_weight_pool", gpu_weight_pool_mod);
@@ -2775,6 +2780,7 @@ pub fn build(b: *std.Build) void {
     train_cli_mod.addImport("rlt_layer", train_rlt_mod);
     train_cli_mod.addImport("export_gguf", train_export_mod);
     train_cli_mod.addImport("train", train_mod);
+    train_cli_mod.addImport("time", time_mod);
     train_cli_mod.link_libc = true;
     const train_cli = b.addExecutable(.{
         .name = "zig-ai-train",

@@ -16,6 +16,7 @@
 //! proceso (manifest único, sin ambigüedad de estado).
 
 const std = @import("std");
+const time = @import("time");
 
 // ═══════════════════════════════════════════════════════════════════
 // Hook global de captura (lane-kvc paso 1): hybrid_attn.forward escribe
@@ -209,8 +210,7 @@ pub const KvTrace = struct {
         // manifest.json: append si existe (multi-corpus mismo modelo).
         var mbuf: [2048]u8 = undefined;
         const mpath = try std.fmt.bufPrint(&mbuf, "{s}/manifest.json", .{base});
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.REALTIME, &ts);
+        const timestamp_sec: u64 = @intCast(@max(0, time.wallClockSec()));
         const entry = try std.fmt.bufPrint(&pbuf, // reusa pbuf (base ya usado)
             "{{\"model\":\"{s}\",\"corpus\":\"{s}\",\"gguf_sha\":\"{s}\",\"T\":{d}," ++
                 "\"n_kv_head\":{d},\"head_dim\":{d},\"n_head\":{d},\"layers_captured\":{d}," ++
@@ -236,7 +236,7 @@ pub const KvTrace = struct {
                 },
                 self.corpus_file, self.corpus_sha,
                 self.tokenizer,   self.lane_base_sha,
-                @as(u64, @intCast(ts.sec)),
+                timestamp_sec,
             });
         appendFileAbsolute(self.io, mpath, entry);
         // (breadcrumb de volcado lo emite main vía debug.dbg tras finish)

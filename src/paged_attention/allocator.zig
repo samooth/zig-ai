@@ -5,6 +5,7 @@ const PagedConfig = @import("root.zig").PagedConfig;
 const QuantFormat = @import("root.zig").QuantFormat;
 const kv_quant = @import("root.zig").kv_quant;
 const debugz = @import("debug");
+const time = @import("time");
 
 pub const BlockAllocator = struct {
     allocator: std.mem.Allocator,
@@ -285,9 +286,7 @@ pub const BlockAllocator = struct {
 };
 
 fn timestampNow() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * 1000000000 + @as(u64, @intCast(ts.nsec));
+    return @intCast(@max(0, time.Timer.now()));
 }
 
 /// Simple CPU offload manager for KV blocks.

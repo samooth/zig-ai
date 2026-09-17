@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Tensor = @import("core").Tensor;
 const matmul = @import("matmul");
 const fa = @import("fa");
@@ -158,7 +159,7 @@ pub fn main(init: std.process.Init) !void {
     // Lane-B3 P4: detección temprana del subcomando `kld` (no requiere
     // --model). El subcomando se invoca como `zig-ai-engine kld ...` y
     // delega a `kldMain` sin pasar por el flujo de inferencia.
-    const subcommand = subcommandFromArgs(init.minimal.args);
+    const subcommand = subcommandFromArgs(init.minimal.args, allocator);
     if (subcommand) |sc| {
         if (std.mem.eql(u8, sc, "kld")) {
             const rc = kldMain(io, allocator, init.minimal.args, stdout);
@@ -340,8 +341,10 @@ pub fn main(init: std.process.Init) !void {
 /// Parsea los argumentos de línea de comandos.
 fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args, stdout: anytype) !CliParams {
     var params: CliParams = .{};
-    var it = std.process.Args.Iterator.init(args);
-    // Saltar argv[0]
+    var it = if (comptime builtin.target.os.tag == .windows)
+        try std.process.Args.Iterator.initAllocator(args, allocator)
+    else
+        std.process.Args.Iterator.init(args);
     _ = it.next();
 
     while (it.next()) |arg| {
@@ -838,8 +841,11 @@ fn printHelp(stdout: anytype) !void {
 /// (`zig-ai-engine kld ...`). Si el primer arg tras argv[0] no empieza
 /// por `-` y matchea un subcomando conocido, lo devuelve. Si no, null
 /// (caller sigue con el flujo de inferencia normal).
-fn subcommandFromArgs(args: std.process.Args) ?[]const u8 {
-    var it = std.process.Args.Iterator.init(args);
+fn subcommandFromArgs(args: std.process.Args, allocator: std.mem.Allocator) ?[]const u8 {
+    var it = if (comptime builtin.target.os.tag == .windows)
+        std.process.Args.Iterator.initAllocator(args, allocator) catch return null
+    else
+        std.process.Args.Iterator.init(args);
     _ = it.next(); // argv[0]
     const first = it.next() orelse return null;
     if (first.len > 0 and first[0] == '-') return null; // flag
@@ -858,7 +864,10 @@ fn kldMain(
     stdout: anytype,
 ) u8 {
     var cfg = bench_kld.KldConfig{};
-    var it = std.process.Args.Iterator.init(args);
+    var it = if (comptime builtin.target.os.tag == .windows)
+        std.process.Args.Iterator.initAllocator(args, allocator) catch return 1
+    else
+        std.process.Args.Iterator.init(args);
     _ = it.next(); // argv[0]
     _ = it.next(); // "kld"
 

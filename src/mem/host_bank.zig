@@ -382,33 +382,32 @@ pub const HostBank = struct {
         // (12.6s→1.7s para 9.9GB); fallback pread serial si el ring falla
         // (kernel sin io_uring o QD saturado). El buffer YA es pinned
         // CUDA/UVA — no register_buffers (RLIMIT_MEMLOCK aparte, ver 4.13).
-        const fd: c_int = @intCast(f.handle);
         const dst: [*]u8 = @ptrCast(bank.ptr.?);
-        // 4.13-bis: O_DIRECT (offset+len 4096-aligned; tail <4KB vía fd
-        // buffered /proc/self/fd/N) — el read buffered de 9.9GB contamina
-        // ~9.7GB de page-cache y con RAM presionada (devs compilando)
-        // thrashea; O_DIRECT deja delta ~7MB (bench-copyonce medido).
-        const aligned_end: usize = (size / 4096) * 4096;
-        readIouringDirect(fd, dst[0..aligned_end]) catch {
-            // Fallback: read buffered completo (ring/O_DIRECT no disponibles).
-            readSerial(fd, dst[0..size]) catch |e| return e;
-        };
-        if (aligned_end < size) {
-            var pbuf: [64]u8 = undefined;
-            const pz = std.fmt.bufPrintZ(&pbuf, "/proc/self/fd/{d}", .{fd}) catch return error.OpenFailed;
-            const bfd = linuxOpen(pz.ptr, 0);
-            if (bfd < 0) return error.OpenFailed;
-            if (comptime builtin.target.os.tag == .linux) {
+        if (comptime builtin.target.os.tag == .linux) {
+            // Lectura rápida: io_uring QD32 chunk 4MiB = 7.4× cold vs pread serial en NVMe
+            const fd: c_int = @intCast(f.handle);
+            const aligned_end: usize = (size / 4096) * 4096;
+            readIouringDirect(fd, dst[0..aligned_end]) catch {
+                readSerial(fd, dst[0..size]) catch |e| return e;
+            };
+            if (aligned_end < size) {
+                var pbuf: [64]u8 = undefined;
+                const pz = std.fmt.bufPrintZ(&pbuf, "/proc/self/fd/{d}", .{fd}) catch return error.OpenFailed;
+                const bfd = linuxOpen(pz.ptr, 0);
+                if (bfd < 0) return error.OpenFailed;
                 defer _ = std.os.linux.close(@intCast(bfd));
+                var t: usize = 0;
+                const tl = size - aligned_end;
+                while (t < tl) {
+                    const piece = @min(@as(usize, 1 << 20), tl - t);
+                    const n = linuxPread(bfd, dst + aligned_end + t, piece, @intCast(aligned_end + t));
+                    if (n <= 0) return error.ReadFailed;
+                    t += @intCast(n);
+                }
             }
-            var t: usize = 0;
-            const tl = size - aligned_end;
-            while (t < tl) {
-                const piece = @min(@as(usize, 1 << 20), tl - t);
-                const n = linuxPread(bfd, dst + aligned_end + t, piece, @intCast(aligned_end + t));
-                if (n <= 0) return error.ReadFailed;
-                t += @intCast(n);
-            }
+        } else {
+            // Fallback: lectura serial vía std.Io.File
+            _ = f.readPositionalAll(io, dst[0..@intCast(size)], 0) catch |e| return e;
         }
         _ = &bank;
         return .{ .bank = bank, .buf = dst[0..@intCast(size)] };
