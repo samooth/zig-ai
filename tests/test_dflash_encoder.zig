@@ -108,12 +108,12 @@ test "dflash encoder paridad GPU vs CPU (fc+norm device-resident, taps sin D2H)"
         const denom = @max(@abs(r), 0.05);
         rel_max = @max(rel_max, d / denom);
     }
-    debugPrint(worst, rel_max, n_taps, fc_k);
+    try debugPrint(worst, rel_max, n_taps, fc_k);
     try testing.expect(worst < 5e-2);
     try testing.expect(rel_max < 2e-2);
     for (h_gpu) |v| try testing.expect(!std.math.isNan(v) and !std.math.isInf(v));
 }
 
-fn debugPrint(worst: f32, rel: f32, n_taps: usize, fc_k: usize) void {
+fn debugPrint(worst: f32, rel: f32, n_taps: usize, fc_k: usize) !void {
     try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "dflash enc paridad: worst_at={e} rel(≥0.05 floor)={e} n_taps={d} fc_k={d}\n", .{ worst, rel, n_taps, fc_k });
 }

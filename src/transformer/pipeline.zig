@@ -83,7 +83,7 @@ pub const Sampler = struct {
         self.probs_buf = try allocator.alloc(f32, vocab_size);
     }
 
-    fn deinitScratch(self: *Sampler, allocator: std.mem.Allocator) void {
+    pub fn deinitScratch(self: *Sampler, allocator: std.mem.Allocator) void {
         if (self.work_buf.len > 0) allocator.free(self.work_buf);
         if (self.vals_buf.len > 0) allocator.free(self.vals_buf);
         if (self.idx_buf.len > 0) allocator.free(self.idx_buf);

@@ -7,18 +7,16 @@ test "sampler: initScratch y deinitScratch con vocab=256" {
     const gpa = std.testing.allocator;
     var s = pipeline.Sampler{};
     try s.initScratch(gpa, 256);
-    try std.testing.expect(s.work_buf != null);
-    try std.testing.expect(s.idx_buf != null);
-    try std.testing.expect(s.vals_buf != null);
-    try std.testing.expect(s.probs_buf != null);
-    try std.testing.expect(s.work_buf.?.len == 256);
-    try std.testing.expect(s.idx_buf.?.len == 256);
-    try std.testing.expect(s.vals_buf.?.len == 256);
+    defer s.deinitScratch(gpa);
+    try std.testing.expectEqual(@as(usize, 256), s.work_buf.len);
+    try std.testing.expectEqual(@as(usize, 256), s.idx_buf.len);
+    try std.testing.expectEqual(@as(usize, 256), s.vals_buf.len);
+    try std.testing.expectEqual(@as(usize, 256), s.probs_buf.len);
     s.deinitScratch(gpa);
-    try std.testing.expect(s.work_buf == null);
-    try std.testing.expect(s.idx_buf == null);
-    try std.testing.expect(s.vals_buf == null);
-    try std.testing.expect(s.probs_buf == null);
+    try std.testing.expectEqual(@as(usize, 0), s.work_buf.len);
+    try std.testing.expectEqual(@as(usize, 0), s.idx_buf.len);
+    try std.testing.expectEqual(@as(usize, 0), s.vals_buf.len);
+    try std.testing.expectEqual(@as(usize, 0), s.probs_buf.len);
 }
 
 test "sampler: deterministic con seed fija y temperatura=0" {

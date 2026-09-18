@@ -565,7 +565,10 @@ test "HostBank: alloc LOCKED devuelve memoria válida y está bloqueada" {
 }
 
 test "HostBank: alloc PINNED devuelve memoria válida y está registrada" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const a = std.testing.allocator;
+    const before = registeredBytes();
     var bank = try HostBank.alloc(a, 1024, .PINNED);
     defer bank.deinit();
     try testing.expectEqual(bank.len, 1024);
@@ -573,7 +576,7 @@ test "HostBank: alloc PINNED devuelve memoria válida y está registrada" {
     try testing.expectEqual(bank.owned, true);
     try testing.expectEqual(bank.registered, true);
     // Nota: el registro global de bytes debería haber aumentado
-    try testing.expectEqual(registeredBytes(), 1024);
+    try testing.expectEqual(before + bank.len, registeredBytes());
 }
 
 test "HostBank: allocAligned PAGEABLE devuelve memoria alineada y múltiplo de pagina" {
@@ -602,7 +605,10 @@ test "HostBank: allocAligned LOCKED devuelve memoria alineada, multiples de pagi
 }
 
 test "HostBank: allocAligned PINNED devuelve memoria alineada, multiples de pagina y está registrada" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
+    cudaz.ensureContext() catch return error.SkipZigTest;
     const a = std.testing.allocator;
+    const before = registeredBytes();
     var bank = try HostBank.allocAligned(a, 1024, .PINNED);
     defer bank.deinit();
     const page_size = std.heap.page_size_min;
@@ -612,7 +618,7 @@ test "HostBank: allocAligned PINNED devuelve memoria alineada, multiples de pagi
     try testing.expectEqual(bank.owned, true);
     try testing.expectEqual(bank.registered, true);
     // Nota: el registro global de bytes debería haber aumentado
-    try testing.expectEqual(registeredBytes(), bank.len);
+    try testing.expectEqual(before + bank.len, registeredBytes());
 }
 
 test "HostBank: pin después de allocAligned PAGEABLE funciona" {

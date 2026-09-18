@@ -370,9 +370,9 @@ test "resolveFetchFracQ16: fichero real vs ausente (cap seguro)" {
     // Ausente → cap 1.
     try std.testing.expectEqual(@as(u32, 1), exec_mod.resolveFetchFracQ16(a, "/tmp/opencode/no-existe-benchbw.json"));
 
-    // Fichero válido en /tmp/opencode (área de trabajo aprobada).
-    const path = "/tmp/opencode/benchbw_fixture.json";
-    writeFixture(path);
+    // Fichero válido en /tmp.
+    const path = "/tmp/zig_ai_benchbw_fixture.json";
+    try writeFixture(path);
     const frac = exec_mod.resolveFetchFracQ16(a, path);
     try std.testing.expectEqual(@as(u32, 32768), frac); // 50% exacto
     deleteFixture(path);
@@ -388,16 +388,17 @@ extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
 extern "c" fn close(fd: c_int) c_int;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 
-fn writeFixture(path: [:0]const u8) void {
-    if (comptime builtin.target.os.tag == .windows) return;
+fn writeFixture(path: [:0]const u8) !void {
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
     const fd = open64(path, 0o1101, 0o644); // O_WRONLY|O_CREAT|O_TRUNC, rw-r--r--
-    if (fd < 0) return;
+    if (fd < 0) return error.CreateFixtureFailed;
     defer _ = close(fd);
     const body =
         \\{"version":1,"cpu_gbs":30,"pcie_gbs":12,
         \\"cpu_overlap_gbs":20,"pcie_overlap_gbs":20,"verdict":"hybrid"}
     ;
-    _ = write(fd, body.ptr, body.len);
+    if (write(fd, body.ptr, body.len) != body.len)
+        return error.WriteFixtureFailed;
 }
 fn deleteFixture(path: [:0]const u8) void {
     if (comptime builtin.target.os.tag == .windows) return;

@@ -706,7 +706,7 @@ test "gemv lote: filas y strides correctos" {
 // Benchmark GB/s por núcleo (single-thread). Reporta a HANDOFFS.
 // ============================================================================
 
-fn benchOne(tag: []const u8, name: []const u8, comptime fmt: cg.Format, comptime use_scalar: bool, w: []const u8, n: usize, x: []const f32, out: []f32, iters_mult: usize) void {
+fn benchOne(tag: []const u8, name: []const u8, comptime fmt: cg.Format, comptime use_scalar: bool, w: []const u8, n: usize, x: []const f32, out: []f32, iters_mult: usize) !void {
     var sink: f32 = 0;
     // Calibración: 3 barridos.
     for (0..3) |_| {
@@ -757,8 +757,8 @@ test "bench GB/s por nucleo" {
             defer std.heap.page_allocator.free(w);
             for (0..M) |r| @memset(w[r * rb ..][0..rb], @truncate(0x11 * (r % 17)));
             var out: [M]f32 = undefined;
-            benchOne(tag, @tagName(fmt), fmt, false, w, K, &x, &out, iters_mult);
-            benchOne(tag, @tagName(fmt), fmt, true, w, K, &x, &out, iters_mult);
+            try benchOne(tag, @tagName(fmt), fmt, false, w, K, &x, &out, iters_mult);
+            try benchOne(tag, @tagName(fmt), fmt, true, w, K, &x, &out, iters_mult);
         }
     }
 }

@@ -43,7 +43,7 @@ const BenchLock = struct {
         }
     }
 
-    fn release(self: BenchLock, io: std.Io) void {
+    fn release(self: *BenchLock, io: std.Io) void {
         if (comptime builtin.target.os.tag == .windows) return;
         if (self.file) |f| {
             _ = std.c.flock(f.handle, 8);
