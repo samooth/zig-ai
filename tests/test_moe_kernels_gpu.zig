@@ -192,6 +192,7 @@ const testing = std.testing;
 const Io = std.Io;
 
 test "E3 paridad: casos dirigidos (hits/miss/overflow/Q16/recencia/ties)" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     const gpa = testing.allocator;
     var rig = Rig.init(gpa, .{ .num_layers = 2, .num_experts = 8, .cache_size = 8, .max_fetch = 4 }, 16) catch |e| {
         if (e == error.CudaUnavailable or e == error.CudaError) { // CudaError: build sin toolkit (stub)
@@ -238,6 +239,7 @@ test "E3 paridad: casos dirigidos (hits/miss/overflow/Q16/recencia/ties)" {
 }
 
 test "E3 paridad: fuzz sembrado multi-capa" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     const gpa = testing.allocator;
     var rig = Rig.init(gpa, .{ .num_layers = 3, .num_experts = 12, .cache_size = 14, .max_fetch = 6 }, 24) catch |e| {
         if (e == error.CudaUnavailable or e == error.CudaError) { // CudaError: build sin toolkit (stub)

@@ -109,6 +109,7 @@ fn cpuAttention(
 }
 
 test "B6 vec E2E: fattnKvarnVecDevice ≡ CPU ref con materialized K/V (gated P4 cubin)" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     // Gated P4 (cubin). En el run del día, las 2/3 seeds del smoke
     // deben pasar rel < 1e-2; tightening a 1e-5 cuando estable.
     if (build_options.fattn_cubin.len == 0) return error.SkipZigTest;
@@ -228,7 +229,7 @@ test "B6 vec E2E: fattnKvarnVecDevice ≡ CPU ref con materialized K/V (gated P4
             .d_records = @ptrFromInt(d_records),
             .d_stage = @ptrFromInt(d_stage),
             .n_record_heads = @intCast(n_rec_heads),
-        .head_dim = 128,
+            .head_dim = 128,
             .groups_per_stream = 1,
             .record_bytes = record_bytes,
             .stage_groups = @intCast(stage_groups),

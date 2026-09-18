@@ -94,6 +94,7 @@ fn runSeparate(lk: *layer_kernels.LayerKernels, conv_out: []f32, gate: []const f
 }
 
 test "deltaNetFused: paridad vs cadena separada (l2+deltaNet+rmsNorm)" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     cudaz.ensureContext() catch return error.SkipZigTest;
     _ = cudaz.cuDeviceGet(0) catch return error.SkipZigTest;
     const gpa = testing.allocator;

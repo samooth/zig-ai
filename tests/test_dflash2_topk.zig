@@ -11,6 +11,7 @@ test "dflash2 top-k GPU vs CPU parity + throughput" {
     const gpa = std.testing.allocator;
     cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
+    _ = std.c.setenv("ZIG_AI_DFLASH2_TOPK_GPU", "1", 1);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
     defer lk.deinit();
@@ -64,12 +65,16 @@ test "dflash2 top-k GPU vs CPU parity + throughput" {
     var gpu_set: [8]usize = undefined;
     for (gpu_ids, 0..) |id, i| gpu_set[i] = @intCast(id);
     std.sort.pdq(usize, &gpu_set, {}, struct {
-        fn lessThan(_: void, a: usize, b: usize) bool { return a < b; }
+        fn lessThan(_: void, a: usize, b: usize) bool {
+            return a < b;
+        }
     }.lessThan);
     var cpu_set: [8]usize = undefined;
     for (cpu_idx, 0..) |idx, i| cpu_set[i] = @intCast(idx);
     std.sort.pdq(usize, &cpu_set, {}, struct {
-        fn lessThan(_: void, a: usize, b: usize) bool { return a < b; }
+        fn lessThan(_: void, a: usize, b: usize) bool {
+            return a < b;
+        }
     }.lessThan);
     for (0..top_k) |i| {
         try std.testing.expectEqual(cpu_set[i], gpu_set[i]);
@@ -84,6 +89,7 @@ test "dflash2 tree-walk parity vs selector" {
     const gpa = std.testing.allocator;
     cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
+    _ = std.c.setenv("ZIG_AI_DFLASH2_TOPK_GPU", "1", 1);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
     defer lk.deinit();
@@ -131,12 +137,16 @@ test "dflash2 tree-walk parity vs selector" {
     var sel_set: [8]usize = undefined;
     for (sel_ids, 0..) |id, i| sel_set[i] = @intCast(id);
     std.sort.pdq(usize, &sel_set, {}, struct {
-        fn lessThan(_: void, a: usize, b: usize) bool { return a < b; }
+        fn lessThan(_: void, a: usize, b: usize) bool {
+            return a < b;
+        }
     }.lessThan);
     var tw_set: [8]usize = undefined;
     for (tw_ids, 0..) |id, i| tw_set[i] = @intCast(id);
     std.sort.pdq(usize, &tw_set, {}, struct {
-        fn lessThan(_: void, a: usize, b: usize) bool { return a < b; }
+        fn lessThan(_: void, a: usize, b: usize) bool {
+            return a < b;
+        }
     }.lessThan);
     for (0..top_k) |i| {
         try std.testing.expectEqual(sel_set[i], tw_set[i]);

@@ -99,6 +99,7 @@ test "KvarnGpuCache: geometry sanity (CPU, no GPU)" {
 }
 
 test "KvarnGpuCache: appendTokens e2e + descs + split attention (gated cubin)" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_split_cubin.len == 0) return error.SkipZigTest;
 
@@ -259,6 +260,7 @@ test "M3 ladder VRAM: KVarN vs q8_0 (recordBytes reales, amortizado)" {
 // ============================================================================
 
 test "M3 appendTokens adaptive: smem_optin 64KB (lowshmem) vs null (hishmem) — descs idénticos" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_split_cubin.len == 0) return error.SkipZigTest;
 

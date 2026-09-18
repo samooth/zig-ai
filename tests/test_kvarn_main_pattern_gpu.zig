@@ -24,6 +24,7 @@ const build_options = @import("build_options");
 const KvarnGpuCache = kvg_mod.KvarnGpuCache;
 
 test "M3 main-pattern: 3 capas × (prefill 256 + decode 8) con smem_optin probeDevice real" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_split_cubin.len == 0) return error.SkipZigTest;
 

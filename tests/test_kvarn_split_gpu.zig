@@ -28,6 +28,7 @@ const N_Q: usize = 1;
 const N_STREAM: usize = 1;
 
 test "A10: decode-split MMA ≡ portable FA (records reales, g=1, k4v4, GQA2)" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.fattn_cubin.len == 0) return error.SkipZigTest;
 
@@ -357,6 +358,7 @@ test "A10: decode-split MMA ≡ portable FA (records reales, g=1, k4v4, GQA2)" {
 }
 
 test "A11 geometry: selectSplitGeometry real (GPU, gqa2, 256 kv)" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     cudaz.ensureContext() catch return error.SkipZigTest; // CI sin toolkit
     const smod = try cudaz.cuModuleLoad(build_options.kvarn_split_cubin);
     const g = try kvk.selectSplitGeometry(
@@ -384,6 +386,7 @@ test "A11 geometry: selectSplitGeometry real (GPU, gqa2, 256 kv)" {
 }
 
 test "A11 geometry: cutoff directo — grid grande sin split" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     cudaz.ensureContext() catch return error.SkipZigTest; // CI sin toolkit
     const smod = try cudaz.cuModuleLoad(build_options.kvarn_split_cubin);
     // 32 heads · 8 streams: grid directo enorme ⇒ el cutoff debe
@@ -399,6 +402,7 @@ test "A11 geometry: cutoff directo — grid grande sin split" {
 }
 
 test "A13: prefill chunk n_q=8 via decode-split (SPECIALIZED_DECODE_MAX_Q=16)" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_split_cubin.len == 0) return error.SkipZigTest;
 
@@ -720,6 +724,7 @@ const N_SEEDS_DEFAULT_A13: u32 = 32;
 const N_SEEDS_FULL_A13: u32 = 1000;
 
 test "A13 gate: decode-split ≡ CPU pipeline-exacta, N-seeds (gated cubin)" {
+    if (!cudaz.isCudaAvailable()) return error.SkipZigTest;
     if (build_options.kvarn_cubin.len == 0) return error.SkipZigTest;
     if (build_options.kvarn_split_cubin.len == 0) return error.SkipZigTest;
 
