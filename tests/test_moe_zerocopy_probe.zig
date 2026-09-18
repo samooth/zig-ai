@@ -8,6 +8,13 @@
 //!
 //! Disciplina GPU: flock NB con pocos reintentos ⇒ SKIP si ocupada.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const builtin = @import("builtin");
 const gguf = @import("gguf");
 const cudaz = @import("cudaz");
@@ -27,7 +34,7 @@ test "probe: HostBank sobre mmap RW (MAP_SHARED hipótesis) vs RO (known-issue)"
             lf.close(io);
             waited += 10;
             if (waited >= 30) return error.SkipZigTest;
-            std.debug.print("[probe] .bench.lock ocupada, espero {d}s…\n", .{waited});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[probe] .bench.lock ocupada, espero {d}s…\n", .{waited});
             var ts: std.c.timespec = .{ .sec = 10, .nsec = 0 };
             _ = std.c.nanosleep(&ts, null);
         }
@@ -69,10 +76,10 @@ test "probe: HostBank sobre mmap RW (MAP_SHARED hipótesis) vs RO (known-issue)"
         std.mem.doNotOptimizeAway(acc);
 
         var bank = host_bank.HostBank.fromFileMmapWhole(mm.memory) catch |err| {
-            std.debug.print("[probe RW] REGISTRO FALLÓ: {s} ⇒ hipótesis rechazada\n", .{@errorName(err)});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[probe RW] REGISTRO FALLÓ: {s} ⇒ hipótesis rechazada\n", .{@errorName(err)});
             return error.SkipZigTest;
         };
-        std.debug.print("[probe RW] registrado OK ({d} B) ⇒ MAP_SHARED CONFIRMADO: ticket C viable (protección RW en loader)\n", .{bank.length()});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[probe RW] registrado OK ({d} B) ⇒ MAP_SHARED CONFIRMADO: ticket C viable (protección RW en loader)\n", .{bank.length()});
         bank.unreg();
     }
 
@@ -90,9 +97,9 @@ test "probe: HostBank sobre mmap RW (MAP_SHARED hipótesis) vs RO (known-issue)"
         if (host_bank.HostBank.fromFileMmapWhole(mm.memory)) |b| {
             var bank = b;
             bank.unreg();
-            std.debug.print("[probe RO] registrado OK (driver permite también RO — revisar supuestos)\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[probe RO] registrado OK (driver permite también RO — revisar supuestos)\n", .{});
         } else |err| {
-            std.debug.print("[probe RO] falló como se esperaba: {s} (confirma known-issue)\n", .{@errorName(err)});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[probe RO] falló como se esperaba: {s} (confirma known-issue)\n", .{@errorName(err)});
         }
     }
 }

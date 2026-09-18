@@ -3,6 +3,13 @@
 //! Requiere la variable de entorno `GGUF_MODEL_PATH` apuntando a un .gguf;
 //! si no está definida, el test se salta (error.SkipZigTest).
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const gguf = @import("gguf");
 const gguf_tokenizer = @import("gguf_tokenizer");
 const model_config = @import("model_config");
@@ -14,7 +21,7 @@ test "load real gguf and verify config + tensor shapes" {
     const gpa = std.testing.allocator;
 
     const env_path = std.c.getenv("GGUF_MODEL_PATH") orelse {
-        std.debug.print("SKIP: GGUF_MODEL_PATH no está definida\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: GGUF_MODEL_PATH no está definida\n", .{});
         return error.SkipZigTest;
     };
     const path = std.mem.span(env_path);
@@ -27,13 +34,13 @@ test "load real gguf and verify config + tensor shapes" {
     // Header
     try std.testing.expectEqual(@as(u32, 3), g.version);
     const arch = g.arch() orelse return error.MissingArchitecture;
-    std.debug.print("arch={s} alignment={d} tensors={d}\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "arch={s} alignment={d} tensors={d}\n", .{
         arch, g.alignment, g.tensors.count(),
     });
 
     // Config
     const cfg = try model_config.ModelConfig.fromGguf(&g);
-    std.debug.print("embedding={d} layers={d} heads={d} kv_heads={d} ffn={d} vocab={d} ctx={d} rope_theta={d:.0}\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "embedding={d} layers={d} heads={d} kv_heads={d} ffn={d} vocab={d} ctx={d} rope_theta={d:.0}\n", .{
         cfg.embedding_length,
         cfg.block_count,
         cfg.head_count,
@@ -123,7 +130,7 @@ test "load real gguf and verify config + tensor shapes" {
 
     for (required[0..req_len]) |name| {
         const t = g.getTensor(name) orelse {
-            std.debug.print("FALTA tensor: {s}\n", .{name});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "FALTA tensor: {s}\n", .{name});
             return error.MissingTensor;
         };
         // shape debe coincidir con la config
@@ -174,7 +181,7 @@ test "load real gguf and verify config + tensor shapes" {
     const embd = g.getTensor("token_embd.weight").?;
     const embd_bytes = g.tensorData(embd);
     try std.testing.expect(embd_bytes.len > 0);
-    std.debug.print("token_embd dtype={s} shape=[{d} {d}] bytes={d}\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "token_embd dtype={s} shape=[{d} {d}] bytes={d}\n", .{
         embd.dtype.name(), embd.dims[0], embd.dims[1], embd_bytes.len,
     });
 
@@ -187,7 +194,7 @@ test "load real gguf and verify config + tensor shapes" {
     for (dt_counts, 0..) |c, i| {
         if (c > 0) {
             const t_enum = std.enums.fromInt(gguf.GgmlType, @as(u32, @intCast(i)));
-            std.debug.print("dtype {s}: {d}\n", .{ t_enum.?.name(), c });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "dtype {s}: {d}\n", .{ t_enum.?.name(), c });
         }
     }
 }
@@ -196,7 +203,7 @@ test "load real gguf tokenizer and build bpe (D1/D2/D4)" {
     const gpa = std.testing.allocator;
 
     const env_path = std.c.getenv("GGUF_MODEL_PATH") orelse {
-        std.debug.print("SKIP: GGUF_MODEL_PATH no está definida\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: GGUF_MODEL_PATH no está definida\n", .{});
         return error.SkipZigTest;
     };
     const path = std.mem.span(env_path);
@@ -209,7 +216,7 @@ test "load real gguf tokenizer and build bpe (D1/D2/D4)" {
     var gt = try gguf_tokenizer.GgufTokenizer.fromGguf(gpa, &g);
     defer gt.deinit();
 
-    std.debug.print("tokenizer model={s} pre={s} tokens={d} merges={d}\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "tokenizer model={s} pre={s} tokens={d} merges={d}\n", .{
         gt.model, gt.pre, gt.tokens.len, gt.merges.len,
     });
     try std.testing.expect(gt.tokens.len >= 1000);
@@ -233,12 +240,12 @@ test "load real gguf tokenizer and build bpe (D1/D2/D4)" {
     // Encoder produce ids válidos
     const ids = try tok.encode("Hello, world! This is a Zig test.", .{});
     defer gpa.free(ids);
-    std.debug.print("encode -> {d} tokens: ", .{ids.len});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "encode -> {d} tokens: ", .{ids.len});
     for (ids) |id| {
         const s = tok.vocab_inv.get(id);
-        std.debug.print("[{d}:'{s}'] ", .{ id, if (s) |x| x else "<unk>" });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{d}:'{s}'] ", .{ id, if (s) |x| x else "<unk>" });
     }
-    std.debug.print("\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "\n", .{});
     try std.testing.expect(ids.len > 0);
     for (ids) |id| {
         try std.testing.expect(tok.vocab_inv.get(id) != null);
@@ -253,7 +260,7 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     const gpa = std.testing.allocator;
 
     const env_path = std.c.getenv("GGUF_MODEL_PATH") orelse {
-        std.debug.print("SKIP: GGUF_MODEL_PATH no está definida\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: GGUF_MODEL_PATH no está definida\n", .{});
         return error.SkipZigTest;
     };
     const path = std.mem.span(env_path);
@@ -264,8 +271,8 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     defer model.deinit();
     const cfg = model.config;
 
-    std.debug.print("\n=== E: forward capa híbrida (CPU) ===\n", .{});
-    std.debug.print("arch={s} emb={d} layers={d} heads={d} kv={d} ffn={d} head_dim={d} rope={d:.1}\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "\n=== E: forward capa híbrida (CPU) ===\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "arch={s} emb={d} layers={d} heads={d} kv={d} ffn={d} head_dim={d} rope={d:.1}\n", .{
         cfg.architecture,  cfg.embedding_length,    cfg.block_count,          cfg.head_count,
         cfg.head_count_kv, cfg.feed_forward_length, cfg.rope_dimension_count, cfg.rope_freq_base,
     });
@@ -275,7 +282,7 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     defer emb.deinit();
     try std.testing.expectEqual(@as(usize, cfg.vocab_size), emb.shape[0]);
     try std.testing.expectEqual(@as(usize, cfg.embedding_length), emb.shape[1]);
-    std.debug.print("token_embd dequant -> [{d}, {d}] f16\n", .{ emb.shape[0], emb.shape[1] });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "token_embd dequant -> [{d}, {d}] f16\n", .{ emb.shape[0], emb.shape[1] });
 
     // Primer capa de atención del modelo híbrido (qwen35: blk.3)
     const layer_idx: usize = if (cfg.is_hybrid) cfg.full_attention_interval - 1 else 0;
@@ -305,7 +312,7 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     defer layer.deinit();
 
     try layer.loadWeightsFromGguf(&model.file, null);
-    std.debug.print("hybrid attn layer {d} loaded OK\n", .{layer_idx});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "hybrid attn layer {d} loaded OK\n", .{layer_idx});
 
     // Embedding lookup de tokens de prueba
     const test_tokens = [_]u32{ 9707, 11, 30, 1484, 13, 905 }; // "Hello, world!..."
@@ -345,13 +352,13 @@ test "load real gguf model: embedding, hybrid layer weights, forward pass (E1/E2
     }
     try std.testing.expect(!any_nan);
     try std.testing.expect(max_abs > 0);
-    std.debug.print("forward hybrid layer {d} OK: max_abs={d:.3}\n", .{ layer_idx, max_abs });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "forward hybrid layer {d} OK: max_abs={d:.3}\n", .{ layer_idx, max_abs });
 }
 
 test "kv offload 4k context fits in 8GB VRAM (F3)" {
     const gpa = std.testing.allocator;
     const env_path = std.c.getenv("GGUF_MODEL_PATH") orelse {
-        std.debug.print("SKIP: GGUF_MODEL_PATH no está definida\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: GGUF_MODEL_PATH no está definida\n", .{});
         return error.SkipZigTest;
     };
     const path = std.mem.span(env_path);
@@ -388,9 +395,9 @@ test "kv offload 4k context fits in 8GB VRAM (F3)" {
     try block_table.appendTokens(paged_kv.block_alloc, 4096);
 
     const num_blocks = block_table.numBlocks();
-    std.debug.print("Allocated {} blocks (expected 256)\n", .{num_blocks});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "Allocated {} blocks (expected 256)\n", .{num_blocks});
     if (num_blocks != 256) {
-        std.debug.print("ERROR: Expected 256 blocks, got {}\n", .{num_blocks});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "ERROR: Expected 256 blocks, got {}\n", .{num_blocks});
     }
     try std.testing.expect(num_blocks == 256);
 
@@ -400,7 +407,7 @@ test "kv offload 4k context fits in 8GB VRAM (F3)" {
         try std.testing.expect(physical < 300);
     }
 
-    std.debug.print("kv offload 4k context test passed: 256 blocks allocated\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "kv offload 4k context test passed: 256 blocks allocated\n", .{});
 }
 
 test "dequant Q1_0: sign bit per weight, values ±d" {

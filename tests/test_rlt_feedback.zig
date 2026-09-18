@@ -5,6 +5,13 @@
 //! 2. Sin pesos GGUF: feedback desactivado (alpha=0, forward idéntico)
 //! 3. GPU kernel: paridad vs CPU reference (requiere CUDA)
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const Tensor = @import("core").Tensor;
 
 /// Reference implementation: brute-force merge feedback.
@@ -137,7 +144,7 @@ test "mergeFeedback CPU: paridad vs reference en varias dimensiones" {
             if (diff > max_diff) max_diff = diff;
         }
         if (max_diff >= 1e-4) {
-            std.debug.print("[test_rlt_feedback] CPU parity FAIL: max_diff={e:.6}\n", .{max_diff});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test_rlt_feedback] CPU parity FAIL: max_diff={e:.6}\n", .{max_diff});
         }
         try std.testing.expect(max_diff < 1e-4);
     }

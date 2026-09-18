@@ -7,6 +7,13 @@
 //! y estado inicial no trivial.
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const wy = @import("transformer").prefill_wy;
 
 test "wyPrefill: paridad vs per-token (4 geometrías, gate≠0, GQA, estado≠0)" {
@@ -119,7 +126,7 @@ test "wyPrefill: paridad vs per-token (4 geometrías, gate≠0, GQA, estado≠0)
             const rel = adiff / denom;
             if (rel > max_rel) max_rel = rel;
             if (rel > 1e-3) {
-                std.debug.print("mismatch out @{d}: ref={d} wy={d} rel={d}\n", .{ i, r, w, rel });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "mismatch out @{d}: ref={d} wy={d} rel={d}\n", .{ i, r, w, rel });
             }
         }
         try std.testing.expect(max_rel < 1e-3);
@@ -131,7 +138,7 @@ test "wyPrefill: paridad vs per-token (4 geometrías, gate≠0, GQA, estado≠0)
             const rel = adiff / denom;
             if (rel > max_rel_s) max_rel_s = rel;
             if (rel > 2e-3) {
-                std.debug.print("mismatch state @{d}: ref={d} wy={d} rel={d}\n", .{ i, r, w, rel });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "mismatch state @{d}: ref={d} wy={d} rel={d}\n", .{ i, r, w, rel });
             }
         }
         try std.testing.expect(max_rel_s < 2e-3);

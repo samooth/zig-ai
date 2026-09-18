@@ -13,6 +13,13 @@
 //! ⚠ Test con kernels CUDA — REQUIERE flock .bench.lock (protocolo GPU).
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const gguf_model = @import("gguf_model");
 const speculative = @import("speculative");
@@ -108,5 +115,5 @@ test "dflash encoder paridad GPU vs CPU (fc+norm device-resident, taps sin D2H)"
 }
 
 fn debugPrint(worst: f32, rel: f32, n_taps: usize, fc_k: usize) void {
-    std.debug.print("dflash enc paridad: worst_at={e} rel(≥0.05 floor)={e} n_taps={d} fc_k={d}\n", .{ worst, rel, n_taps, fc_k });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "dflash enc paridad: worst_at={e} rel(≥0.05 floor)={e} n_taps={d} fc_k={d}\n", .{ worst, rel, n_taps, fc_k });
 }

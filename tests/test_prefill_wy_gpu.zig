@@ -12,6 +12,13 @@
 //! ⚠ Test con kernels CUDA — REQUIERE flock .bench.lock (protocolo GPU).
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const cudaz = @import("cudaz");
 const layer_kernels = @import("layer_kernels");
@@ -90,7 +97,7 @@ fn checkDiff(actual: []const f32, expected: []const f32, atol: f32, rtol: f32, n
         const combined = d / tol;
         if (combined > max_combined) max_combined = combined;
     }
-    std.debug.print("  {s}: max_combined={d:.3} (atol={e} rtol={e})\n", .{ name, max_combined, atol, rtol });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  {s}: max_combined={d:.3} (atol={e} rtol={e})\n", .{ name, max_combined, atol, rtol });
     return max_combined;
 }
 
@@ -270,7 +277,7 @@ test "prefillWY n=5 (pipeline real, gates agresivos): paridad vs per-token" {
     // ≤~5e-3·(1+|e|)), state estricto <1.
     const out_c = try checkDiff(result.attn_out, out_ref, 5e-3, 1e-3, "attn_out (agresivo, ver comentario)");
     const st_c = try checkDiff(result.state_out, state_ref, 2e-3, 2e-3, " state");
-    std.debug.print("  AGRESIVO n=5: out={d:.3} state={d:.3}\n", .{ out_c, st_c });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  AGRESIVO n=5: out={d:.3} state={d:.3}\n", .{ out_c, st_c });
     try testing.expect(out_c < 1.0);
     try testing.expect(st_c < 1.0);
 }

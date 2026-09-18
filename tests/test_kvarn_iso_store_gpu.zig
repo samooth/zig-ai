@@ -3,6 +3,13 @@
 // bug en kvarn_store_kernel con grid=n_record_heads=2. Pasa ⇒ el hang
 // está en init_descs/refresh o en la secuencia del cache.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const cudaz = @import("cudaz");
 const kvk = @import("kvarn_kernels");
@@ -73,15 +80,15 @@ test "iso: store SOLO kvh=2 layout real (bisect hang)" {
         .swa = 0,
         .eager_records = 1,
     };
-    std.debug.print("iso-store v2: lanzando kvh=2 grid=2 (layout real)...\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "iso-store v2: lanzando kvh=2 grid=2 (layout real)...\n", .{});
     try kvk.kvarnStoreDevice(kmod, &args, stream);
-    std.debug.print("iso-store v2: lanzado; sync...\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "iso-store v2: lanzado; sync...\n", .{});
     try cudaz.cuStreamSynchronize(stream);
-    std.debug.print("iso-store v2: COMPLETO SIN HANG\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "iso-store v2: COMPLETO SIN HANG\n", .{});
 
     // === BISECT FASE 2: la SECUENCIA completa del appendTokens ===
     // store + init_descs con los args EXACTOS de refreshDescs.
-    std.debug.print("iso2: init_descs tras store (kvh=2)\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "iso2: init_descs tras store (kvh=2)\n", .{});
     const d_descs = try cudaz.cuMemAlloc(2 * kvh * @sizeOf(kvk.KvarnDesc));
     defer cudaz.cuMemFree(d_descs);
     try cudaz.cuMemsetD8(d_descs, 0, 2 * kvh * @sizeOf(kvk.KvarnDesc));
@@ -108,19 +115,19 @@ test "iso: store SOLO kvh=2 layout real (bisect hang)" {
         .swa = 0,
     };
     try kvk.kvarnInitDescsDevice(kmod, &ia, stream);
-    std.debug.print("iso2: sync post-init_descs...\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "iso2: sync post-init_descs...\n", .{});
     try cudaz.cuStreamSynchronize(stream);
-    std.debug.print("iso2: SIN HANG — leyendo descs...\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "iso2: SIN HANG — leyendo descs...\n", .{});
     const dh = try a.alloc(u8, 2 * kvh * @sizeOf(kvk.KvarnDesc));
     defer a.free(dh);
     try cudaz.cuMemcpyDtoH(@intFromPtr(dh.ptr), d_descs, 2 * kvh * @sizeOf(kvk.KvarnDesc));
     for (0..2 * kvh) |i| {
         const d = @as([*]align(1) const kvk.KvarnDesc, @ptrCast(dh.ptr))[i];
-        std.debug.print("desc[{d}]: lg={d} lp={d} hb={d} v={d}\n", .{ i, d.live_group, d.live_pos, d.head_base, d.value });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "desc[{d}]: lg={d} lp={d} hb={d} v={d}\n", .{ i, d.live_group, d.live_pos, d.head_base, d.value });
     }
     // Gate: con el fix A3-bis, TODOS los descs deben tener live=(0,127).
     try testing.expectEqual(@as(c_int, 0), @as([*]align(1) const kvk.KvarnDesc, @ptrCast(dh.ptr))[0].live_group);
     try testing.expectEqual(@as(c_int, 127), @as([*]align(1) const kvk.KvarnDesc, @ptrCast(dh.ptr))[0].live_pos);
     try testing.expectEqual(@as(c_int, 127), @as([*]align(1) const kvk.KvarnDesc, @ptrCast(dh.ptr))[3].live_pos);
-    std.debug.print("iso2: A3-bis VERIFICADO — descs h1 con live correcto\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "iso2: A3-bis VERIFICADO — descs h1 con live correcto\n", .{});
 }

@@ -5,6 +5,13 @@
 //! Geometría: Qwen3.5-0.8B (n_v_heads=16, head_v_dim=128, dt_rank=16,
 //! key_dim=2048, qkv_dim=6144).
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const cudaz = @import("cudaz");
 const layer_kernels = @import("layer_kernels");
@@ -107,10 +114,10 @@ test "deltaNetWarp: paridad vs kernel clásico (misma semántica, reducción dis
         sum_abs_st += @abs(@as(f64, w) - @as(f64, c));
         max_s = @max(max_s, @max(@abs(w), @abs(c)));
     }
-    std.debug.print("[dnwarp] state: max_abs={e} mean_abs={e} rel_to_scale={e}\n", .{ max_abs_st, sum_abs_st / @as(f64, @floatFromInt(st_w.len)), max_abs_st / max_s });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[dnwarp] state: max_abs={e} mean_abs={e} rel_to_scale={e}\n", .{ max_abs_st, sum_abs_st / @as(f64, @floatFromInt(st_w.len)), max_abs_st / max_s });
     // Estado: near-bit-perfect (medido ~1-ULP por orden de reducción; la
     // métrica dura es la de la salida). Cota: < 1e-5 relativo a la escala.
     try testing.expect(max_abs_st / max_s < 1e-5);
 
-    std.debug.print("[dnwarp] paridad OK: attn max_rel={e} state rel_to_scale={e}\n", .{ max_rel, max_abs_st / max_s });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[dnwarp] paridad OK: attn max_rel={e} state rel_to_scale={e}\n", .{ max_rel, max_abs_st / max_s });
 }

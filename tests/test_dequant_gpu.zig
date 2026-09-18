@@ -2,6 +2,13 @@
 //! referencia CPU en gguf.zig. Cubre todos los dtypes con kernel CUDA.
 //! Se salta si CUDA no está disponible (build_options.has_cuda == false).
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const gguf = @import("gguf");
 const gguf_dequant = @import("gguf_dequant");
 
@@ -46,18 +53,18 @@ fn testDtype(gpa: std.mem.Allocator, engine: *const gguf_dequant.GgufDequantEngi
     for (out_cpu, out_gpu, 0..) |c, g, i| {
         max_diff = @max(max_diff, @abs(c - g));
         if (!approxEq(c, g)) {
-            std.debug.print("[{s}] mismatch at {d}: cpu={d} gpu={d}\n", .{ @tagName(dtype), i, c, g });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] mismatch at {d}: cpu={d} gpu={d}\n", .{ @tagName(dtype), i, c, g });
             return error.DequantMismatch;
         }
     }
-    std.debug.print("[{s}] OK: {d} elems, {d} bloques, max_diff={d}\n", .{ @tagName(dtype), numel, num_blocks, max_diff });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] OK: {d} elems, {d} bloques, max_diff={d}\n", .{ @tagName(dtype), numel, num_blocks, max_diff });
 }
 
 test "dequant GPU bit-exact vs CPU (todas las variantes)" {
     const engine = blk: {
         const eng = gguf_dequant.GgufDequantEngine.init() catch |e| {
             if (e == error.CudaUnavailable) {
-                std.debug.print("SKIP: CUDA no disponible\n", .{});
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
                 return error.SkipZigTest;
             }
             return e;
@@ -111,13 +118,13 @@ test "q6_k repro: q6k_val(kernel) vs dequantBlock(CPU) w=0..255" {
         const v = q6kValZig(&blk, w);
         max_diff = @max(max_diff, @abs(v - ref[w]));
         if (!approxEq(v, ref[w])) {
-            if (bad < 8) std.debug.print("[q6k-val] w={d}: kernel={d} cpu={d}\n", .{ w, v, ref[w] });
+            if (bad < 8) try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[q6k-val] w={d}: kernel={d} cpu={d}\n", .{ w, v, ref[w] });
             bad += 1;
         }
     }
     if (bad > 0) {
-        std.debug.print("[q6k-val] FALLO {d}/256 max_diff={d}\n", .{ bad, max_diff });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[q6k-val] FALLO {d}/256 max_diff={d}\n", .{ bad, max_diff });
         return error.Q6kValMismatch;
     }
-    std.debug.print("[q6k-val] OK 256/256 (valfn == CPU; bug en mapeo del kernel)\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[q6k-val] OK 256/256 (valfn == CPU; bug en mapeo del kernel)\n", .{});
 }

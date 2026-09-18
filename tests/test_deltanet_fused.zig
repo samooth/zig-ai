@@ -4,6 +4,13 @@
 //! árbol reds[256] en l2/rms (etapas A/C), recurrencia §5.6 exacta (etapa B).
 //! Se salta sin GPU.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const cudaz = @import("cudaz");
 const layer_kernels = @import("layer_kernels");
@@ -139,7 +146,7 @@ test "deltaNetFused: paridad vs cadena separada (l2+deltaNet+rmsNorm)" {
     var max_rel_co: f32 = 0;
     for (conv_out_s, conv_out_f, 0..) |s, f, i| {
         if (@as(u32, @bitCast(s)) != @as(u32, @bitCast(f))) {
-            if (bad_co < 4) std.debug.print("  conv_out[{d}]: sep={e} fused={e}\n", .{ i, s, f });
+            if (bad_co < 4) try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  conv_out[{d}]: sep={e} fused={e}\n", .{ i, s, f });
             bad_co += 1;
         }
         const rel = @abs(s - f) / @max(1e-6, @abs(s));
@@ -160,12 +167,12 @@ test "deltaNetFused: paridad vs cadena separada (l2+deltaNet+rmsNorm)" {
     var max_rel_st: f32 = 0;
     for (state_s, state_f, 0..) |s, f, i| {
         if (@as(u32, @bitCast(s)) != @as(u32, @bitCast(f))) {
-            if (bad_st < 4) std.debug.print("  state[{d}]: sep={e} fused={e}\n", .{ i, s, f });
+            if (bad_st < 4) try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  state[{d}]: sep={e} fused={e}\n", .{ i, s, f });
             bad_st += 1;
         }
         max_rel_st = @max(max_rel_st, @abs(s - f) / @max(1e-6, @abs(s)));
     }
-    std.debug.print("[dnfused] conv_out max_rel={e} bit-diffs={d} | attn max_rel={e} bit-diffs={d}/{d} | state max_rel={e} bit-diffs={d}\n", .{ max_rel_co, bad_co, max_rel, bad_bits, attn_s.len, max_rel_st, bad_st });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[dnfused] conv_out max_rel={e} bit-diffs={d} | attn max_rel={e} bit-diffs={d}/{d} | state max_rel={e} bit-diffs={d}\n", .{ max_rel_co, bad_co, max_rel, bad_bits, attn_s.len, max_rel_st, bad_st });
 
     // Gates: l2/attn/state rel<1e-3 (hard); bit-diffs reportados (soft — FMA
     // del driver puede reordenar entre implementaciones con reducción distinta).
@@ -173,8 +180,8 @@ test "deltaNetFused: paridad vs cadena separada (l2+deltaNet+rmsNorm)" {
     try testing.expect(max_rel < 1e-3);
     try testing.expect(max_rel_st < 1e-3);
     if (bad_bits == 0 and bad_st == 0) {
-        std.debug.print("[dnfused] paridad BIT-EXACT total\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[dnfused] paridad BIT-EXACT total\n", .{});
     } else {
-        std.debug.print("[dnfused] paridad rel OK con {d}/{d} bit-diffs (FMA reorder)\n", .{ bad_bits + bad_st, attn_s.len + state_f.len });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[dnfused] paridad rel OK con {d}/{d} bit-diffs (FMA reorder)\n", .{ bad_bits + bad_st, attn_s.len + state_f.len });
     }
 }

@@ -4,6 +4,13 @@
 //!     contra GGUF real vía GGUF_MODEL_PATH.
 //!   - E2: offload cache LRU + espejo CPU bit-exacto (próxima tarea).
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const gguf = @import("gguf");
 const moe = @import("gguf_moe");
 const budget = @import("budget");
@@ -399,11 +406,11 @@ test "smoke contra GGUF real (GGUF_MODEL_PATH)" {
     defer g.deinit();
 
     if (!moe.isMoeModel(&g)) {
-        std.debug.print("[gguf_moe] {s}: denso (sin router)\n", .{"modelo"});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[gguf_moe] {s}: denso (sin router)\n", .{"modelo"});
         return;
     }
     const info = try moe.moeInfo(&g);
-    std.debug.print("[gguf_moe] real: family={s} E={d} top_k={d}\n", .{ @tagName(info.family), info.n_expert, info.top_k });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[gguf_moe] real: family={s} E={d} top_k={d}\n", .{ @tagName(info.family), info.n_expert, info.top_k });
     // Recorre todas las capas buscando specs válidas (no asserts de valores:
     // el objetivo es ejercitar el parser sobre bytes reales).
     const bc = moe.blockCountMeta(&g, g.arch().?) orelse 0;
@@ -412,12 +419,12 @@ test "smoke contra GGUF real (GGUF_MODEL_PATH)" {
         if (!moe.isMoeLayer(&g, il)) continue;
         n_moe += 1;
         const spec = moe.layerSpec(&g, il) catch |err| {
-            std.debug.print("[gguf_moe] capa {d}: error {s}\n", .{ il, @errorName(err) });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[gguf_moe] capa {d}: error {s}\n", .{ il, @errorName(err) });
             continue;
         };
-        std.debug.print("[gguf_moe] capa {d} ok: E={d} row(gate)={d}B row(down)={d}B\n", .{ il, spec.n_expert, spec.gate.rowBytes(), spec.down.rowBytes() });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[gguf_moe] capa {d} ok: E={d} row(gate)={d}B row(down)={d}B\n", .{ il, spec.n_expert, spec.gate.rowBytes(), spec.down.rowBytes() });
     }
-    std.debug.print("[gguf_moe] capas MoE encontradas: {d}/{d}\n", .{ n_moe, bc });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[gguf_moe] capas MoE encontradas: {d}/{d}\n", .{ n_moe, bc });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

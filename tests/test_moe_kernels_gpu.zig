@@ -9,6 +9,13 @@
 //! Disciplina GPU: toda la sesión corre bajo lock exclusivo `.bench.lock`
 //! (patrón tools/bench_bw.zig). Se salta sin CUDA (error.CudaUnavailable).
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const builtin = @import("builtin");
 const cudaz = @import("cudaz");
 const moe_cuda = @import("moe_cuda");
@@ -33,7 +40,7 @@ const BenchLock = struct {
             f.close(io);
             waited += 5;
             if (waited >= 60) return error.BenchLockBusy;
-            std.debug.print("[moe_gpu_test] .bench.lock ocupada, espero {d}s…\n", .{waited});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[moe_gpu_test] .bench.lock ocupada, espero {d}s…\n", .{waited});
             var ts: std.c.timespec = .{ .sec = 5, .nsec = 0 };
             _ = std.c.nanosleep(&ts, null);
         }
@@ -70,7 +77,7 @@ const Rig = struct {
         const io = Io.Threaded.global_single_threaded.io();
         var lock = BenchLock.acquire(io) catch |e| {
             if (e == error.BenchLockBusy) {
-                std.debug.print("SKIP: .bench.lock ocupada (otro lane en la GPU)\n", .{});
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: .bench.lock ocupada (otro lane en la GPU)\n", .{});
                 return error.SkipZigTest;
             }
             return e;
@@ -175,7 +182,7 @@ fn expectEq(comptime T: type, a: []const T, b: []const T, ctx: []const u8) !void
     if (a.len != b.len) return error.LenMismatch;
     for (a, b, 0..) |x, y, i| {
         if (x != y) {
-            std.debug.print("[paridad:{s}] mismatch @{d}: gpu={d} cpu={d}\n", .{ ctx, i, x, y });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[paridad:{s}] mismatch @{d}: gpu={d} cpu={d}\n", .{ ctx, i, x, y });
             return error.ParityMismatch;
         }
     }
@@ -188,7 +195,7 @@ test "E3 paridad: casos dirigidos (hits/miss/overflow/Q16/recencia/ties)" {
     const gpa = testing.allocator;
     var rig = Rig.init(gpa, .{ .num_layers = 2, .num_experts = 8, .cache_size = 8, .max_fetch = 4 }, 16) catch |e| {
         if (e == error.CudaUnavailable or e == error.CudaError) { // CudaError: build sin toolkit (stub)
-            std.debug.print("SKIP: CUDA no disponible\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
             return error.SkipZigTest;
         }
         return e;
@@ -221,7 +228,7 @@ test "E3 paridad: casos dirigidos (hits/miss/overflow/Q16/recencia/ties)" {
     const freq = try moe_cuda.readDecodeFreq(gpa, &rig.gpu);
     defer gpa.free(freq);
     const oracle = moe_cuda.oracleHitAtSlots(freq, 4);
-    std.debug.print("[E6] oracle_hit_at_4={d:.3}\n", .{oracle});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[E6] oracle_hit_at_4={d:.3}\n", .{oracle});
     try testing.expect(oracle >= 0.0 and oracle <= 1.0);
 
     // E6: lectura única de stats sin sync extra (coherente con el espejo).
@@ -234,7 +241,7 @@ test "E3 paridad: fuzz sembrado multi-capa" {
     const gpa = testing.allocator;
     var rig = Rig.init(gpa, .{ .num_layers = 3, .num_experts = 12, .cache_size = 14, .max_fetch = 6 }, 24) catch |e| {
         if (e == error.CudaUnavailable or e == error.CudaError) { // CudaError: build sin toolkit (stub)
-            std.debug.print("SKIP: CUDA no disponible\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
             return error.SkipZigTest;
         }
         return e;

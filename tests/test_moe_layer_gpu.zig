@@ -4,6 +4,13 @@
 //!
 //! Disciplina GPU: .bench.lock no-bloqueante (60 s → SKIP). Sin CUDA: SKIP.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const builtin = @import("builtin");
 const gguf = @import("gguf");
 const cudaz = @import("cudaz");
@@ -92,7 +99,7 @@ test "E5 capa MoE completa: paridad GPU↔CPU con expertos q4_1" {
     const io = std.Io.Threaded.global_single_threaded.io();
     const lock = BenchLock.acquire(io) catch |e| {
         if (e == error.BenchLockBusy) {
-            std.debug.print("SKIP: .bench.lock ocupada\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: .bench.lock ocupada\n", .{});
             return error.SkipZigTest;
         }
         return e;
@@ -177,12 +184,12 @@ test "E5 capa MoE completa: paridad GPU↔CPU con expertos q4_1" {
         var s2: [TOPK]i32 = undefined;
         try moe_cuda.dtoh(f32, &w2, layer.dev_weights);
         try moe_cuda.dtoh(i32, &s2, layer.dev_ids);
-        std.debug.print("[dbg] weights={any} slots={any}\n", .{ w2, s2 });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[dbg] weights={any} slots={any}\n", .{ w2, s2 });
         var acc_host: [N_EMBD]f32 = undefined;
         try moe_cuda.dtoh(f32, &acc_host, layer.dev_acc);
         var na: f32 = 0;
         for (acc_host) |v| na += v * v;
-        std.debug.print("[dbg] ||acc||={d}\n", .{na});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[dbg] ||acc||={d}\n", .{na});
     }
 
     const out_gpu = try gpa.alloc(f32, N_EMBD);
@@ -271,14 +278,14 @@ test "E5 capa MoE completa: paridad GPU↔CPU con expertos q4_1" {
     var norm_exp: f32 = 0;
     for (out_gpu) |v| norm_out += v * v;
     for (expected) |v| norm_exp += v * v;
-    std.debug.print("[E5] ||out||={d:.4} ||exp||={d:.4}\n", .{ norm_out, norm_exp });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[E5] ||out||={d:.4} ||exp||={d:.4}\n", .{ norm_out, norm_exp });
     try testing.expect(norm_out > 1e-8); // la salida NO puede ser cero
     try testing.expect(norm_exp > 1e-8);
     for (out_gpu, expected) |gv, ev_| {
         max_diff = @max(max_diff, @abs(gv - ev_));
     }
     const rel = max_diff / scale;
-    std.debug.print("[E5] max_diff={d:.6} rel={d:.6} (tolerancia 0.05)\n", .{ max_diff, rel });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[E5] max_diff={d:.6} rel={d:.6} (tolerancia 0.05)\n", .{ max_diff, rel });
     try testing.expect(rel < 0.05);
 }
 
@@ -293,7 +300,7 @@ test "E5 4.10 streaming: paridad forwardGPUStreaming == batch (mismo routing)" {
     const io = std.Io.Threaded.global_single_threaded.io();
     const lock = BenchLock.acquire(io) catch |e| {
         if (e == error.BenchLockBusy) {
-            std.debug.print("SKIP: .bench.lock ocupada\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: .bench.lock ocupada\n", .{});
             return error.SkipZigTest;
         }
         return e;
@@ -385,7 +392,7 @@ test "E5 4.10 streaming: paridad forwardGPUStreaming == batch (mismo routing)" {
 
     var norm_b: f32 = 0;
     for (out_batch) |v| norm_b += v * v;
-    std.debug.print("[E5-4.10] ||batch||={d:.4} ||stream||={d:.4}\n", .{ norm_b, blk: {
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[E5-4.10] ||batch||={d:.4} ||stream||={d:.4}\n", .{ norm_b, blk: {
         var n: f32 = 0;
         for (out_stream) |v| n += v * v;
         break :blk n;
@@ -397,7 +404,7 @@ test "E5 4.10 streaming: paridad forwardGPUStreaming == batch (mismo routing)" {
     // axpyMul por experto en el MISMO orden del router).
     for (out_batch, out_stream, 0..) |bv, sv, i| {
         if (bv != sv) {
-            std.debug.print("[E5-4.10] mismatch @{d}: batch={d:.6} stream={d:.6}\n", .{ i, bv, sv });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[E5-4.10] mismatch @{d}: batch={d:.6} stream={d:.6}\n", .{ i, bv, sv });
             return error.StreamingParityMismatch;
         }
     }
@@ -412,7 +419,7 @@ test "E5 4.10 streaming con nw==1: camino de un solo experto sin ping-pong real"
     const io = std.Io.Threaded.global_single_threaded.io();
     const lock = BenchLock.acquire(io) catch |e| {
         if (e == error.BenchLockBusy) {
-            std.debug.print("SKIP: .bench.lock ocupada\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: .bench.lock ocupada\n", .{});
             return error.SkipZigTest;
         }
         return e;
@@ -491,7 +498,7 @@ test "E5 4.10 streaming con nw==1: camino de un solo experto sin ping-pong real"
 
     var norm: f32 = 0;
     for (out) |v| norm += v * v;
-    std.debug.print("[E5-4.10-nw1] ||out||={d:.4} (finito, no-cero vía fallback)\n", .{norm});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[E5-4.10-nw1] ||out||={d:.4} (finito, no-cero vía fallback)\n", .{norm});
     try testing.expect(norm > 1e-8 and norm == norm);
 }
 
@@ -531,7 +538,7 @@ test "E5 variante ZERO-COPY: fuentes = VAs del mmap registrado (Contrato 5)" {
         break :blk st.size > 0;
     };
     if (!fixture_exists) {
-        std.debug.print("SKIP: fixture no encontrada ({s}) — genera con zig build moe-make-fixture\n", .{path});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: fixture no encontrada ({s}) — genera con zig build moe-make-fixture\n", .{path});
         return error.SkipZigTest;
     }
 
@@ -539,7 +546,7 @@ test "E5 variante ZERO-COPY: fuentes = VAs del mmap registrado (Contrato 5)" {
     defer g.deinit();
 
     if (!gguf_moe.isMoeModel(&g)) {
-        std.debug.print("SKIP: {s} no es MoE\n", .{path});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: {s} no es MoE\n", .{path});
         return error.SkipZigTest;
     }
     const info = try gguf_moe.moeInfo(&g);
@@ -569,7 +576,7 @@ test "E5 variante ZERO-COPY: fuentes = VAs del mmap registrado (Contrato 5)" {
     // sobre mmaps file-backed MAP_PRIVATE ⇒ la ruta zero-copy degrada sola a
     // copia pinned (diseño E8). Aceptamos ambos modos: lo que se valida es el
     // pipeline completo leyendo de las fuentes que sean.
-    std.debug.print("[E5-zero-copy] bank_registered={any} (false = limitación driver/file-mmap, ver LANE-E/HANDOFFS)\n", .{layer.bank_registered});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[E5-zero-copy] bank_registered={any} (false = limitación driver/file-mmap, ver LANE-E/HANDOFFS)\n", .{layer.bank_registered});
 
     const n_embd: usize = @intCast(spec.router.n_embd);
     const x_host = try gpa.alloc(f32, n_embd);
@@ -595,7 +602,7 @@ test "E5 variante ZERO-COPY: fuentes = VAs del mmap registrado (Contrato 5)" {
     try moe_cuda.dtoh(f32, out, out_dev);
     var norm: f32 = 0;
     for (out) |v| norm += v * v;
-    std.debug.print("[E5-zero-copy] ||out||={d:.4} (no-NaN, no-cero)\n", .{norm});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[E5-zero-copy] ||out||={d:.4} (no-NaN, no-cero)\n", .{norm});
     try testing.expect(norm > 1e-8 and norm == norm); // finito y no vacío
 }
 
@@ -623,7 +630,7 @@ test "E5 híbrido: overflow a CPU executor == offload puro (paridad)" {
         break :blk st.size > 0;
     };
     if (!fixture_exists) {
-        std.debug.print("SKIP: fixture ausente ({s})\n", .{path});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: fixture ausente ({s})\n", .{path});
         return error.SkipZigTest;
     }
 
@@ -732,7 +739,7 @@ test "E5 híbrido: overflow a CPU executor == offload puro (paridad)" {
 
     var norm_b: f32 = 0;
     for (out_b) |v| norm_b += v * v;
-    std.debug.print("[E5-hybrid] ||A(offload)||={d:.4} ||B(hybrid)||={d:.4} overflow={d}\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[E5-hybrid] ||A(offload)||={d:.4} ||B(hybrid)||={d:.4} overflow={d}\n", .{
         blk3: {
             var na: f32 = 0;
             for (out_a) |v| na += v * v;
@@ -747,7 +754,7 @@ test "E5 híbrido: overflow a CPU executor == offload puro (paridad)" {
     for (out_a, out_b, 0..) |a_v, b_v, i| {
         const diff = @abs(a_v - b_v);
         if (diff > 0.05 * (1.0 + @abs(a_v))) {
-            std.debug.print("[E5-hybrid] mismatch @{d}: offload={d:.4} hybrid={d:.4}\n", .{ i, a_v, b_v });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[E5-hybrid] mismatch @{d}: offload={d:.4} hybrid={d:.4}\n", .{ i, a_v, b_v });
             return error.HybridParityMismatch;
         }
     }

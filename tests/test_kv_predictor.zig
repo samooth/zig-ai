@@ -27,6 +27,13 @@
 
 const std = @import("std");
 
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
+
 const PredictorKind = enum { raw, delta_naif, ema, nlms2, nlms4, kalman };
 
 /// Estado del predictor por canal (serie temporal a lo largo de tokens).
@@ -313,7 +320,7 @@ test "predictor harness: gate sobre trazas A2 (skip sin trazas)" {
         try wr.flush();
     }
 
-    std.debug.print("\n[kv_predictor] results/kv_predictor.json escrito ({d} bytes) — gate verdict en fase D\n", .{json.items.len});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "\n[kv_predictor] results/kv_predictor.json escrito ({d} bytes) — gate verdict en fase D\n", .{json.items.len});
 }
 
 test "closed-loop sanity: señal senoidal predecible" {

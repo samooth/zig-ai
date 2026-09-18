@@ -13,6 +13,13 @@
 //!   zig build test -- test "study:*"
 //!   GGUF_MODEL_PATH=/ai/models/Qwen3.5-0.8B-Q4_0.gguf zig build test
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const cudaz = @import("cudaz");
 const layer_kernels = @import("layer_kernels");
@@ -82,7 +89,7 @@ fn checkParity(label: []const u8, attn_a: []const f32, attn_b: []const f32, stat
         if (!ok and @abs(a - b) > worst) worst = @abs(a - b) - atol - rtol * @abs(b);
     }
     const state_rel = absDiff(state_a, state_b) / absScale(state_a, state_b);
-    std.debug.print("  [study] {s}: attn combined(atol=1e-4,rtol=1e-2) state rel_to_scale={e}\n", .{ label, state_rel });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] {s}: attn combined(atol=1e-4,rtol=1e-2) state rel_to_scale={e}\n", .{ label, state_rel });
     try testing.expect(worst == 0);
     try testing.expect(state_rel < 1e-4);
 }
@@ -274,7 +281,7 @@ test "study: §5.4 lm_head q4 GEMV paridad vs CPU (baseline)" {
 
     // Placeholder: el test real va cuando se implemente el kernel split-K.
     // Por ahora solo verificamos que el motor corre sin crash en fp16 KV.
-    std.debug.print("  [study] §5.4 placeholder — implementar kernel split-K y paridad\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] §5.4 placeholder — implementar kernel split-K y paridad\n", .{});
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -286,7 +293,7 @@ test "study: §5.4 lm_head q4 GEMV paridad vs CPU (baseline)" {
 test "study: §5.8 T2 bench qgemm vs MMQ en formas SSM 0.8B" {
     cudaz.ensureContext() catch return error.SkipZigTest;
     if (std.c.getenv("STUDY_58_BENCH") == null) {
-        std.debug.print("  [study] §5.8 SKIP bench (STUDY_58_BENCH=1)\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] §5.8 SKIP bench (STUDY_58_BENCH=1)\n", .{});
         return error.SkipZigTest;
     }
     const stream: cudaz.CUstream = try cudaz.cuStreamCreate(0);
@@ -390,7 +397,7 @@ test "study: §5.8 T2 bench qgemm vs MMQ en formas SSM 0.8B" {
         const us_qg = ms_qg * 1000.0 / @as(f32, @floatFromInt(iters));
         const us_mm = ms_mm * 1000.0 / @as(f32, @floatFromInt(iters));
         const w_mb = @as(f64, @floatFromInt(w_bytes.len)) / (1024.0 * 1024.0);
-        std.debug.print("  [study] §5.8 {s} N={d:5} K={d:4}: qgemm={d:7.1}us mmq={d:7.1}us speedup={d:2.2}x | w={d:6.1}MB rel={e}\n", .{ sh.tag, N, K, us_qg, us_mm, us_qg / us_mm, w_mb, rel });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] §5.8 {s} N={d:5} K={d:4}: qgemm={d:7.1}us mmq={d:7.1}us speedup={d:2.2}x | w={d:6.1}MB rel={e}\n", .{ sh.tag, N, K, us_qg, us_mm, us_qg / us_mm, w_mb, rel });
     }
 }
 
@@ -473,7 +480,7 @@ test "study: §5.8 q4gemmM1Dp4a paridad vs q4gemmM1" {
             if (std.math.isNan(dv) or std.math.isInf(dv)) any_nan = true;
             max_abs = @max(max_abs, @abs(dv - cv));
         }
-        std.debug.print("  [study] §5.8 dp4a {s} N={d} K={d}: max_abs={e} (informativo; gate real = texto byte-idéntico)\n", .{ sh.tag, N, K, max_abs });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] §5.8 dp4a {s} N={d} K={d}: max_abs={e} (informativo; gate real = texto byte-idéntico)\n", .{ sh.tag, N, K, max_abs });
         try testing.expect(!any_nan);
         try testing.expect(max_abs < 100.0); // cotas finitas (datos sintéticos)
 
@@ -497,7 +504,7 @@ test "study: §5.8 q4gemmM1Dp4a paridad vs q4gemmM1" {
             try cudaz.cuStreamSynchronize(lk.stream);
             var ms_d: f32 = 0;
             try cudaz.cuEventElapsedTime(&ms_d, ev0, ev1);
-            std.debug.print("  [study] §5.8 bench {s}: classic={d:.1}us dp4a={d:.1}us speedup={d:.2}x\n", .{ sh.tag, ms_c * 10, ms_d * 10, ms_c / ms_d });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] §5.8 bench {s}: classic={d:.1}us dp4a={d:.1}us speedup={d:.2}x\n", .{ sh.tag, ms_c * 10, ms_d * 10, ms_c / ms_d });
         }
     }
 }
@@ -569,7 +576,7 @@ test "study: §5.9 q4gemmMDp4a paridad M=8/32 vs qgemm" {
             if (std.math.isNan(dv) or std.math.isInf(dv)) any_nan = true;
             max_abs = @max(max_abs, @abs(dv - cv));
         }
-        std.debug.print("  [study] §5.9 M={d}: max_abs={e} nan={} (gate duro = e2e + suite)\n", .{ M, max_abs, any_nan });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] §5.9 M={d}: max_abs={e} nan={} (gate duro = e2e + suite)\n", .{ M, max_abs, any_nan });
         try testing.expect(!any_nan);
         try testing.expect(max_abs < 100.0);
 
@@ -594,7 +601,7 @@ test "study: §5.9 q4gemmMDp4a paridad M=8/32 vs qgemm" {
             try cudaz.cuStreamSynchronize(lk.stream);
             var ms_d: f32 = 0;
             try cudaz.cuEventElapsedTime(&ms_d, ev0, ev1);
-            std.debug.print("  [study] §5.9 bench M={d}: classic={d:.1}us dp4a={d:.1}us speedup={d:.2}x\n", .{ M, ms_c * 1000 / 30, ms_d * 1000 / 30, ms_c / ms_d });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] §5.9 bench M={d}: classic={d:.1}us dp4a={d:.1}us speedup={d:.2}x\n", .{ M, ms_c * 1000 / 30, ms_d * 1000 / 30, ms_c / ms_d });
         }
     }
 }
@@ -675,7 +682,7 @@ test "study: 1.1 q5gemmM1 paridad vs qgemm case 2 (q5_k)" {
     // MISMA aritmética por elem (FMA escalar, mismo orden lane→elem) ⇒
     // esperamos bit-exact; tolerancia rel por si el driver reordena.
     const rel = relDiff(out_n, out_c);
-    std.debug.print("  [study] 1.1 q5gemmM1: rel={e}\n", .{rel});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] 1.1 q5gemmM1: rel={e}\n", .{rel});
     try testing.expect(rel < 1e-3);
 
     // Bench (gated): canónico vs nuevo.
@@ -699,7 +706,7 @@ test "study: 1.1 q5gemmM1 paridad vs qgemm case 2 (q5_k)" {
         try cudaz.cuStreamSynchronize(lk.stream);
         var ms_n: f32 = 0;
         try cudaz.cuEventElapsedTime(&ms_n, ev0, ev1);
-        std.debug.print("  [study] 1.1 bench: qgemm={d:.1}us q5gemmM1={d:.1}us speedup={d:.2}x\n", .{ ms_c * 10, ms_n * 10, ms_c / ms_n });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] 1.1 bench: qgemm={d:.1}us q5gemmM1={d:.1}us speedup={d:.2}x\n", .{ ms_c * 10, ms_n * 10, ms_c / ms_n });
     }
 }
 
@@ -762,7 +769,7 @@ test "study: 1.2 q6gemmM1 paridad vs qgemm case 3 (q6_k)" {
     try cudaz.cuMemcpyDtoH(@intFromPtr(out_n.ptr), d_c2, N * 4);
 
     const rel = relDiff(out_n, out_c);
-    std.debug.print("  [study] 1.2 q6gemmM1: rel={e}\n", .{rel});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] 1.2 q6gemmM1: rel={e}\n", .{rel});
     try testing.expect(rel < 1e-3);
 
     if (std.c.getenv("STUDY_58_BENCH") != null) {
@@ -785,7 +792,7 @@ test "study: 1.2 q6gemmM1 paridad vs qgemm case 3 (q6_k)" {
         try cudaz.cuStreamSynchronize(lk.stream);
         var ms_n: f32 = 0;
         try cudaz.cuEventElapsedTime(&ms_n, ev0, ev1);
-        std.debug.print("  [study] 1.2 bench: qgemm={d:.1}us q6gemmM1={d:.1}us speedup={d:.2}x\n", .{ ms_c * 10, ms_n * 10, ms_c / ms_n });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] 1.2 bench: qgemm={d:.1}us q6gemmM1={d:.1}us speedup={d:.2}x\n", .{ ms_c * 10, ms_n * 10, ms_c / ms_n });
     }
 }
 
@@ -883,12 +890,12 @@ test "study: 7.5 repro iq2_s prefill escala E2E (hd=128, bs=16)" {
     }
 
     engine.prefillDevice(0, @intFromPtr(q16.ptr), @intFromPtr(out16.ptr), kv.block_alloc, bt_host, n_queries, 0, null) catch |e| {
-        std.debug.print("  [study] 7.5 FAIL: {s}\n", .{@errorName(e)});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] 7.5 FAIL: {s}\n", .{@errorName(e)});
         return e;
     };
     cudaz.cuStreamSynchronize(stream) catch |e| {
-        std.debug.print("  [study] 7.5 SYNC-FAIL: {s}\n", .{@errorName(e)});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] 7.5 SYNC-FAIL: {s}\n", .{@errorName(e)});
         return e;
     };
-    std.debug.print("  [study] 7.5 iq2_s hd=128 bs=16 n=15: PREFILL OK (no hang)\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  [study] 7.5 iq2_s hd=128 bs=16 n=15: PREFILL OK (no hang)\n", .{});
 }

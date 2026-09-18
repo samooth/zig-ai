@@ -1,4 +1,11 @@
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const gpa = std.testing.allocator;
 const gguf_model = @import("gguf_model");
 const paged_attn = @import("paged_attention");
@@ -121,7 +128,7 @@ test "U2-kv-append: batched n=64 vs unrolled n=1×64 (misma HybridLayer)" {
         if (std.math.isNan(a) or std.math.isNan(b)) nan_count += 1;
     }
     const rel: f64 = if (norm > 0) @sqrt(diff / norm) else 0;
-    std.debug.print("U2-kv-append diag: batched vs unrolled rel={d:.6} max_abs={d:.6} nan={d}\n", .{ rel, max_abs, nan_count });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2-kv-append diag: batched vs unrolled rel={d:.6} max_abs={d:.6} nan={d}\n", .{ rel, max_abs, nan_count });
     if (nan_count > 0) return error.NaN;
     if (rel > 1e-3) return error.Mismatch;
 }

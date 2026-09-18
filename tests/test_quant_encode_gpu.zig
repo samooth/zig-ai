@@ -4,6 +4,13 @@
 //!   - Q8_0:  34B/bloque32 — espejo de kv_quant.encodeQ8_0.
 //! Se salta si CUDA no está disponible (build_options.has_cuda == false).
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const cudaz = @import("cudaz");
 const matmul = @import("matmul");
@@ -90,15 +97,15 @@ fn roundtrip(comptime fmt: kv_cache.QuantFormat, seed: u64) !void {
     var bad: usize = 0;
     for (dst_cpu, dst_gpu, 0..) |c, g, i| {
         if (c != g) {
-            if (bad < 8) std.debug.print("[{s}] byte {d}: cpu=0x{x:0>2} gpu=0x{x:0>2}\n", .{ @tagName(fmt), i, c, g });
+            if (bad < 8) try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] byte {d}: cpu=0x{x:0>2} gpu=0x{x:0>2}\n", .{ @tagName(fmt), i, c, g });
             bad += 1;
         }
     }
     if (bad > 0) {
-        std.debug.print("[{s}] FALLO {d}/{d} bytes\n", .{ @tagName(fmt), bad, dst_bytes });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] FALLO {d}/{d} bytes\n", .{ @tagName(fmt), bad, dst_bytes });
         return error.EncodeMismatch;
     }
-    std.debug.print("[{s}] OK encode GPU==CPU ({d} bloques, {d} bytes)\n", .{ @tagName(fmt), num_blocks, dst_bytes });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] OK encode GPU==CPU ({d} bloques, {d} bytes)\n", .{ @tagName(fmt), num_blocks, dst_bytes });
 }
 
 test "quant encode MXFP4: paridad bit-exact GPU vs kv_quant.encode" {

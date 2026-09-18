@@ -22,6 +22,13 @@
 //! 8 posiciones sampleadas; (c) 0 NaN.
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const gpa = std.testing.allocator;
 const Tensor = @import("core").Tensor;
 const gguf_model = @import("gguf_model");
@@ -39,11 +46,11 @@ const QuantWeight = @import("quant_weight").QuantWeight;
 
 test "U2-llama-stack: pila 28 capas + output_norm + lm_head — CPU ≡ GPU (greedy top-1)" {
     const env_path = std.c.getenv("GGUF_MODEL_PATH") orelse {
-        std.debug.print("SKIP: GGUF_MODEL_PATH no está definida\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: GGUF_MODEL_PATH no está definida\n", .{});
         return error.SkipZigTest;
     };
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const path = std.mem.span(env_path);
@@ -55,15 +62,15 @@ test "U2-llama-stack: pila 28 capas + output_norm + lm_head — CPU ≡ GPU (gre
 
     const is_llama_like = !cfg.is_hybrid and std.mem.eql(u8, cfg.architecture, "llama");
     if (!is_llama_like) {
-        std.debug.print("SKIP: arch={s} no es llama denso\n", .{cfg.architecture});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: arch={s} no es llama denso\n", .{cfg.architecture});
         return error.SkipZigTest;
     }
 
     const head_dim = if (cfg.head_dim > 0) cfg.head_dim else cfg.embedding_length / cfg.head_count;
     const n_embd = cfg.embedding_length;
     const n_layers = cfg.block_count;
-    std.debug.print("=== U2-llama-stack: {d} capas n=512 CPU vs GPU ===\n", .{n_layers});
-    std.debug.print("n_embd={d} heads={d} kv={d} hd={d} n_rot={d} base={d}\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "=== U2-llama-stack: {d} capas n=512 CPU vs GPU ===\n", .{n_layers});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "n_embd={d} heads={d} kv={d} hd={d} n_rot={d} base={d}\n", .{
         n_embd,                   cfg.head_count,
         cfg.head_count_kv,        head_dim,
         cfg.rope_dimension_count, cfg.rope_freq_base,
@@ -234,7 +241,7 @@ test "U2-llama-stack: pila 28 capas + output_norm + lm_head — CPU ≡ GPU (gre
     }
     const rel: f64 = if (nrm > 0) @sqrt(diff / nrm) else 0;
     const scale_ratio: f64 = if (nrm > 0) @sqrt(nrm_gpu / nrm) else 1;
-    std.debug.print("U2-llama-stack: rel={d:.6} max_abs={d:.6} scale_ratio={d:.4} nan={d}\n", .{ rel, max_abs, scale_ratio, nan_count });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2-llama-stack: rel={d:.6} max_abs={d:.6} scale_ratio={d:.4} nan={d}\n", .{ rel, max_abs, scale_ratio, nan_count });
     if (nan_count > 0) return error.StackNaN;
     if (scale_ratio < 0.9 or scale_ratio > 1.1) return error.StackIncoherent;
     if (rel > 1e-2) return error.StackMismatch;
@@ -254,14 +261,14 @@ test "U2-llama-stack: pila 28 capas + output_norm + lm_head — CPU ≡ GPU (gre
     for (sample_positions) |pos| {
         const top_cpu = greedyTop1(last_cpu.data[pos * n_embd ..][0..n_embd], &out_norm, &lm_qw, &hbuf, h16, logits_buf, cfg.layer_norm_rms_epsilon);
         const top_gpu = greedyTop1(out_gpu[pos * n_embd ..][0..n_embd], &out_norm, &lm_qw, &hbuf, h16, logits_buf, cfg.layer_norm_rms_epsilon);
-        std.debug.print("pos={d}: cpu top-1={d} gpu top-1={d} {s}\n", .{ pos, top_cpu, top_gpu, if (top_cpu == top_gpu) "OK" else "DIVERGE" });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "pos={d}: cpu top-1={d} gpu top-1={d} {s}\n", .{ pos, top_cpu, top_gpu, if (top_cpu == top_gpu) "OK" else "DIVERGE" });
         if (top_cpu != top_gpu) mismatches += 1;
     }
     if (mismatches > 0) {
-        std.debug.print("U2-llama-stack FALLO: {d}/{d} top-1 divergentes\n", .{ mismatches, sample_positions.len });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2-llama-stack FALLO: {d}/{d} top-1 divergentes\n", .{ mismatches, sample_positions.len });
         return error.StackGreedyDivergence;
     }
-    std.debug.print("U2-llama-stack OK: {d} capas reales + head, greedy top-1 idéntico en {d} posiciones (rel={d:.6})\n", .{ n_layers, sample_positions.len, rel });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2-llama-stack OK: {d} capas reales + head, greedy top-1 idéntico en {d} posiciones (rel={d:.6})\n", .{ n_layers, sample_positions.len, rel });
 
     layer_kernels.deinitQ4Cache();
 }

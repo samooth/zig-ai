@@ -5,6 +5,13 @@
 //! camino cuda_memops se ejercita en integración (E) y verificación manual
 //! con nvidia-smi dmon (la ventana CPU debe dejar SMs libres).
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const builtin = @import("builtin");
 const gemv_mod = @import("moe_cpu_gemv");
 const exec_mod = @import("moe_cpu_executor");
@@ -74,7 +81,7 @@ test "submit→sync host: parcial correcto vs escalar" {
             const got = out[t * OUT_DIM + d];
             const diff = @abs(want - got);
             if (!(diff / @max(@abs(want), 1e-9) < 1e-4)) {
-                std.debug.print("t={d} d={d}: want={d} got={d}\n", .{ t, d, want, got });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "t={d} d={d}: want={d} got={d}\n", .{ t, d, want, got });
                 return error.SyncMismatch;
             }
         }
@@ -249,7 +256,7 @@ test "watchdog: slot wedged manual → WatchdogTimeout + flag" {
     const r = ex.sync(.{ .slot = 5, .layer_id = 9, .seq = 1 });
     try std.testing.expectError(error.WatchdogTimeout, r);
     try std.testing.expect(ex.wedged.load(.monotonic));
-    std.debug.print("[test] watchdog ok: wedged flag activo\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test] watchdog ok: wedged flag activo\n", .{});
 }
 
 test "shutdown en vuelo → error limpio, hilos salen" {
@@ -316,7 +323,7 @@ test "determinismo: dos corridas idénticas bit a bit" {
 }
 
 test "probe memops reporta estado (informativo)" {
-    std.debug.print("[test] modo esperado sin GPU adjunta: host_staging; memops={}\n", .{ext_sync.memopsAvailable()});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test] modo esperado sin GPU adjunta: host_staging; memops={}\n", .{ext_sync.memopsAvailable()});
 }
 
 // ============================================================================
@@ -403,7 +410,7 @@ test "perfil REAL de D (smoke oportunista): deriva q16 si benchbw existe" {
     // y emite el valor para el ticket a E.
     const a = std.testing.allocator;
     const frac = exec_mod.resolveFetchFracQ16(a, null);
-    std.debug.print("[test] fetch_frac_q16 efectivo (perfil real o cap): {d}\n", .{frac});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test] fetch_frac_q16 efectivo (perfil real o cap): {d}\n", .{frac});
 }
 
 // ============================================================================
@@ -498,7 +505,7 @@ test "merge gpu+cpu == referencia monolítica (split por ids)" {
     for (0..T * OUT_DIM) |ix| {
         const diff = @abs(ref[ix] - merged[ix]);
         if (!(diff / @max(@abs(ref[ix]), 1e-9) < 1e-4)) {
-            std.debug.print("ix={d}: ref={d} merged={d}\n", .{ ix, ref[ix], merged[ix] });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "ix={d}: ref={d} merged={d}\n", .{ ix, ref[ix], merged[ix] });
             return error.MergeMismatch;
         }
     }
@@ -506,17 +513,17 @@ test "merge gpu+cpu == referencia monolítica (split por ids)" {
 
 test "E8: overhead medido de cuLaunchHostFunc (informativo si hay driver)" {
     if (!ext_sync.hostFuncAvailable()) {
-        std.debug.print("[test] E8: sin driver/hostfunc — skip\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test] E8: sin driver/hostfunc — skip\n", .{});
         return;
     }
     if (ext_sync.benchHostFuncOverhead(200)) |r| {
-        std.debug.print("[test] E8 hostfunc: enqueue={d:.1}ns roundtrip={d:.1}ns por llamada\n", .{ r.enqueue_ns, r.roundtrip_ns });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test] E8 hostfunc: enqueue={d:.1}ns roundtrip={d:.1}ns por llamada\n", .{ r.enqueue_ns, r.roundtrip_ns });
         // Referencia FreeToken ~30-50µs round-trip en host libre. Techo
         // generoso anti-flake (loadavg alto del árbol compartido puede
         // multiplicar el round-trip ×10; informativo, no gate de HW).
         try std.testing.expect(r.roundtrip_ns < 5_000_000.0); // <5ms
     } else {
-        std.debug.print("[test] E8: bench no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test] E8: bench no disponible\n", .{});
     }
 }
 
@@ -573,14 +580,14 @@ test "fixtures MoE reales: geometría + dot filas reales q4_1 (ambas variantes)"
                 validated_any = true;
                 if (checked_print < 3) {
                     checked_print += 1;
-                    std.debug.print("[test] fixture {s}: {any} rb={d} dot OK\n", .{ ti.name, shape, rb });
+                    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test] fixture {s}: {any} rb={d} dot OK\n", .{ ti.name, shape, rb });
                 }
             }
         }
     }
     if (validated_any) {
         checked_print = 0;
-        std.debug.print("[test] fixtures MoE validadas contra GEMV CPU\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test] fixtures MoE validadas contra GEMV CPU\n", .{});
     }
 }
 var checked_print: usize = 0;
@@ -711,7 +718,7 @@ test "FFN completo en CPU: gate→up→swiglu→down orquestado == monolítico" 
             const want = ref[t * DOWN_OUT + d];
             const diff = @abs(want - got);
             if (!(diff / @max(@abs(want), 1e-9) < 1e-4)) {
-                std.debug.print("t={d} d={d}: want={d} got={d}\n", .{ t, d, want, got });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "t={d} d={d}: want={d} got={d}\n", .{ t, d, want, got });
                 return error.FfnMismatch;
             }
         }
@@ -737,7 +744,7 @@ test "gemma-4 real: banco gate_up Q6_K apilado cuadra rowBytes + dot fila real" 
     const pz = std.fmt.bufPrintZ(&pathz, "{s}", .{gemma4_path}) catch return error.NameTooLong;
     const fd = open(pz.ptr, 0);
     if (fd < 0) {
-        std.debug.print("[test] gemma-4 no presente — skip\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test] gemma-4 no presente — skip\n", .{});
         return;
     }
     defer _ = close(fd);
@@ -841,7 +848,7 @@ test "gemma-4 real: banco gate_up Q6_K apilado cuadra rowBytes + dot fila real" 
     const n_out: usize = @intCast(found_dims[1]);
     const n_e: usize = @intCast(found_dims[2]);
     const rb = gemv_mod.Format.q6_k.rowBytes(n_in);
-    std.debug.print("[test] gemma-4 gate_up: [{d},{d},{d}] rb={d}\n", .{ n_in, n_out, n_e, rb });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test] gemma-4 gate_up: [{d},{d},{d}] rb={d}\n", .{ n_in, n_out, n_e, rb });
 
     // Leer UNA fila real (expert 0, row 0) por pread dirigido.
     const row = try a.alloc(u8, rb);
@@ -861,7 +868,7 @@ test "gemma-4 real: banco gate_up Q6_K apilado cuadra rowBytes + dot fila real" 
     for (dq[0..k_use], x[0..k_use]) |dv, xv| want += dv * xv;
     const diff = @abs(want - got);
     try std.testing.expect(diff / @max(@abs(want), 1e-9) < 1e-4);
-    std.debug.print("[test] gemma-4: dot fila REAL Q6_K OK ({d:.2})\n", .{got});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test] gemma-4: dot fila REAL Q6_K OK ({d:.2})\n", .{got});
 }
 
 fn preadAll(fd: c_int, buf: []u8, offset: u64) !usize {

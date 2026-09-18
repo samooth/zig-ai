@@ -3,6 +3,13 @@
 //! otros tests kvarn).
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const build_options = @import("build_options");
 const cudaz = @import("cudaz");
@@ -210,7 +217,7 @@ test "M3 ladder VRAM: KVarN vs q8_0 (recordBytes reales, amortizado)" {
     for (cases) |c| {
         const rb = kvg.kvarn_types.KvarnRecordLayout.init(128, c.kb, c.vb) catch unreachable;
         const per_token: f64 = @as(f64, @floatFromInt(rb.tile_bytes)) / 128.0;
-        std.debug.print("ladder {s}: {d:.1} B/token/head (payload) vs q8_0 {d:.1} = {d:.1}%\n", .{
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "ladder {s}: {d:.1} B/token/head (payload) vs q8_0 {d:.1} = {d:.1}%\n", .{
             c.name, per_token, q8_0_bpt, (per_token / q8_0_bpt - 1.0) * 100.0,
         });
         // Invariante: TODO config debe ser < fp16 (el punto del ladder).
@@ -231,7 +238,7 @@ test "M3 ladder VRAM: KVarN vs q8_0 (recordBytes reales, amortizado)" {
     const total_kvarn = records + stage + descs;
     const total_q8_0: f64 = @as(f64, @floatFromInt(ctx_tokens * n_kv_heads)) * q8_0_bpt;
     const rel = (total_kvarn / total_q8_0 - 1.0) * 100.0;
-    std.debug.print("ladder k2v2 ctx=32k kvh=8: kvarn={d:.1}MB q8_0={d:.1}MB ⇒ {d:.1}% (gate: ≤ −37%)\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "ladder k2v2 ctx=32k kvh=8: kvarn={d:.1}MB q8_0={d:.1}MB ⇒ {d:.1}% (gate: ≤ −37%)\n", .{
         total_kvarn / 1e6, total_q8_0 / 1e6, rel,
     });
     try testing.expect(rel <= -37.0);
@@ -335,7 +342,7 @@ test "M3 appendTokens adaptive: smem_optin 64KB (lowshmem) vs null (hishmem) —
     for (rec_a, rec_b) |a, b| {
         if (a == b) eq += 1;
     }
-    std.debug.print("adaptive: records hishmem==lowshmem {d}/{d} B, live=({d},{d})\n", .{ eq, rec_len, da0.live_group, da0.live_pos });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "adaptive: records hishmem==lowshmem {d}/{d} B, live=({d},{d})\n", .{ eq, rec_len, da0.live_group, da0.live_pos });
     try testing.expectEqualSlices(u8, rec_a, rec_b);
     try testing.expect(da0.live_pos == 127);
 }

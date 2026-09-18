@@ -6,6 +6,13 @@
 //! Tolerancia rel 1e-3 (ambos GPU, distinto orden de acumulación).
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const build_options = @import("build_options");
 const cudaz = @import("cudaz");
@@ -220,9 +227,9 @@ test "A10: decode-split MMA ≡ portable FA (records reales, g=1, k4v4, GQA2)" {
                 for (0..D) |d| s += q_rot[qh * D + d] * k_q[t * D + d];
                 scores[t] = s * scale;
             }
-            std.debug.print("CPU scores h{d}[0..15]:", .{qh});
-            for (0..16) |t| std.debug.print(" {d:.4}", .{scores[t]});
-            std.debug.print("\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "CPU scores h{d}[0..15]:", .{qh});
+            for (0..16) |t| try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), " {d:.4}", .{scores[t]});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "\n", .{});
             var mx: f32 = -std.math.inf(f32);
             for (scores) |sv| mx = @max(mx, sv);
             var sum: f32 = 0;
@@ -336,7 +343,7 @@ test "A10: decode-split MMA ≡ portable FA (records reales, g=1, k4v4, GQA2)" {
 
     var max_rel: f64 = 0;
     var bad: usize = 0;
-    std.debug.print("SPLIT out[0..6]={any}\nPORT  out[0..6]={any}\n", .{ out_split[0..6], out_port[0..6] });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SPLIT out[0..6]={any}\nPORT  out[0..6]={any}\n", .{ out_split[0..6], out_port[0..6] });
     for (out_split, out_port) |got, want| {
         const adiff = @abs(@as(f64, got) - @as(f64, want));
         const rel = adiff / @max(@abs(@as(f64, want)), 1e-3);
@@ -370,7 +377,7 @@ test "A11 geometry: selectSplitGeometry real (GPU, gqa2, 256 kv)" {
     // 4 blocks · 1 head · 1 q · 1 stream = 4 blocks vs 28 SMs: 1 wave
     // al 14% ⇒ cutoff NO aplica (grid pequeño, split útil).
     try testing.expectEqual(@as(u32, 1), g.n_waves);
-    std.debug.print("A11: splits={d} gqa={d} bpsm={d} wave={d}% waves={d} cands={d}\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "A11: splits={d} gqa={d} bpsm={d} wave={d}% waves={d} cands={d}\n", .{
         g.n_splits,                g.gqa_per_block, g.max_blocks_per_sm,
         g.wave_efficiency_percent, g.n_waves,       g.candidate_count,
     });
@@ -383,9 +390,9 @@ test "A11 geometry: cutoff directo — grid grande sin split" {
     // desactivar split si llena ≥2 waves al ≥75%.
     const g = try kvk.selectSplitGeometry(smod, 64, 16, 32, 1, 8);
     if (g.use_split) {
-        std.debug.print("A11 cutoff: split sigue activo (directo no llena 2 waves al 75% — legit en sm_86 si blocks_per_sm alto)\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "A11 cutoff: split sigue activo (directo no llena 2 waves al 75% — legit en sm_86 si blocks_per_sm alto)\n", .{});
     } else {
-        std.debug.print("A11 cutoff: directo gana (esperado con grid grande)\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "A11 cutoff: directo gana (esperado con grid grande)\n", .{});
     }
     // Invariante: o no-split (directo), o splits >= 2.
     try testing.expect(!g.use_split or g.n_splits >= 2);
@@ -694,14 +701,14 @@ test "A13: prefill chunk n_q=8 via decode-split (SPECIALIZED_DECODE_MAX_Q=16)" {
                 const adiff = @abs(got - want);
                 const rel = adiff / @max(@abs(want), 1e-3);
                 if (rel > 2e-3 and adiff > 1e-3) {
-                    std.debug.print("A13 bad: h={d} d={d} got={d:.6} want={d:.6} adiff={d:.6}\n", .{ qh, d, got, want, adiff });
+                    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "A13 bad: h={d} d={d} got={d:.6} want={d:.6} adiff={d:.6}\n", .{ qh, d, got, want, adiff });
                 }
             }
         }
         std.log.err("A13 max_rel={d} bad={d}", .{ max_rel, bad });
     }
     try testing.expectEqual(@as(usize, 0), bad);
-    std.debug.print("A13: n_q=8 prefill chunk OK (max_rel={d:.6})\n", .{max_rel});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "A13: n_q=8 prefill chunk OK (max_rel={d:.6})\n", .{max_rel});
 }
 
 // ============================================================================
@@ -1009,5 +1016,5 @@ test "A13 gate: decode-split ≡ CPU pipeline-exacta, N-seeds (gated cubin)" {
         std.log.err("A13 gate: {d}/{d} seeds failed, max_rel={d}", .{ bad_seeds, n_seeds, max_rel_overall });
     }
     try testing.expectEqual(@as(usize, 0), bad_seeds);
-    std.debug.print("A13 gate: {d} seeds OK (max_rel={d:.6})\n", .{ n_seeds, max_rel_overall });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "A13 gate: {d} seeds OK (max_rel={d:.6})\n", .{ n_seeds, max_rel_overall });
 }

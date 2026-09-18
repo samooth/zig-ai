@@ -11,6 +11,13 @@
 //!
 //! Disciplina GPU: .bench.lock no-bloqueante (60 s → SKIP). Sin CUDA: SKIP.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const cudaz = @import("cudaz");
 const moe_cuda = @import("moe_cuda");
 const expert_streamer = @import("expert_streamer");
@@ -35,7 +42,7 @@ const BenchLock = struct {
             f.close(io);
             waited += 5;
             if (waited >= 60) return error.BenchLockBusy;
-            std.debug.print("[moe_stream_test] .bench.lock ocupada, espero {d}s…\n", .{waited});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[moe_stream_test] .bench.lock ocupada, espero {d}s…\n", .{waited});
             var ts: std.c.timespec = .{ .sec = 5, .nsec = 0 };
             _ = std.c.nanosleep(&ts, null);
         }
@@ -69,7 +76,7 @@ const Rig = struct {
         const io = std.Io.Threaded.global_single_threaded.io();
         var lock = BenchLock.acquire(io) catch |e| {
             if (e == error.BenchLockBusy) {
-                std.debug.print("SKIP: .bench.lock ocupada\n", .{});
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: .bench.lock ocupada\n", .{});
                 return error.SkipZigTest;
             }
             return e;
@@ -157,7 +164,7 @@ test "4.10 ExpertStreamer: paridad bytes del slot de compute tras ping-pong" {
             const want = rig.src_host[b][@as(usize, @intCast(experts[j])) * FEATS[b] ..][0..FEATS[b]];
             for (got, want) |gv, wv| {
                 if (gv != wv) {
-                    std.debug.print("[4.10] banco {d} experto {d}: byte mismatch slot={d}\n", .{ b, experts[j], s });
+                    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[4.10] banco {d} experto {d}: byte mismatch slot={d}\n", .{ b, experts[j], s });
                     return error.StreamerMismatch;
                 }
             }

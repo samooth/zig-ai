@@ -1,4 +1,11 @@
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const train = @import("train");
 
 test "readRltcap: roundtrip desde fixture E2E (0.8B, wiki12k)" {
@@ -6,7 +13,7 @@ test "readRltcap: roundtrip desde fixture E2E (0.8B, wiki12k)" {
     const path = "/tmp/rltcap_test.rltcap";
 
     const cap = train.readRltcap(gpa, path) catch |err| {
-        std.debug.print("[rltcap_test] skip: fixture no encontrada ({s}): {}\n", .{ path, err });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[rltcap_test] skip: fixture no encontrada ({s}): {}\n", .{ path, err });
         return error.SkipZigTest;
     };
     defer {

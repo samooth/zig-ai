@@ -2,6 +2,13 @@
 //! - Unit: sin GPU, sin GGUF real (mrope, conv2d, preprocess, inject).
 //! - E2E (opt-in): env MMPROJ_PATH + MMPROJ_IMAGE → encode completo.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 
 const mrope = @import("mrope_vision");
@@ -70,7 +77,7 @@ const mmproj_model = @import("mmproj_model");
 
 test "e2e: carga mmproj qwen3vl real (config + tensores)" {
     const env = std.c.getenv("MMPROJ_PATH") orelse {
-        std.debug.print("SKIP: MMPROJ_PATH no está definida\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: MMPROJ_PATH no está definida\n", .{});
         return error.SkipZigTest;
     };
 
@@ -82,7 +89,7 @@ test "e2e: carga mmproj qwen3vl real (config + tensores)" {
     const cfg = m.config;
 
     // Validaciones contra el mmproj qwen3vl conocido (/ai/models/mmproj-BF16.gguf)
-    std.debug.print("projector={s} n_embd={d} layers={d} heads={d}x{d} ffn={d} proj={d} patch={d} merge={d} img={d}\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "projector={s} n_embd={d} layers={d} heads={d}x{d} ffn={d} proj={d} patch={d} merge={d} img={d}\n", .{
         cfg.projector_type_str, cfg.n_embd,     cfg.n_layer,
         cfg.n_head,             cfg.head_dim,   cfg.n_ff,
         cfg.projection_dim,     cfg.patch_size, cfg.spatial_merge_size,
@@ -126,7 +133,7 @@ test "e2e golden: encode white-64 vs llama.cpp mtmd-debug (qwen3vl)" {
     //     /tmp/golden_ornith.log: ADD(ffn_down, mm.2.bias) = merger final)
     // Dispatch por n_embd: el test soporta ambos mmproj sin editar.
     const mmproj_path = std.c.getenv("MMPROJ_PATH") orelse {
-        std.debug.print("SKIP: MMPROJ_PATH no está definida\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: MMPROJ_PATH no está definida\n", .{});
         return error.SkipZigTest;
     };
     @import("debug").init(); // breadcrumbs gated (DUMP_MM_INPUT) en tests
@@ -209,10 +216,10 @@ test "e2e golden: encode white-64 vs llama.cpp mtmd-debug (qwen3vl)" {
         const cs = dot / (@sqrt(g2) * @sqrt(m2) + 1e-30);
         cos_acc += cs;
         cos_n += 1;
-        std.debug.print("COS[{d}] parcial-6: {d:.4} (got {d:.4},{d:.4},{d:.4} | {d:.4},{d:.4},{d:.4} | want {d:.4},{d:.4},{d:.4} | {d:.4},{d:.4},{d:.4})\n", .{ t, cs, mine6[0], mine6[1], mine6[2], mine6[3], mine6[4], mine6[5], gold6[0], gold6[1], gold6[2], gold6[3], gold6[4], gold6[5] });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "COS[{d}] parcial-6: {d:.4} (got {d:.4},{d:.4},{d:.4} | {d:.4},{d:.4},{d:.4} | want {d:.4},{d:.4},{d:.4} | {d:.4},{d:.4},{d:.4})\n", .{ t, cs, mine6[0], mine6[1], mine6[2], mine6[3], mine6[4], mine6[5], gold6[0], gold6[1], gold6[2], gold6[3], gold6[4], gold6[5] });
     }
     const cos_mean = cos_acc / @as(f64, @floatFromInt(cos_n));
-    std.debug.print("GOLDEN cos-sim parcial medio: {d:.4} (gate ≥ 0.90; f16-oráculo típico ~0.99)\n", .{cos_mean});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "GOLDEN cos-sim parcial medio: {d:.4} (gate ≥ 0.90; f16-oráculo típico ~0.99)\n", .{cos_mean});
     try testing.expect(cos_mean >= 0.90);
 
     // Criterio SECUNDARIO (informativo): signos coinciden en las 24 muestras.
@@ -230,7 +237,7 @@ test "e2e golden: encode white-64 vs llama.cpp mtmd-debug (qwen3vl)" {
             if ((gv < 0) == (mv < 0)) sign_ok += 1;
         }
     }
-    std.debug.print("GOLDEN signos: {d}/24 coinciden\n", .{sign_ok});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "GOLDEN signos: {d}/24 coinciden\n", .{sign_ok});
     // 12L: exigir también magnitud (factor 0.5-2× + margen) — histórico.
     if (!is_ornith27) {
         for (golden, 0..) |tok_gold, t| {
@@ -322,7 +329,7 @@ test "mropePosIds GPU: ids secuenciales == mropeKernel GPU" {
     defer cudaz.cuMemFree(g_sp);
     try cudaz.cuMemcpyHtoD(g_sp, @intFromPtr(&sp_host), @sizeOf(c_int));
     lk.mrope(@intCast(g_a), @intCast(g_sp), N * n_head, N, head_dim, n_rot, base) catch |e| {
-        std.debug.print("HARNESS: mrope clasico fallo: {s}\n", .{@errorName(e)});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "HARNESS: mrope clasico fallo: {s}\n", .{@errorName(e)});
         return e;
     };
     try cudaz.cuStreamSynchronize(lk.stream);
@@ -347,7 +354,7 @@ test "mropePosIds GPU: ids secuenciales == mropeKernel GPU" {
     try cudaz.cuMemcpyHtoD(g_ids, @intFromPtr(ids_host.ptr), N * 4 * @sizeOf(i32));
 
     lk.mropePosIds(@intCast(g_b), @intCast(g_ids), N * n_head, N, head_dim, n_rot, sections, base) catch |e| {
-        std.debug.print("HARNESS: mropePosIds fallo: {s}\n", .{@errorName(e)});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "HARNESS: mropePosIds fallo: {s}\n", .{@errorName(e)});
         return e;
     };
     try cudaz.cuStreamSynchronize(lk.stream);
@@ -364,7 +371,7 @@ test "mropePosIds GPU: ids secuenciales == mropeKernel GPU" {
     for (out_a, out_b) |a, b| {
         max_diff = @max(max_diff, @abs(a - b));
     }
-    std.debug.print("mropePosIds parity (secuencial vs clasico): max_diff={e}\n", .{max_diff});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "mropePosIds parity (secuencial vs clasico): max_diff={e}\n", .{max_diff});
     try testing.expect(max_diff < 1e-5);
 }
 
@@ -464,7 +471,7 @@ test "mropePosIds GPU: ids 2D reales == host applyRoPEMultiSectionPosIds" {
     for (host_out, out_gpu) |h_, g_| {
         max_diff = @max(max_diff, @abs(h_ - g_));
     }
-    std.debug.print("mropePosIds parity (2D vs host): max_diff={e}\n", .{max_diff});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "mropePosIds parity (2D vs host): max_diff={e}\n", .{max_diff});
     try testing.expect(max_diff < 1e-5);
 }
 
@@ -474,11 +481,11 @@ test "mropePosIds GPU: ids 2D reales == host applyRoPEMultiSectionPosIds" {
 // MMPROJ_PATH (cualquier mmproj qwen3vl: 12 o 27 capas).
 test "paridad CPU vs GPU encode completo (regresión 10.2-fix)" {
     const mmproj_path = std.c.getenv("MMPROJ_PATH") orelse {
-        std.debug.print("SKIP: MMPROJ_PATH no está definida\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: MMPROJ_PATH no está definida\n", .{});
         return error.SkipZigTest;
     };
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     @import("debug").init();
@@ -536,7 +543,7 @@ test "paridad CPU vs GPU encode completo (regresión 10.2-fix)" {
         }
         worst_cos = @min(worst_cos, dot / (@sqrt(c2) * @sqrt(g2) + 1e-30));
     }
-    std.debug.print("[par-cpu-gpu] {d} tokens dim {d} — worst_cos={d:.6} max|c-g|={d:.6}\n", .{ cpu.n_tokens, cpu.out_dim, worst_cos, max_diff });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[par-cpu-gpu] {d} tokens dim {d} — worst_cos={d:.6} max|c-g|={d:.6}\n", .{ cpu.n_tokens, cpu.out_dim, worst_cos, max_diff });
     try testing.expect(worst_cos > 0.99999);
     try std.testing.expect(max_diff < 0.001);
 }
@@ -546,7 +553,7 @@ const vision_video = @import("vision_video");
 
 test "10.7 video: probe + decode + pares temporales" {
     if (std.c.getenv("ZIG_AI_VIDEO_TESTS") == null) {
-        std.debug.print("SKIP: ZIG_AI_VIDEO_TESTS=1 para tests ffmpeg\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: ZIG_AI_VIDEO_TESTS=1 para tests ffmpeg\n", .{});
         return error.SkipZigTest;
     }
     const gpa = testing.allocator;
@@ -791,11 +798,11 @@ test "10.7 UX.5 video que empieza sin vc==0 (vídeo B tras vídeo A)" {
 // que el still no toca.
 test "10.7 paridad CPU vs GPU encodePair (256x256) + perf" {
     const mmproj_path = std.c.getenv("MMPROJ_PATH") orelse {
-        std.debug.print("SKIP: MMPROJ_PATH no está definida\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: MMPROJ_PATH no está definida\n", .{});
         return error.SkipZigTest;
     };
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     @import("debug").init();
@@ -857,7 +864,7 @@ test "10.7 paridad CPU vs GPU encodePair (256x256) + perf" {
         }
         worst_cos = @min(worst_cos, dot / (@sqrt(c2) * @sqrt(g2) + 1e-30));
     }
-    std.debug.print("[pair-cpu-gpu] {d} tokens dim {d} n_pos={d} — worst_cos={d:.6} max|c-g|={d:.6}\n", .{ cpu.n_tokens, cpu.out_dim, n_pos, worst_cos, max_diff });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[pair-cpu-gpu] {d} tokens dim {d} n_pos={d} — worst_cos={d:.6} max|c-g|={d:.6}\n", .{ cpu.n_tokens, cpu.out_dim, n_pos, worst_cos, max_diff });
     try testing.expect(worst_cos > 0.99999);
     try testing.expect(max_diff < 0.001);
 }
@@ -917,7 +924,7 @@ test "10.7 t-axis: eje t rota sólo la sección 0 del M-RoPE" {
     for (33..44) |d| {
         if (@as(f32, @floatCast(q1.data[d])) == @as(f32, @floatCast(q2.data[d]))) same_rest += 1;
     }
-    std.debug.print("t-axis: {d}/22 dims sección-t difieren, {d}/22 dims x/y idénticas\n", .{ diff_sec_t, same_rest });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "t-axis: {d}/22 dims sección-t difieren, {d}/22 dims x/y idénticas\n", .{ diff_sec_t, same_rest });
     try testing.expect(diff_sec_t == 22);
     try testing.expect(same_rest == 22);
 }
@@ -933,14 +940,14 @@ test "deepstack: detectar modelos con is_deepstack_layers" {
     var found_any: bool = false;
     for (paths) |p| {
         var meta = mmproj_model.MmprojModel.load(std.Io.Threaded.global_single_threaded.io(), testing.allocator, p) catch |e| {
-            std.debug.print("{s}: load error: {s}\n", .{ std.fs.path.basename(p), @errorName(e) });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "{s}: load error: {s}\n", .{ std.fs.path.basename(p), @errorName(e) });
             continue;
         };
         defer meta.deinit();
         var n_ds: usize = 0;
         for (meta.config.is_deepstack_layers) |b| { if (b) n_ds += 1; }
-        std.debug.print("{s}: layers={d} deepstack_count={d}\n", .{ std.fs.path.basename(p), meta.config.n_layer, n_ds });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "{s}: layers={d} deepstack_count={d}\n", .{ std.fs.path.basename(p), meta.config.n_layer, n_ds });
         if (n_ds > 0) found_any = true;
     }
-    std.debug.print("deepstack: found_any={}\n", .{found_any});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "deepstack: found_any={}\n", .{found_any});
 }

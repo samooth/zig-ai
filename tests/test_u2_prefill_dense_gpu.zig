@@ -14,6 +14,13 @@
 //! Gate: rel < 1e-3 (norma relativa de la diferencia).
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const gpa = std.testing.allocator;
 const Tensor = @import("core").Tensor;
 const gguf_model = @import("gguf_model");
@@ -28,11 +35,11 @@ const embedding_mod = @import("embedding");
 
 test "U2: prefill GPU dense batched (n=64) — forwardGPU ≡ forward CPU, rel<1e-3" {
     const env_path = std.c.getenv("GGUF_MODEL_PATH") orelse {
-        std.debug.print("SKIP: GGUF_MODEL_PATH no está definida\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: GGUF_MODEL_PATH no está definida\n", .{});
         return error.SkipZigTest;
     };
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const path = std.mem.span(env_path);
@@ -42,8 +49,8 @@ test "U2: prefill GPU dense batched (n=64) — forwardGPU ≡ forward CPU, rel<1
     defer model.deinit();
     const cfg = model.config;
 
-    std.debug.print("=== U2: prefill batched CPU vs GPU (n=64) ===\n", .{});
-    std.debug.print("arch={s} emb={d} heads={d} kv={d} hd={d}\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "=== U2: prefill batched CPU vs GPU (n=64) ===\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "arch={s} emb={d} heads={d} kv={d} hd={d}\n", .{
         cfg.architecture,                                                              cfg.embedding_length, cfg.head_count, cfg.head_count_kv,
         if (cfg.head_dim > 0) cfg.head_dim else cfg.embedding_length / cfg.head_count,
     });
@@ -179,7 +186,7 @@ test "U2: prefill GPU dense batched (n=64) — forwardGPU ≡ forward CPU, rel<1
     }
     const rel: f64 = if (norm > 0) @sqrt(diff / norm) else 0;
     const scale_ratio: f64 = if (norm > 0) @sqrt(norm_gpu / norm) else 1;
-    std.debug.print("U2 prefill n={d}: rel={d:.6} max_abs={d:.6} scale_ratio={d:.4} nan={d} (gate 1e-2 cuantizado)\n", .{ n, rel, max_abs, scale_ratio, nan_count });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2 prefill n={d}: rel={d:.6} max_abs={d:.6} scale_ratio={d:.4} nan={d} (gate 1e-2 cuantizado)\n", .{ n, rel, max_abs, scale_ratio, nan_count });
     // Diagnóstico por-token para aislar si la divergencia es uniforme
     // (proyecciones batched) o concentrada (KV append / attn batched).
     var max_token_rel: f64 = 0;
@@ -203,17 +210,17 @@ test "U2: prefill GPU dense batched (n=64) — forwardGPU ≡ forward CPU, rel<1
         }
         if (tr < min_token_rel) min_token_rel = tr;
     }
-    std.debug.print("U2 per-token: min_rel={d:.6} max_rel={d:.6} worst_pos={d}\n", .{ min_token_rel, max_token_rel, worst_pos });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2 per-token: min_rel={d:.6} max_rel={d:.6} worst_pos={d}\n", .{ min_token_rel, max_token_rel, worst_pos });
     if (nan_count > 0) return error.PrefillDenseNaN;
     if (scale_ratio < 0.9 or scale_ratio > 1.1) {
-        std.debug.print("U2 FALLO coherencia: scale_ratio={d:.4} fuera de [0.9,1.1]\n", .{scale_ratio});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2 FALLO coherencia: scale_ratio={d:.4} fuera de [0.9,1.1]\n", .{scale_ratio});
         return error.PrefillDenseIncoherent;
     }
     if (rel > 1e-2) {
-        std.debug.print("U2 FALLO: rel={d:.6} > 1e-2\n", .{rel});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2 FALLO: rel={d:.6} > 1e-2\n", .{rel});
         return error.PrefillDenseMismatch;
     }
-    std.debug.print("U2 OK: prefill GPU batched ≈ CPU golden (rel={d:.6}, ruido de cuantización q4_0)\n", .{rel});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2 OK: prefill GPU batched ≈ CPU golden (rel={d:.6}, ruido de cuantización q4_0)\n", .{rel});
 
     // Limpieza del caché global de pesos q4 (pattern main.zig:870) — el
     // q4Weight del forwardGPU llena q4_cache; sin esto el testing.allocator

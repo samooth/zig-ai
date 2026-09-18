@@ -22,6 +22,13 @@
 //! cuantizado GPU, misma clase §3.1); escala coherente [0.9,1.1]; 0 NaN.
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const gpa = std.testing.allocator;
 const Tensor = @import("core").Tensor;
 const gguf_model = @import("gguf_model");
@@ -36,11 +43,11 @@ const embedding_mod = @import("embedding");
 
 test "U2-llama: prefill GPU dense batched n=512 (capa real Llama-3.2) ≈ CPU golden" {
     const env_path = std.c.getenv("GGUF_MODEL_PATH") orelse {
-        std.debug.print("SKIP: GGUF_MODEL_PATH no está definida\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: GGUF_MODEL_PATH no está definida\n", .{});
         return error.SkipZigTest;
     };
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const path = std.mem.span(env_path);
@@ -53,13 +60,13 @@ test "U2-llama: prefill GPU dense batched n=512 (capa real Llama-3.2) ≈ CPU go
     // Chasis U1: SOLO llama-like denso (este test no aplica a híbridos).
     const is_llama_like = !cfg.is_hybrid and std.mem.eql(u8, cfg.architecture, "llama");
     if (!is_llama_like) {
-        std.debug.print("SKIP: arch={s} no es llama denso (chasis U1 llama)\n", .{cfg.architecture});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: arch={s} no es llama denso (chasis U1 llama)\n", .{cfg.architecture});
         return error.SkipZigTest;
     }
 
-    std.debug.print("=== U2-llama: prefill batched n=512 CPU vs GPU ===\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "=== U2-llama: prefill batched n=512 CPU vs GPU ===\n", .{});
     const head_dim = if (cfg.head_dim > 0) cfg.head_dim else cfg.embedding_length / cfg.head_count;
-    std.debug.print("arch={s} n_embd={d} heads={d} kv={d} hd={d} n_rot={d} base={d} blk={d}\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "arch={s} n_embd={d} heads={d} kv={d} hd={d} n_rot={d} base={d} blk={d}\n", .{
         cfg.architecture,   cfg.embedding_length,
         cfg.head_count,     cfg.head_count_kv,
         head_dim,           cfg.rope_dimension_count,
@@ -203,17 +210,17 @@ test "U2-llama: prefill GPU dense batched n=512 (capa real Llama-3.2) ≈ CPU go
     }
     const rel: f64 = if (norm > 0) @sqrt(diff / norm) else 0;
     const scale_ratio: f64 = if (norm > 0) @sqrt(norm_gpu / norm) else 1;
-    std.debug.print("U2-llama prefill n={d}: rel={d:.6} max_abs={d:.6} scale_ratio={d:.4} nan={d} (gate 1e-2 cuantizado)\n", .{ n, rel, max_abs, scale_ratio, nan_count });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2-llama prefill n={d}: rel={d:.6} max_abs={d:.6} scale_ratio={d:.4} nan={d} (gate 1e-2 cuantizado)\n", .{ n, rel, max_abs, scale_ratio, nan_count });
     if (nan_count > 0) return error.PrefillDenseNaN;
     if (scale_ratio < 0.9 or scale_ratio > 1.1) {
-        std.debug.print("U2-llama FALLO coherencia: scale_ratio={d:.4} fuera de [0.9,1.1]\n", .{scale_ratio});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2-llama FALLO coherencia: scale_ratio={d:.4} fuera de [0.9,1.1]\n", .{scale_ratio});
         return error.PrefillDenseIncoherent;
     }
     if (rel > 1e-2) {
-        std.debug.print("U2-llama FALLO: rel={d:.6} > 1e-2\n", .{rel});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2-llama FALLO: rel={d:.6} > 1e-2\n", .{rel});
         return error.PrefillDenseMismatch;
     }
-    std.debug.print("U2-llama OK: prefill GPU batched 512tok capa real Llama ≈ CPU golden (rel={d:.6})\n", .{rel});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "U2-llama OK: prefill GPU batched 512tok capa real Llama ≈ CPU golden (rel={d:.6})\n", .{rel});
 
     // Limpieza del caché global q4 (pattern main.zig:870).
     layer_kernels.deinitQ4Cache();

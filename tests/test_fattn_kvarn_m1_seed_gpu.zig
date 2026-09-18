@@ -40,6 +40,13 @@
 //! sanity adicional.
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const build_options = @import("build_options");
 const cudaz = @import("cudaz");
@@ -362,7 +369,7 @@ test "B5 M1 1000-seed: portable FA ≡ CPU ref con store real (gated P4 cubin)" 
                 bad += 1;
                 if (bad < 10) std.log.err("B5 M1 mismatch @{d}: got={d} want={d} rel={d}", .{ i, got, want, rel });
                 if (seed_idx == 0 and bad == 1) {
-                    std.debug.print("DBG first-fail seed0: got[0..8]={any}\nwant[0..8]={any}\nq_rot[0..4]={any}\nk_q[0..4]={any}\n", .{ out_host[0..8], cpu_out[0..8], q[0..4], k_q[0..4] });
+                    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "DBG first-fail seed0: got[0..8]={any}\nwant[0..8]={any}\nq_rot[0..4]={any}\nk_q[0..4]={any}\n", .{ out_host[0..8], cpu_out[0..8], q[0..4], k_q[0..4] });
                 }
             }
         }

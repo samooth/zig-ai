@@ -9,6 +9,13 @@
 //! Sin GPU (puro disco). Skip si falta el env.
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const gguf = @import("gguf");
 const gguf_moe = @import("gguf_moe");
 const expert_bundle = @import("expert_bundle");
@@ -72,5 +79,5 @@ test "bundle: contenido por-experto idéntico al GGUF" {
             _ = k;
         }
     }
-    std.debug.print("bundle: {d} slots muestreados idénticos GGUF↔bundle (L {d}..{d}, E={d})\n", .{ checked, fl, last_moe, n_experts });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "bundle: {d} slots muestreados idénticos GGUF↔bundle (L {d}..{d}, E={d})\n", .{ checked, fl, last_moe, n_experts });
 }

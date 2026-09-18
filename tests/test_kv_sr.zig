@@ -4,6 +4,13 @@
 //! atención y capa a capa; SR es insesgado y su varianza se promedia.
 //! Métrica clave: SESGO neto (|E[out]−ref|), no ABS single-shot.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const kvc = @import("kv_cache");
 const kv_quant = kvc.kv_quant;
 
@@ -109,10 +116,10 @@ test "SR en V: sesgo/varianza del error de salida (atención simulada)" {
     const n_out: f32 = @floatFromInt(n_q * hd);
     const avg_det = bias_det / n_out;
     const avg_sr = bias_sr / n_out;
-    std.debug.print("V q4_0 atención-simulada (n_q={d}, 512 tok, 30 reps SR):\n", .{n_q});
-    std.debug.print("  error medio ABS determinístico: {d:.6}\n", .{avg_det});
-    std.debug.print("  error medio ABS SR (30 reps promediadas): {d:.6}\n", .{avg_sr});
-    std.debug.print("  ratio det/SR: {d:.3}\n", .{avg_det / avg_sr});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "V q4_0 atención-simulada (n_q={d}, 512 tok, 30 reps SR):\n", .{n_q});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  error medio ABS determinístico: {d:.6}\n", .{avg_det});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  error medio ABS SR (30 reps promediadas): {d:.6}\n", .{avg_sr});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  ratio det/SR: {d:.3}\n", .{avg_det / avg_sr});
 
     // ── DIAGNÓSTICO: sesgo vs varianza ──────────────────────────────
     // SR promedia el error de EXPECTED output: E[SR] es insesgado por
@@ -160,7 +167,7 @@ test "SR en V: sesgo/varianza del error de salida (atención simulada)" {
         var det_bias: f32 = 0;
         for (0..n_q * hd) |i| det_bias += @abs(out_acc[i] - out_ref[i]);
         det_bias /= n_out;
-        std.debug.print("SESGO neto (|E[out]−ref|, lo que ACUMULA): det={d:.6} SR={d:.6} ratio={d:.3}\n", .{ det_bias, sr_bias, det_bias / sr_bias });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SESGO neto (|E[out]−ref|, lo que ACUMULA): det={d:.6} SR={d:.6} ratio={d:.3}\n", .{ det_bias, sr_bias, det_bias / sr_bias });
     }
     // El criterio correcto del paso 0: SR reduce el SESGO acumulativo
     // (la varianza se promedia con múltiples queries/decode steps).

@@ -11,6 +11,13 @@
 //!            zig build test-server-e2e
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const builtin = @import("builtin");
 const httpx = @import("httpx");
 const srv = @import("server");
@@ -38,7 +45,7 @@ fn modelPath() ?[]const u8 {
 
 test "server e2e: auth + health + validation + protocolos" {
     const model = modelPath() orelse {
-        std.debug.print("SKIP: SERVER_TEST_MODEL no seteado\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: SERVER_TEST_MODEL no seteado\n", .{});
         return;
     };
     const allocator = std.testing.allocator;
@@ -194,6 +201,6 @@ test "server e2e: auth + health + validation + protocolos" {
 
 fn runServerThread(allocator: std.mem.Allocator, cfg: srv.ServerConfig) void {
     srv.runServer(allocator, cfg) catch |e| {
-        std.debug.print("[e2e] server thread error: {s}\n", .{@errorName(e)});
+        stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[e2e] server thread error: {s}\n", .{@errorName(e)}) catch {};
     };
 }

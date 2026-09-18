@@ -4,6 +4,13 @@
 //! igual que test_kvarn_kld.zig pero para los quant formats clásicos.
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const kv_quant = @import("kv_cache").kv_quant;
 const qt = @import("kv_cache").quant_types;
@@ -55,7 +62,7 @@ fn roundtripCheck(
         if (diff > err) err = diff;
     }
     if (err > max_allowed) {
-        std.debug.print("FAIL {s}: err={d:.4} n={d}\n", .{ fmt.toString(), err, n });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "FAIL {s}: err={d:.4} n={d}\n", .{ fmt.toString(), err, n });
     }
     try testing.expect(err <= max_allowed);
 }

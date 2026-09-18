@@ -8,6 +8,13 @@
 // ============================================================================
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const cudaz = @import("cudaz");
 const kvk = @import("kvarn_kernels");
@@ -31,7 +38,7 @@ test "M3 main-pattern: 3 capas × (prefill 256 + decode 8) con smem_optin probeD
     // smem_optin REAL del device (como probeDevice; sin tabla estática).
     const caps = bc.probeDevice(0);
     const smem_optin = caps.shared_memory_per_block;
-    std.debug.print("main-pattern: smem_optin real = {?d}B\n", .{smem_optin});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "main-pattern: smem_optin real = {?d}B\n", .{smem_optin});
 
     const num_layers: u32 = 3;
     const n_kv_heads: u32 = 2; // GQA-heavy (aisla bug kvh>1: si =1 pasa)
@@ -101,7 +108,7 @@ test "M3 main-pattern: 3 capas × (prefill 256 + decode 8) con smem_optin probeD
             try testing.expectEqual(@as(c_int, @intCast(n_kv_heads)), dk.n_record_heads);
         }
     }
-    std.debug.print("main-pattern: {d} capas × {d} tok, descs live=(2,7) todas OK (smem ruta {s})\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "main-pattern: {d} capas × {d} tok, descs live=(2,7) todas OK (smem ruta {s})\n", .{
         num_layers,                                                  prefill_n + decode_n,
         if (smem_optin orelse 0 >= 69704) "hishmem" else "lowshmem",
     });

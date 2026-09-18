@@ -5,6 +5,13 @@
 //! (que el test invoca con el mismo pipeline: hadamard128Rows → encode*).
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const build_options = @import("build_options");
 const cudaz = @import("cudaz");
@@ -1067,19 +1074,19 @@ test "A5: kvarnStoreLowShmemDevice — records decodifican al tile original (eag
         const g: usize = 1;
         const rl = records_low[(g * HEADS + h) * record_bytes ..][0..record_bytes];
         const rh = records_hi[(g * HEADS + h) * record_bytes ..][0..record_bytes];
-        std.debug.print("A5 axes low: ksc={x:0>4} ksr={x:0>4}\n", .{ a5AxesHex(rl, layout.k_s_col_off, 2)[0], a5AxesHex(rl, layout.k_s_row_off, 2)[0] });
-        std.debug.print("A5 axes hi : ksc={x:0>4} ksr={x:0>4}\n", .{ a5AxesHex(rh, layout.k_s_col_off, 2)[0], a5AxesHex(rh, layout.k_s_row_off, 2)[0] });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "A5 axes low: ksc={x:0>4} ksr={x:0>4}\n", .{ a5AxesHex(rl, layout.k_s_col_off, 2)[0], a5AxesHex(rl, layout.k_s_row_off, 2)[0] });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "A5 axes hi : ksc={x:0>4} ksr={x:0>4}\n", .{ a5AxesHex(rh, layout.k_s_col_off, 2)[0], a5AxesHex(rh, layout.k_s_row_off, 2)[0] });
         var eq: usize = 0;
         for (rl, rh) |a, b| if (a == b) {
             eq += 1;
         };
-        std.debug.print("A5 bytes iguales low-vs-hi: {d}/{d}\n", .{ eq, record_bytes });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "A5 bytes iguales low-vs-hi: {d}/{d}\n", .{ eq, record_bytes });
         // ¿Escribió el stage? slot del g=1 (sg=4, tg=3, swa=0):
         // std slot = 1+((1-1)%3)=1 → stage_pos 128..255, fila 2h(K)/2h+1(V).
         const stage_h = try allocator.alloc(f16, stage_len);
         defer allocator.free(stage_h);
         try cudaz.cuMemcpyDtoH(@intFromPtr(stage_h.ptr), d_stage, @sizeOf(f16) * stage_len);
-        std.debug.print("A5 stage slot1 h0 K[0..4]={any} V[0..4]={any}\n", .{
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "A5 stage slot1 h0 K[0..4]={any} V[0..4]={any}\n", .{
             stage_h[(128 * (2 * HEADS) + 0) * 128 ..][0..4],
             stage_h[(128 * (2 * HEADS) + 1) * 128 ..][0..4],
         });
@@ -1101,5 +1108,5 @@ test "A5: kvarnStoreLowShmemDevice — records decodifican al tile original (eag
             }
         }
     }
-    std.debug.print("A5 lowshmem: bit-exacto vs hishmem 19968/19968, decode sane OK\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "A5 lowshmem: bit-exacto vs hishmem 19968/19968, decode sane OK\n", .{});
 }

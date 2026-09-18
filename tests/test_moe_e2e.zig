@@ -12,6 +12,13 @@
 //! the plan calls for when forwardGPU is unavailable.
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const cpu_executor = @import("moe_cpu_executor");
 const gemv_mod = @import("moe_cpu_gemv");
@@ -127,7 +134,7 @@ test "host: executor-merge hybrid flow matches dense reference" {
         const d = @abs(m - r);
         if (d > max_diff) max_diff = d;
     }
-    std.debug.print("max_diff={d}\n", .{max_diff});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "max_diff={d}\n", .{max_diff});
     try testing.expect(max_diff < tol);
 }
 

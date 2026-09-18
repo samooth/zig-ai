@@ -10,6 +10,13 @@
 //!   - E2E Qwen3.5-0.8B con -ctk kvarn4 si GGUF_MODEL_PATH (gate 9.2).
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const kvc = @import("kv_cache");
 const kvarn = kvc.kvarn;
@@ -119,7 +126,7 @@ test "kvarn manager: 128 tokens → 1 record por (layer,head); retrieve completo
         // SNR ~0.02-0.06 en distribuciones gaussianas — gate holgado 0.15
         // para datos uniformes (el roundtrip unit de kvarn.zig valida lo fino).
         if (snr > 0.15) {
-            std.debug.print("[kvarn-mgr] {s} SNR={d:.4} — fuera de gate\n", .{ case.tag, snr });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[kvarn-mgr] {s} SNR={d:.4} — fuera de gate\n", .{ case.tag, snr });
             return error.SnrOutOfGate;
         }
     }

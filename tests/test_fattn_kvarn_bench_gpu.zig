@@ -20,6 +20,13 @@
 //!   4) prompt_prefill (Dev-A A13 — placeholder, no medimos)
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const build_options = @import("build_options");
 const cudaz = @import("cudaz");
@@ -109,7 +116,7 @@ fn tryBenchLock(path: []const u8) !void {
 /// Imprime una línea `[bench]` con los números en formato disciplina
 /// baseline (commit+cmd+prompt+seed+GPU según BEELLAMA_LANES §5).
 fn printRun(run: BenchRun) void {
-    std.debug.print(
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(),
         "[bench] shape=q{d}kv{d}qh{d}kvh{d}d{d}kb{d}vb{d}swa={any} | " ++
             "route={s} mean={d}ms max={d}ms p50={d}ms bytes={d} " ++
             "rel={d} (tol={d})\n",
@@ -203,7 +210,7 @@ test "B8 bench: harness runs N_SEEDS con N_ITERS y reporta times (gated cubin + 
     defer allocator.free(times);
 
     for (BENCH_CASES, 0..) |case, case_i| {
-        std.debug.print("[bench] case {d}/4: q{d} kv{d} qh{d} kvh{d} d{d} swa={any}\n", .{ case_i + 1, case.n_q, case.n_kv, case.n_q_heads, case.n_kv_heads, case.head_dim, case.swa });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[bench] case {d}/4: q{d} kv{d} qh{d} kvh{d} d{d} swa={any}\n", .{ case_i + 1, case.n_q, case.n_kv, case.n_q_heads, case.n_kv_heads, case.head_dim, case.swa });
         // Reset del histograma por shape.
         for (times) |*t| t.* = 0.0;
 
@@ -432,7 +439,7 @@ test "B8 bench: harness runs N_SEEDS con N_ITERS y reporta times (gated cubin + 
                 if (n_done_p > 0) {
                     const mean_p = sum_ms_p / @as(f64, @floatFromInt(n_done_p));
                     const speedup = mean_p / mean_ms; // portable_time / split_time
-                    std.debug.print("[bench] A/B M2 gate: split={d:.4}ms portable={d:.4}ms speedup={d:.3}x (gate M2: >=1.3x)\n", .{ mean_ms, mean_p, speedup });
+                    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[bench] A/B M2 gate: split={d:.4}ms portable={d:.4}ms speedup={d:.3}x (gate M2: >=1.3x)\n", .{ mean_ms, mean_p, speedup });
                 }
             }
         }
@@ -540,7 +547,7 @@ test "B8 repro: initDescs+portable case1 shape" {
     defer cudaz.cuMemFree(d_stage);
     try cudaz.cuMemsetD8(d_stage, 0, @sizeOf(f16) * stage_len);
 
-    std.debug.print("repro: initDescs...\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "repro: initDescs...\n", .{});
     var ia: kvk.KvarnInitDescsArgs = .{
         .n_stream = 1,
         .n_indices = @intCast(n_kv),
@@ -565,7 +572,7 @@ test "B8 repro: initDescs+portable case1 shape" {
     };
     try kvk.kvarnInitDescsDevice(kvarn_module, &ia, stream);
     try cudaz.cuStreamSynchronize(stream);
-    std.debug.print("repro: initDescs OK\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "repro: initDescs OK\n", .{});
 
     var attn_args: fattn_kv.KvarnAttentionArgs = .{
         .q_data = @ptrFromInt(d_q),
@@ -581,8 +588,8 @@ test "B8 repro: initDescs+portable case1 shape" {
         .scale = 1.0 / @sqrt(@as(f32, @floatFromInt(D_U32))),
         .gqa = 4,
     };
-    std.debug.print("repro: portable launch...\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "repro: portable launch...\n", .{});
     _ = try fattn_kv.fattnKvarnPortableDevice(fattn_module, &attn_args, stream);
     try cudaz.cuStreamSynchronize(stream);
-    std.debug.print("repro: portable OK\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "repro: portable OK\n", .{});
 }

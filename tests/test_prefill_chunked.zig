@@ -12,6 +12,13 @@
 //! key_dim=2048, qkv_dim=6144, d_inner=2048).
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const cudaz = @import("cudaz");
 const layer_kernels = @import("layer_kernels");
@@ -95,7 +102,7 @@ fn checkDiff(actual: []const f32, expected: []const f32, atol: f32, rtol: f32, n
         const combined = d / tol;
         if (combined > max_combined) max_combined = combined;
     }
-    std.debug.print("  {s}: max_combined={d:.3} (atol={e} rtol={e})\n", .{ name, max_combined, atol, rtol });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  {s}: max_combined={d:.3} (atol={e} rtol={e})\n", .{ name, max_combined, atol, rtol });
     return max_combined;
 }
 

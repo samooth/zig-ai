@@ -8,6 +8,13 @@
 //! Ruta vectorizada: productos idénticos, solo orden de reducción difiere
 //! (epsilon documentado). Benchmark GB/s por núcleo al final.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const gguf = @import("gguf");
 const timez = @import("time");
 const gemv_mod = @import("moe_cpu_gemv");
@@ -199,7 +206,7 @@ fn expectBitsEq(a: []const f32, b: []const f32) !void {
     try std.testing.expectEqual(a.len, b.len);
     for (a, b) |x, y| {
         if (@as(u32, @bitCast(x)) != @as(u32, @bitCast(y))) {
-            std.debug.print("diff: {d} vs {d}\n", .{ x, y });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "diff: {d} vs {d}\n", .{ x, y });
             return error.BitMismatch;
         }
     }
@@ -342,7 +349,7 @@ test "dequant Q6_K cola parcial: recorta sin escribir fuera (autoconsistencia)" 
         cg.dequantQ6_K(&full_w, guard[0..n]);
         for (0..n) |k| {
             if (@as(u32, @bitCast(guard[k])) != @as(u32, @bitCast(full_out[k]))) {
-                std.debug.print("cola n={d} k={d}: {d} vs {d}\n", .{ n, k, guard[k], full_out[k] });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "cola n={d} k={d}: {d} vs {d}\n", .{ n, k, guard[k], full_out[k] });
                 return error.TailMismatch;
             }
         }
@@ -600,7 +607,7 @@ test "Q3_K signos: hmask CLEAR suma +4 al q efectivo" {
     // Relación: clear = set + dl·4 (signo compartido, magnitud mayor o igual).
     const delta = clear_v[pos] - set_v[pos];
     try std.testing.expect(@abs(delta) > @abs(set_v[pos]) * 0.5 or @abs(delta) > 1.0);
-    std.debug.print("[test] Q3_K signos: set={d} clear={d} delta={d}\n", .{ set_v[pos], clear_v[pos], delta });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[test] Q3_K signos: set={d} clear={d} delta={d}\n", .{ set_v[pos], clear_v[pos], delta });
 }
 
 /// Valor puntual del oráculo (helper del test).
@@ -722,7 +729,7 @@ fn benchOne(tag: []const u8, name: []const u8, comptime fmt: cg.Format, comptime
         @as(f64, @floatFromInt(out.len * fmt.rowBytes(n)));
     const gbs = bytes_total / (@as(f64, @floatFromInt(el)) / 1e9) / 1e9;
     const path: []const u8 = if (use_scalar) "scalar" else "simd";
-    std.debug.print("cpu_gemv bench [{s}] {s} {s} K={d} M={d}: {d:.2} GB/s ({d} iters)\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "cpu_gemv bench [{s}] {s} {s} K={d} M={d}: {d:.2} GB/s ({d} iters)\n", .{
         tag, name, path, n, out.len, gbs, iters,
     });
     std.mem.doNotOptimizeAway(sink);
@@ -736,7 +743,7 @@ test "bench GB/s por nucleo" {
     const quiet = load >= 0 and load < 2.0;
     const tag: []const u8 = if (quiet) "OFICIAL lane-f" else "provisional";
     const iters_mult: usize = if (quiet) 4 else 1;
-    std.debug.print("cpu_gemv bench modo={s} (loadavg1m={d:.2})\n", .{ tag, load });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "cpu_gemv bench modo={s} (loadavg1m={d:.2})\n", .{ tag, load });
     const M = 512;
     inline for (.{4096}) |K| {
         var prng = std.Random.Xoshiro256.init(0x5EED);
@@ -804,7 +811,7 @@ test "executor paralelo: correccion vs escalar (todos los workers)" {
             const want = cg.dotScalar(fmt, w[r * rb ..][0..rb], &x);
             const diff = @abs(want - out[r]);
             if (!(diff / @max(@abs(want), 1e-9) < 1e-4)) {
-                std.debug.print("fila {d}: want={d} got={d}\n", .{ r, want, out[r] });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "fila {d}: want={d} got={d}\n", .{ r, want, out[r] });
                 return error.ParallelMismatch;
             }
         }
@@ -879,7 +886,7 @@ test "executor: escalado con carga real (reporta; aserta solo si maquina quieta)
     const gbsN = benchExecutor(exN, w, K, &x, out, iters);
 
     const speedup = gbsN / @max(gbs1, 1e-9);
-    std.debug.print("cpu_executor scaling: 1w={d:.2} GB/s  {d}w={d:.2} GB/s  speedup={d:.2}x  (loadavg1m={d:.2})\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "cpu_executor scaling: 1w={d:.2} GB/s  {d}w={d:.2} GB/s  speedup={d:.2}x  (loadavg1m={d:.2})\n", .{
         gbs1, exN.n_workers, gbsN, speedup, load,
     });
 
@@ -889,6 +896,6 @@ test "executor: escalado con carga real (reporta; aserta solo si maquina quieta)
     if (load >= 0 and load < 4.0) {
         try std.testing.expect(speedup > 2.0);
     } else {
-        std.debug.print("cpu_executor scaling: SKIP assert (load {d:.2} ≥ 4)\n", .{load});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "cpu_executor scaling: SKIP assert (load {d:.2} ≥ 4)\n", .{load});
     }
 }

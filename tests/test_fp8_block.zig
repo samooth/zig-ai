@@ -5,6 +5,13 @@
 //! ocultaba — este test los compila al USARLO.
 //! Requiere CUDA; sin GPU sale limpio.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const matmul = @import("matmul");
 const Tensor = @import("core").Tensor;
 const cudaz = @import("cudaz");
@@ -41,13 +48,13 @@ test "fp8_block: quantizer f32 directo (scales + bytes)" {
     var qb: [8]u8 = undefined;
     try cudaz.cuMemcpyDtoH(@intFromPtr(&qb), d_q, 8);
     const amax_expected: f32 = 0.5 * 127.0 / 128.0;
-    std.debug.print("[fp8-debug] scale={e} (esperado {e}) q[0..8]=", .{ scale, amax_expected / 448.0 });
-    for (qb) |b| std.debug.print(" {x:0>2}", .{b});
-    std.debug.print("\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[fp8-debug] scale={e} (esperado {e}) q[0..8]=", .{ scale, amax_expected / 448.0 });
+    for (qb) |b| try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), " {x:0>2}", .{b});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "\n", .{});
     // q[127] debe ser el máximo del grupo: 448 escalado → 0x7E (448).
     var q_last: u8 = 0;
     try cudaz.cuMemcpyDtoH(@intFromPtr(&q_last), d_q + 127, 1);
-    std.debug.print("[fp8-debug] q[127]=0x{x:0>2} (esperado 7E)\n", .{q_last});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[fp8-debug] q[127]=0x{x:0>2} (esperado 7E)\n", .{q_last});
     try std.testing.expect(scale > 0);
     try std.testing.expect(q_last == 0x7E); // amax del grupo → 448 exacto
 }
@@ -99,7 +106,7 @@ test "fp8_block: gemmFp8Block paridad vs CPU f32" {
         ref2 += @as(f64, r) * @as(f64, r);
     }
     const snr_rel = @sqrt(err2 / ref2);
-    std.debug.print("[fp8-block] gemm M={d} N={d} K={d}: ||err||/||ref||={e}\n", .{ M, N, K, snr_rel });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[fp8-block] gemm M={d} N={d} K={d}: ||err||/||ref||={e}\n", .{ M, N, K, snr_rel });
     try std.testing.expect(snr_rel < 0.05); // FP8 block: ~1-4% típico
     // 2ª llamada MISMO peso — valida el cache (hit) y el scratch reutilizado.
     try engine.gemmFp8Block(a_t, w_t, &c_t);
@@ -136,7 +143,7 @@ test "fp8_block: gemvSplitK kernel directo (sin MatmulEngine)" {
     try cudaz.cuStreamSynchronize(@ptrCast((try matmul.MatmulEngine.sharedCudaStream()).raw));
     var out: f32 = 0;
     try cudaz.cuMemcpyDtoH(@intFromPtr(&out), d_o, 4);
-    std.debug.print("[fp8-debug] gemv-directo: out={e} (esperado 128)\n", .{out});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[fp8-debug] gemv-directo: out={e} (esperado 128)\n", .{out});
 }
 
 test "fp8_block: gemvFp8Block (M=1) paridad + uno-caliente" {
@@ -171,7 +178,7 @@ test "fp8_block: gemvFp8Block (M=1) paridad + uno-caliente" {
         try engine.gemvFp8Block(x_t, w_t, o_t, 1);
         var ref: f64 = 0;
         for (x) |v| ref += v;
-        std.debug.print("[fp8-debug] uno-caliente: got={e} ref={e}\n", .{ o[0], ref });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[fp8-debug] uno-caliente: got={e} ref={e}\n", .{ o[0], ref });
     }
 
     // ── paridad con random ──
@@ -213,6 +220,6 @@ test "fp8_block: gemvFp8Block (M=1) paridad + uno-caliente" {
         ref2 += @as(f64, r) * @as(f64, r);
     }
     const snr_rel = @sqrt(err2 / ref2);
-    std.debug.print("[fp8-block] gemv N={d} K={d} splits={d}: ||err||/||ref||={e}\n", .{ N, K, num_splits, snr_rel });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[fp8-block] gemv N={d} K={d} splits={d}: ||err||/||ref||={e}\n", .{ N, K, num_splits, snr_rel });
     try std.testing.expect(snr_rel < 0.05);
 }

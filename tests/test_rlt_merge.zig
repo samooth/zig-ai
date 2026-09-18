@@ -9,6 +9,13 @@
 //!   3. Tensores blk.0.rlt.feedback_* presentes con datos bit-exactos.
 //!   4. rlt.feedback_alpha == alpha del sidecar.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const gguf = @import("gguf");
 const export_gguf = @import("export_gguf");
@@ -150,7 +157,7 @@ test "merge tool: base + sidecar RLT → out parseable con todo íntegro" {
     try gguf.dequantTensor(q, out.tensorData(q), qf);
     for (base_w, qf, 0..) |expected, got, i| {
         if (expected != got) {
-            std.debug.print("base_w mismatch en {d}: {d} != {d}\n", .{ i, expected, got });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "base_w mismatch en {d}: {d} != {d}\n", .{ i, expected, got });
             return error.BaseDataCorrupt;
         }
     }
@@ -162,7 +169,7 @@ test "merge tool: base + sidecar RLT → out parseable con todo íntegro" {
     try gguf.dequantTensor(s, out.tensorData(s), sf);
     for (w_state, sf, 0..) |expected, got, i| {
         if (expected != got) {
-            std.debug.print("w_state mismatch en {d}: {d} != {d}\n", .{ i, expected, got });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "w_state mismatch en {d}: {d} != {d}\n", .{ i, expected, got });
             return error.RltDataCorrupt;
         }
     }

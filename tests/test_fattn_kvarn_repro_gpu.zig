@@ -12,6 +12,13 @@
 //! Gating: skip sin CUDA/cubin/dumps.
 
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const testing = std.testing;
 const build_options = @import("build_options");
 const cudaz = @import("cudaz");
@@ -477,7 +484,7 @@ test "9.4 repro E2E: append incremental 5+1 con K/V/Q reales" {
         }
         var st_max_diff: f64 = 0;
         for (st_out, cpu_out) |g, w| st_max_diff = @max(st_max_diff, @abs(@as(f64, g) - @as(f64, w)));
-        std.debug.print("9.4 repro STAGE-CHECK: max_diff(stage-CPU vs ref)={d:.6}\n", .{st_max_diff});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "9.4 repro STAGE-CHECK: max_diff(stage-CPU vs ref)={d:.6}\n", .{st_max_diff});
         // Dump del stage crudo para análisis externo (layout C2v2).
         if (std.c.getenv("ZIG_AI_REPRO_STAGE_DUMP")) |sd| {
             const io = std.Io.Threaded.global_single_threaded.io();
@@ -524,7 +531,7 @@ test "9.4 repro E2E: append incremental 5+1 con K/V/Q reales" {
         // de slices vacíos) dan rel enorme sin error real.
         if (rel > 5e-2 and diff > 1e-4) bad += 1;
     }
-    std.debug.print("9.4 repro E2E: max_rel={d:.6} max_diff={d:.6} bad={d}\n", .{ max_rel, max_diff, bad });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "9.4 repro E2E: max_rel={d:.6} max_diff={d:.6} bad={d}\n", .{ max_rel, max_diff, bad });
     // Dump out_host + cpu_out para análisis de patrón.
     if (std.c.getenv("ZIG_AI_REPRO_OUT_DUMP")) |od| {
         const io = std.Io.Threaded.global_single_threaded.io();

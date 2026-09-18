@@ -3,6 +3,13 @@
 //! y compara contra `PagedAttention.decode` (online softmax). Se salta si CUDA
 //! no está disponible.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const pa = @import("paged_attention");
 const cudaz = @import("cudaz");
 
@@ -39,7 +46,7 @@ fn fillBlocks(kv: *pa.PagedKVCache, seq_id: u64, seed: u64) !void {
 
 test "paged attention GPU decode matches CPU reference" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -76,16 +83,16 @@ test "paged attention GPU decode matches CPU reference" {
     for (out_cpu, out_gpu, 0..) |c, g, i| {
         max_diff = @max(max_diff, @abs(c - g));
         if (@abs(c - g) > 5e-3) {
-            std.debug.print("decode mismatch at {d}: cpu={d} gpu={d}\n", .{ i, c, g });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "decode mismatch at {d}: cpu={d} gpu={d}\n", .{ i, c, g });
             return error.DecodeMismatch;
         }
     }
-    std.debug.print("decode OK: {d} dims, max_diff={d}\n", .{ q_stride, max_diff });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "decode OK: {d} dims, max_diff={d}\n", .{ q_stride, max_diff });
 }
 
 test "paged attention GPU prefill matches CPU reference" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -124,16 +131,16 @@ test "paged attention GPU prefill matches CPU reference" {
     for (outs_cpu, outs_gpu, 0..) |c, g, i| {
         max_diff = @max(max_diff, @abs(c - g));
         if (@abs(c - g) > 5e-3) {
-            std.debug.print("prefill mismatch at {d}: cpu={d} gpu={d}\n", .{ i, c, g });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "prefill mismatch at {d}: cpu={d} gpu={d}\n", .{ i, c, g });
             return error.PrefillMismatch;
         }
     }
-    std.debug.print("prefill OK: {d} tokens, max_diff={d}\n", .{ seq_len, max_diff });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "prefill OK: {d} tokens, max_diff={d}\n", .{ seq_len, max_diff });
 }
 
 test "GPU block pool stage/evict round-trip preserves host data" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -167,18 +174,18 @@ test "GPU block pool stage/evict round-trip preserves host data" {
 
 test "Paged GPU block pool (VMM) stage/evict round-trip preserves host data" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
     const granule = pa.PagedGpuBlockPool.getGranule() catch {
-        std.debug.print("SKIP: VMM no soportado\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: VMM no soportado\n", .{});
         return error.SkipZigTest;
     };
     // bytes por bloque = block_size * num_kv_heads * head_dim * 2 (f16) * 2 (K+V)
     const bytes_per_token = @as(usize, 2) * @as(usize, 2) * @as(usize, 8) * @as(usize, 2);
     if (granule % bytes_per_token != 0) {
-        std.debug.print("SKIP: granule={d} no múltiplo de {d}\n", .{ granule, bytes_per_token });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: granule={d} no múltiplo de {d}\n", .{ granule, bytes_per_token });
         return error.SkipZigTest;
     }
     const block_size: usize = granule / bytes_per_token;
@@ -222,7 +229,7 @@ test "Paged GPU block pool (VMM) stage/evict round-trip preserves host data" {
 
 test "GPU evicts cold prefix blocks from device based on hit rate" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -284,7 +291,7 @@ fn realConfig() pa.PagedConfig {
 
 test "paged attention GPU decode matches CPU (real head_dim 128)" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -320,16 +327,16 @@ test "paged attention GPU decode matches CPU (real head_dim 128)" {
     for (out_cpu, out_gpu, 0..) |c, g, i| {
         max_diff = @max(max_diff, @abs(c - g));
         if (@abs(c - g) > 1e-2) {
-            std.debug.print("decode mismatch at {d}: cpu={d} gpu={d}\n", .{ i, c, g });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "decode mismatch at {d}: cpu={d} gpu={d}\n", .{ i, c, g });
             return error.DecodeMismatch;
         }
     }
-    std.debug.print("real-decode OK: max_diff={d}\n", .{max_diff});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "real-decode OK: max_diff={d}\n", .{max_diff});
 }
 
 test "paged attention vs TRUE attention (find kernel bug)" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -410,7 +417,7 @@ test "paged attention vs TRUE attention (find kernel bug)" {
 
     var md: f32 = 0;
     for (out_true, out_paged) |tr, pg| md = @max(md, @abs(tr - pg));
-    std.debug.print("TRUE-vs-PAGED: max_diff={d}\n", .{md});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "TRUE-vs-PAGED: max_diff={d}\n", .{md});
     if (md > 1e-2) return error.AttnBug;
 }
 // ─── G1 (lane-b1 2026-09-08): paridad flash-decoding split-K ──────────────
@@ -503,15 +510,15 @@ test "G1 split-K decode: paridad vs base y CPU (hd 128, multi-split)" {
         md_cpu = @max(md_cpu, @abs(c - s));
         md_base = @max(md_base, @abs(b - s));
         if (@abs(c - s) > 1e-2) {
-            std.debug.print("split mismatch at {d}: cpu={d} split={d}\n", .{ i, c, s });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "split mismatch at {d}: cpu={d} split={d}\n", .{ i, c, s });
             return error.SplitMismatch;
         }
     }
-    std.debug.print("G1 split OK: seq={d} max_diff_vs_cpu={d} max_diff_vs_base={d}\n", .{ seq_len, md_cpu, md_base });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "G1 split OK: seq={d} max_diff_vs_cpu={d} max_diff_vs_base={d}\n", .{ seq_len, md_cpu, md_base });
     if (md_base > 1e-2) {
         // Diferencia split-vs-base mayor que tol: ambas válidas vs CPU
         // pero divergen entre sí — reportar (no fatal si CPU aprueba).
-        std.debug.print("G1 nota: split vs base difiere {d} (ambas <1e-2 vs CPU OK)\n", .{md_base});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "G1 nota: split vs base difiere {d} (ambas <1e-2 vs CPU OK)\n", .{md_base});
     }
 }
 
@@ -621,7 +628,7 @@ test "G1c split-K cobertura: seq 1120 > 8×128 nominal (regresión truncada)" {
         const denom: f32 = if (@abs(c) > 0.05) @abs(c) else 0.05;
         rel_max = @max(rel_max, d_sc / denom);
     }
-    std.debug.print("G1c cobertura seq=1120: split_vs_cpu={d:.6} base_vs_cpu={d:.6} split_vs_base={d:.6} outliers>1e-2={d}/{d} rel_max={d:.4}\n", .{ md_split_cpu, md_base_cpu, md_base, outliers, out_cpu.len, rel_max });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "G1c cobertura seq=1120: split_vs_cpu={d:.6} base_vs_cpu={d:.6} split_vs_base={d:.6} outliers>1e-2={d}/{d} rel_max={d:.4}\n", .{ md_split_cpu, md_base_cpu, md_base, outliers, out_cpu.len, rel_max });
     // Gate: sin outliers sistemáticos. Truncación pura (pre-fix) daba
     // outliers masivos con rel_max >0.5; drift §3.1 = outliers aislados
     // con error relativo pequeño.

@@ -1,5 +1,12 @@
 //! P0-5 dp4a parity: iq3_s, iq2_s, iq4_xs vs scalar CPU ref.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const cudaz = @import("cudaz");
 const layer_kernels = @import("layer_kernels");
 const kv_quant = @import("kv_cache").kv_quant;
@@ -100,7 +107,7 @@ fn dp4aParityTest(allocator: std.mem.Allocator, qtype: u32, fmt: pa.QuantFormat,
         18 => "iq4xs",
         else => "?",
     };
-    std.debug.print("{s} dp4a M=1 k={d} n={d}: bad={d}/{d} max_rel={e} max_abs={e}\n", .{ tag, K, N, bad, N, max_rel, max_abs });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "{s} dp4a M=1 k={d} n={d}: bad={d}/{d} max_rel={e} max_abs={e}\n", .{ tag, K, N, bad, N, max_rel, max_abs });
     if (bad > 0) return error.Dp4aParityFailP05;
 }
 

@@ -9,6 +9,13 @@
 //!
 //! Disciplina GPU: .bench.lock no-bloqueante (60 s → SKIP). Sin CUDA: SKIP.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const builtin = @import("builtin");
 const cudaz = @import("cudaz");
 const moe_cuda = @import("moe_cuda");
@@ -30,7 +37,7 @@ const BenchLock = struct {
             f.close(io);
             waited += 5;
             if (waited >= 60) return error.BenchLockBusy;
-            std.debug.print("[moe_gather_test] .bench.lock ocupada, espero {d}s…\n", .{waited});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[moe_gather_test] .bench.lock ocupada, espero {d}s…\n", .{waited});
             var ts: std.c.timespec = .{ .sec = 5, .nsec = 0 };
             _ = std.c.nanosleep(&ts, null);
         }
@@ -72,7 +79,7 @@ const Rig = struct {
         const io = std.Io.Threaded.global_single_threaded.io();
         var lock = BenchLock.acquire(io) catch |e| {
             if (e == error.BenchLockBusy) {
-                std.debug.print("SKIP: .bench.lock ocupada\n", .{});
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: .bench.lock ocupada\n", .{});
                 return error.SkipZigTest;
             }
             return e;
@@ -156,7 +163,7 @@ const Rig = struct {
             try moe_cuda.dtoh(u8, got, self.dst_dev[b]);
             for (got, expected[b], 0..) |gv, ev_, i| {
                 if (gv != ev_) {
-                    std.debug.print("[gather:banco {d}] byte @{d}: gpu={d} esperado={d}\n", .{ b, i, gv, ev_ });
+                    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[gather:banco {d}] byte @{d}: gpu={d} esperado={d}\n", .{ b, i, gv, ev_ });
                     return error.GatherMismatch;
                 }
             }
@@ -306,5 +313,5 @@ test "E4 bench GB/s del gather fused (informativo)" {
     var ms: f32 = 0;
     try cudaz.cuEventElapsedTime(&ms, start, end);
     const gbs = @as(f64, @floatFromInt(total_bytes_per_iter)) * @as(f64, @floatFromInt(iters)) / (@as(f64, ms) / 1000.0) / 1e9;
-    std.debug.print("[E4 bench] gather fused: {d:.2} GB/s ({d} iters, {d} B/iter útil, {d:.2} ms total)\n", .{ gbs, iters, total_bytes_per_iter, ms });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[E4 bench] gather fused: {d:.2} GB/s ({d} iters, {d} B/iter útil, {d:.2} ms total)\n", .{ gbs, iters, total_bytes_per_iter, ms });
 }

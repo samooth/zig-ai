@@ -14,6 +14,13 @@
 //! nuevo (A2′/A3/…) moverlo de `upcoming` a `enabled` — el harness se vuelve
 //! estricto automáticamente.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const pa = @import("paged_attention");
 const kv_cache_mod = @import("kv_cache");
 const gguf = @import("gguf");
@@ -332,7 +339,7 @@ fn runFormat(gpa: std.mem.Allocator, fmt: QuantFormat) !void {
         }
     }
     if (!usable) {
-        std.debug.print("[{s}] SKIP_UNSTABLE: sin semilla con softmax estable y salida en rango\n", .{@tagName(fmt)});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] SKIP_UNSTABLE: sin semilla con softmax estable y salida en rango\n", .{@tagName(fmt)});
         return; // limitación del generador adversarial, no del kernel
     }
 
@@ -353,21 +360,21 @@ fn runFormat(gpa: std.mem.Allocator, fmt: QuantFormat) !void {
         max_diff = @max(max_diff, @abs(c - g));
         const diff = @abs(c - g);
         if (diff > tol_scale and !approxEq(c, g)) {
-            if (bad < 4 or (fmt == .q4_0 and bad <= 12)) std.debug.print("[{s}] mismatch {d}: cpu={d} gpu={d}\n", .{ @tagName(fmt), i, c, g });
+            if (bad < 4 or (fmt == .q4_0 and bad <= 12)) try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] mismatch {d}: cpu={d} gpu={d}\n", .{ @tagName(fmt), i, c, g });
             bad += 1;
             if (bad == 1 and fmt == .q4_1) {
                 // Hexdump grupo 0 de la región K del primer bloque físico
                 const bt_d = kv.getBlockTable(seq_id).?;
                 const phys0 = bt_d.getPhysical(0).?;
                 const dd = kv.getBlockData(phys0);
-                std.debug.print("[q4_1-diag] K[0..40]: ", .{});
-                for (dd[0..40]) |b| std.debug.print("{x:0>2} ", .{b});
-                std.debug.print("\n", .{});
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[q4_1-diag] K[0..40]: ", .{});
+                for (dd[0..40]) |b| try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "{x:0>2} ", .{b});
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "\n", .{});
             }
         }
     }
     if (bad > 0) {
-        std.debug.print("[{s}] FALLO: {d}/{d} mismatches, max_diff={d}\n", .{ @tagName(fmt), bad, q_stride, max_diff });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] FALLO: {d}/{d} mismatches, max_diff={d}\n", .{ @tagName(fmt), bad, q_stride, max_diff });
         if (fmt == .q4_0) {
             // Diagnóstico A/B: ¿se parece la GPU a la ref interleave o a la secuencial?
             const kb2 = regionBytes(fmt, elems);
@@ -400,11 +407,11 @@ fn runFormat(gpa: std.mem.Allocator, fmt: QuantFormat) !void {
                 d_int = @max(d_int, @abs(g - c));
                 d_seq = @max(d_seq, @abs(g - sq_));
             }
-            std.debug.print("[q4_0-diag] max|gpu-interleave|={d:.4}  max|gpu-secuencial|={d:.4}\n", .{ d_int, d_seq });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[q4_0-diag] max|gpu-interleave|={d:.4}  max|gpu-secuencial|={d:.4}\n", .{ d_int, d_seq });
         }
         return error.FusedDecodeMismatch;
     }
-    std.debug.print("[{s}] OK fused-decode vs dequant-ref (max_diff={d})\n", .{ @tagName(fmt), max_diff });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] OK fused-decode vs dequant-ref (max_diff={d})\n", .{ @tagName(fmt), max_diff });
 
     if (hasConstantEncoder(fmt)) {
         try constantCheck(gpa, &kv, &engine, seq_id, elems, fmt, query, out_gpu);
@@ -473,15 +480,15 @@ fn constantCheck(
     var bad: usize = 0;
     for (out_gpu, 0..) |v, i| {
         if (@abs(v - v0) > 2e-2 * @max(1.0, @abs(v0))) {
-            if (bad < 4) std.debug.print("[{s}-cst] out[{d}] = {d} (esperado {d})\n", .{ @tagName(fmt), i, v, v0 });
+            if (bad < 4) try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}-cst] out[{d}] = {d} (esperado {d})\n", .{ @tagName(fmt), i, v, v0 });
             bad += 1;
         }
     }
     if (bad > 0) {
-        std.debug.print("[{s}-cst] FALLO: {d}/{d}\n", .{ @tagName(fmt), bad, out_gpu.len });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}-cst] FALLO: {d}/{d}\n", .{ @tagName(fmt), bad, out_gpu.len });
         return error.ConstantMismatch;
     }
-    std.debug.print("[{s}-cst] OK: out uniforme {d:.3}\n", .{ @tagName(fmt), v0 });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}-cst] OK: out uniforme {d:.3}\n", .{ @tagName(fmt), v0 });
 }
 
 /// Prefill q4_0 causal: para cada posición p se atiende a tokens [0..p].
@@ -665,7 +672,7 @@ test "prefill q4_0 causal vs referencia dequantBlock" {
             const gf: f32 = @floatCast(gv);
             if (@abs(c - gf) > 0.05) mbad += 1;
         }
-        std.debug.print("[dif-first] mismatches={d}/{d} {s}\n", .{ mbad, out_cpu.len, if (mbad == 0) "MANUAL OK" else "MANUAL FALLA" });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[dif-first] mismatches={d}/{d} {s}\n", .{ mbad, out_cpu.len, if (mbad == 0) "MANUAL OK" else "MANUAL FALLA" });
     }
 
     // 3) Wrapper x2: primera y segunda llamada consecutivas
@@ -690,7 +697,7 @@ test "prefill q4_0 causal vs referencia dequantBlock" {
         if (@abs(c - @as(f32, @floatCast(v1))) > 0.05) b1 += 1;
         if (@abs(c - @as(f32, @floatCast(v2))) > 0.05) b2 += 1;
     }
-    std.debug.print("[wrapper-x2] 1a-llamada={d}/384  2a-llamada={d}/384\n", .{ b1, b2 });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[wrapper-x2] 1a-llamada={d}/384  2a-llamada={d}/384\n", .{ b1, b2 });
 
     try engine.prefillDevice(0, d_q, d_out, kv.block_alloc, bt_host, n_queries, 0, null);
     try cudaz.cuStreamSynchronize(gpu_stream);
@@ -707,15 +714,15 @@ test "prefill q4_0 causal vs referencia dequantBlock" {
     for (out_cpu, out_gpu, 0..) |c, g, i| {
         max_diff = @max(max_diff, @abs(c - g));
         if (@abs(c - g) > tol_scale and !approxEq(c, g)) {
-            if (bad < 4) std.debug.print("[prefill-q4_0] mismatch {d}: cpu={d} gpu={d}\n", .{ i, c, g });
+            if (bad < 4) try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[prefill-q4_0] mismatch {d}: cpu={d} gpu={d}\n", .{ i, c, g });
             bad += 1;
         }
     }
     if (bad > 0) {
-        std.debug.print("[prefill-q4_0] FALLO: {d}/{d}, max_diff={d}\n", .{ bad, out_cpu.len, max_diff });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[prefill-q4_0] FALLO: {d}/{d}, max_diff={d}\n", .{ bad, out_cpu.len, max_diff });
         return error.PrefillMismatch;
     }
-    std.debug.print("[prefill-q4_0] OK\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[prefill-q4_0] OK\n", .{});
 }
 
 test "prefill iq4_xs causal vs referencia dequantBlock" {
@@ -786,15 +793,15 @@ test "prefill iq4_xs causal vs referencia dequantBlock" {
     for (out_cpu, out_gpu, 0..) |c, g, i| {
         max_diff = @max(max_diff, @abs(c - g));
         if (@abs(c - g) > tol_scale and !approxEq(c, g)) {
-            if (bad < 4) std.debug.print("[prefill-iq4_xs] mismatch {d}: cpu={d} gpu={d}\n", .{ i, c, g });
+            if (bad < 4) try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[prefill-iq4_xs] mismatch {d}: cpu={d} gpu={d}\n", .{ i, c, g });
             bad += 1;
         }
     }
     if (bad > 0) {
-        std.debug.print("[prefill-iq4_xs] FALLO: {d}/{d}, max_diff={d}\n", .{ bad, out_cpu.len, max_diff });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[prefill-iq4_xs] FALLO: {d}/{d}, max_diff={d}\n", .{ bad, out_cpu.len, max_diff });
         return error.PrefillMismatch;
     }
-    std.debug.print("[prefill-iq4_xs] OK\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[prefill-iq4_xs] OK\n", .{});
 }
 
 test "prefill q8_k causal vs referencia dequantBlock" {
@@ -866,15 +873,15 @@ test "prefill q8_k causal vs referencia dequantBlock" {
     for (out_cpu, out_gpu, 0..) |c, g, i| {
         max_diff = @max(max_diff, @abs(c - g));
         if (@abs(c - g) > tol_scale and !approxEq(c, g)) {
-            if (bad < 4) std.debug.print("[prefill-q8_k] mismatch {d}: cpu={d} gpu={d}\n", .{ i, c, g });
+            if (bad < 4) try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[prefill-q8_k] mismatch {d}: cpu={d} gpu={d}\n", .{ i, c, g });
             bad += 1;
         }
     }
     if (bad > 0) {
-        std.debug.print("[prefill-q8_k] FALLO: {d}/{d}, max_diff={d}\n", .{ bad, out_cpu.len, max_diff });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[prefill-q8_k] FALLO: {d}/{d}, max_diff={d}\n", .{ bad, out_cpu.len, max_diff });
         return error.PrefillMismatch;
     }
-    std.debug.print("[prefill-q8_k] OK\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[prefill-q8_k] OK\n", .{});
 }
 
 /// Lane A — formatos con kernel de prefill en fused_decode_extra.cubin (19).
@@ -958,15 +965,15 @@ fn runUniversalPrefill(gpa: std.mem.Allocator, fmt: QuantFormat) !void {
     for (out_cpu, out_gpu, 0..) |c, g, i| {
         max_diff = @max(max_diff, @abs(c - g));
         if (@abs(c - g) > tol_scale and !approxEq(c, g)) {
-            if (bad < 4) std.debug.print("[prefill-univ-{s}] mismatch {d}: cpu={d} gpu={d}\n", .{ @tagName(fmt), i, c, g });
+            if (bad < 4) try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[prefill-univ-{s}] mismatch {d}: cpu={d} gpu={d}\n", .{ @tagName(fmt), i, c, g });
             bad += 1;
         }
     }
     if (bad > 0) {
-        std.debug.print("[prefill-univ-{s}] FALLO: {d}/{d}, max_diff={d}\n", .{ @tagName(fmt), bad, out_cpu.len, max_diff });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[prefill-univ-{s}] FALLO: {d}/{d}, max_diff={d}\n", .{ @tagName(fmt), bad, out_cpu.len, max_diff });
         return error.PrefillMismatch;
     }
-    std.debug.print("[prefill-univ-{s}] OK\n", .{@tagName(fmt)});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[prefill-univ-{s}] OK\n", .{@tagName(fmt)});
 }
 
 // A5 (request lane-c 20:25): prefill NO-causal — todas las filas atienden
@@ -1088,10 +1095,10 @@ test "prefill no-causal fp16 y q4_k" {
             if (@abs(c - g) > tol_scale and !approxEq(c, g)) bad += 1;
         }
         if (bad > 0) {
-            std.debug.print("[no-causal-{s}] FALLO: {d}/{d}, max_diff={d}\n", .{ @tagName(fmt), bad, out_cpu.len, max_diff });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[no-causal-{s}] FALLO: {d}/{d}, max_diff={d}\n", .{ @tagName(fmt), bad, out_cpu.len, max_diff });
             return error.NoCausalMismatch;
         }
-        std.debug.print("[no-causal-{s}] OK ({d} elems, max_diff={d})\n", .{ @tagName(fmt), out_cpu.len, max_diff });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[no-causal-{s}] OK ({d} elems, max_diff={d})\n", .{ @tagName(fmt), out_cpu.len, max_diff });
     }
 }
 
@@ -1270,9 +1277,9 @@ test "B-a1 prefill q4_k g8: paridad pool raw hd128" {
         max_rel = @max(max_rel, rel);
         if (rel > 2e-3) bad += 1;
     }
-    std.debug.print("[B-a1] prefill q4_k g8 hd128: bad={d}/{d}, max_rel={e}\n", .{ bad, out_cpu.len, max_rel });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[B-a1] prefill q4_k g8 hd128: bad={d}/{d}, max_rel={e}\n", .{ bad, out_cpu.len, max_rel });
     if (bad > 0) return error.Ba1Q4KParityMismatch;
-    std.debug.print("[B-a1] prefill q4_k g8 paridad OK\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[B-a1] prefill q4_k g8 paridad OK\n", .{});
 }
 
 test "prefill universal causal" {
@@ -1282,12 +1289,12 @@ test "prefill universal causal" {
     var failed: usize = 0;
     inline for (universal_prefill_formats) |fmt| {
         runUniversalPrefill(gpa, fmt) catch |e| {
-            std.debug.print("[{s}] >>> ERROR prefill universal: {s}\n", .{ @tagName(fmt), @errorName(e) });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] >>> ERROR prefill universal: {s}\n", .{ @tagName(fmt), @errorName(e) });
             failed += 1;
         };
     }
     if (failed > 0) {
-        std.debug.print("prefill universal: {d}/{d} formatos en rojo\n", .{ failed, universal_prefill_formats.len });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "prefill universal: {d}/{d} formatos en rojo\n", .{ failed, universal_prefill_formats.len });
         return error.UniversalPrefillMismatch;
     }
 }
@@ -1496,10 +1503,10 @@ test "regresion q4_0 decode legacy geometria suite-kvq" {
         const g: f32 = x;
         max_diff = @max(max_diff, @abs(g - ref[i]));
         if (@abs(g - ref[i]) > 2e-3 and bad < 8)
-            std.debug.print("[repro-b] idx={d}: gpu={d} cpu={d}\n", .{ i, g, ref[i] });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[repro-b] idx={d}: gpu={d} cpu={d}\n", .{ i, g, ref[i] });
         if (@abs(g - ref[i]) > 2e-3) bad += 1;
     }
-    std.debug.print("[repro-b] q4_0 replica exacta suite-kvq: bad={d}/{d} max_diff={d} ref[0]={d}\n", .{ bad, q_stride, max_diff, ref[0] });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[repro-b] q4_0 replica exacta suite-kvq: bad={d}/{d} max_diff={d} ref[0]={d}\n", .{ bad, q_stride, max_diff, ref[0] });
 }
 // Invariante de convención canónica (Lane A, tras el ticket q4_0 idx0):
 // para TODO formato con encoder CPU, kv_quant.decode(bytes) debe coincidir
@@ -1546,15 +1553,15 @@ test "roundtrip kv_quant encode/decode convencion canonica gguf" {
             const kv: f32 = @floatCast(out_kvq16[i]);
             if (@abs(gv16 - kv) > 0 and !(gv16 != gv16 and kv != kv)) bad += 1;
             if (bad == 1)
-                std.debug.print("[conv-{s}] elem {d}: gguf={d} kv_quant={d}\n", .{ @tagName(fmt), i, gv, kv });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[conv-{s}] elem {d}: gguf={d} kv_quant={d}\n", .{ @tagName(fmt), i, gv, kv });
         }
         if (bad > 0) {
-            std.debug.print("[conv-{s}] FALLO: {d}/{d} elementos divergentes\n", .{ @tagName(fmt), bad, n });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[conv-{s}] FALLO: {d}/{d} elementos divergentes\n", .{ @tagName(fmt), bad, n });
             return error.ConventionMismatch;
         }
         audited += 1;
     }
-    std.debug.print("convencion canonica: {d}/{d} formatos auditados OK\n", .{ audited, formats.len });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "convencion canonica: {d}/{d} formatos auditados OK\n", .{ audited, formats.len });
 }
 
 // Regresión OOB colas parciales (observación lane-F @aaccc3a): dequantBlock
@@ -1655,13 +1662,13 @@ test "decodeDevice iq1_s e iq3_s device→device" {
             if (@abs(c - gd) > tol_scale and !approxEq(c, gd)) bad += 1;
             if (@abs(gg - gd) > tol_scale and !approxEq(gg, gd)) bad_vs_gen += 1;
         }
-        std.debug.print("[devdev-{s}] vs_cpu={d}/64 mal (max={d:.4}) | gen-vs-devdev difieren={d}/64\n", .{ @tagName(fmt), bad, max_diff, bad_vs_gen });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[devdev-{s}] vs_cpu={d}/64 mal (max={d:.4}) | gen-vs-devdev difieren={d}/64\n", .{ @tagName(fmt), bad, max_diff, bad_vs_gen });
         if (bad > 0) {
-            std.debug.print("[devdev-{s}] FALLO vs CPU", .{@tagName(fmt)});
-            if (bad_vs_gen == 0) std.debug.print(" PERO == ruta genérica ⇒ el genérico TAMBIÉN diverge del oráculo en este setup\n", .{}) else std.debug.print(" y además difiere de la genérica\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[devdev-{s}] FALLO vs CPU", .{@tagName(fmt)});
+            if (bad_vs_gen == 0) try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), " PERO == ruta genérica ⇒ el genérico TAMBIÉN diverge del oráculo en este setup\n", .{}) else try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), " y además difiere de la genérica\n", .{});
             return error.DecodeDeviceMismatch;
         }
-        std.debug.print("[devdev-{s}] OK ({d} dims, max_diff={d})\n", .{ @tagName(fmt), q_stride, max_diff });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[devdev-{s}] OK ({d} dims, max_diff={d})\n", .{ @tagName(fmt), q_stride, max_diff });
     }
 }
 
@@ -1743,7 +1750,7 @@ fn runBenchFormat(gpa: std.mem.Allocator, fmt: QuantFormat) !void {
     // Bytes KV efectivos: chunk completo × K+V
     const kb = regionBytes(fmt, elems);
     const mb_kv = @as(f64, @floatFromInt(nb_total * kb * 2)) / (1024.0 * 1024.0);
-    std.debug.print("[bench-prefill] {s}| {d:8.3} ms/chunk({d} tok)  KV={d:7.1} MB  {d:8.1} GB/s\n", .{ @tagName(fmt), ms, n_chunk, mb_kv, mb_kv / (ms / 1000.0) / 1024.0 });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[bench-prefill] {s}| {d:8.3} ms/chunk({d} tok)  KV={d:7.1} MB  {d:8.1} GB/s\n", .{ @tagName(fmt), ms, n_chunk, mb_kv, mb_kv / (ms / 1000.0) / 1024.0 });
 }
 
 test "BENCH prefill por formato" {
@@ -1753,14 +1760,14 @@ test "BENCH prefill por formato" {
     debugz.init();
     inline for ([_]QuantFormat{ .fp16, .q8_0, .q4_0, .q4_k, .q8_k, .iq4_xs, .iq1_s, .iq3_s, .q6_k }) |fmt| {
         runBenchFormat(gpa, fmt) catch |e| {
-            std.debug.print("[bench-prefill-{s}] SKIP: {s}\n", .{ @tagName(fmt), @errorName(e) });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[bench-prefill-{s}] SKIP: {s}\n", .{ @tagName(fmt), @errorName(e) });
         };
     }
 }
 
 test "fused decode GPU por formato vs referencia dequantBlock" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -1768,12 +1775,12 @@ test "fused decode GPU por formato vs referencia dequantBlock" {
     var failed: usize = 0;
     inline for (enabled_formats) |fmt| {
         runFormat(gpa, fmt) catch |e| {
-            std.debug.print("[{s}] >>> ERROR: {s}\n", .{ @tagName(fmt), @errorName(e) });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] >>> ERROR: {s}\n", .{ @tagName(fmt), @errorName(e) });
             failed += 1;
         };
     }
     if (failed > 0) {
-        std.debug.print("harness: {d}/{d} formatos en rojo\n", .{ failed, enabled_formats.len });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "harness: {d}/{d} formatos en rojo\n", .{ failed, enabled_formats.len });
         return error.FusedDecodeMismatch;
     }
 }
@@ -1785,7 +1792,7 @@ test "fused decode GPU por formato vs referencia dequantBlock" {
 // GPU (flock .bench.lock si suite completa; solo-corre con test-pafused).
 test "B-a3 eval: qgemm q6_k M=1 vs M=8 — escala y paridad" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -1858,7 +1865,7 @@ test "B-a3 eval: qgemm q6_k M=1 vs M=8 — escala y paridad" {
             if (rel > 5e-3) bad += 1;
         }
     }
-    std.debug.print("B-a3 paridad M=8 qgemm q6_k: bad={d}/{d} max_rel={e}\n", .{ bad, 8 * N, max_rel });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "B-a3 paridad M=8 qgemm q6_k: bad={d}/{d} max_rel={e}\n", .{ bad, 8 * N, max_rel });
     if (bad > 0) return error.Ba3ParityMismatch;
 
     // Bench: M=1 ×8 launches vs M=8 ×1 launch (mismo trabajo total).
@@ -1880,7 +1887,7 @@ test "B-a3 eval: qgemm q6_k M=1 vs M=8 — escala y paridad" {
         try cudaz.cuStreamSynchronize(stream);
         ns8 = @min(ns8, t.read());
     }
-    std.debug.print("BENCH B-a3 qgemm q6_k k={d} n={d}: 8×M1={d:.3}ms vs 1×M8={d:.3}ms ratio={d:.2}x\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "BENCH B-a3 qgemm q6_k k={d} n={d}: 8×M1={d:.3}ms vs 1×M8={d:.3}ms ratio={d:.2}x\n", .{
         K,                                                                    N,
         @as(f64, @floatFromInt(ns1)) / 1e6,                                   @as(f64, @floatFromInt(ns8)) / 1e6,
         @as(f64, @floatFromInt(ns1)) / @as(f64, @floatFromInt(@max(ns8, 1))),
@@ -1897,7 +1904,7 @@ test "B-a3 eval: qgemm q6_k M=1 vs M=8 — escala y paridad" {
 // son k∈{3072,8192}, n∈{1024..8192}).
 test "a-U3 q3_k M=1 dp4a: paridad vs case 6 escalar + bench" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -2007,11 +2014,11 @@ test "a-U3 q3_k M=1 dp4a: paridad vs case 6 escalar + bench" {
             bad += 1;
             if (first_bad == null) {
                 first_bad = j;
-                std.debug.print("  first_bad row {d}: dp4a={d:.6} cpu_q8={d:.6} rel={e}\n", .{ j, c_new[j], dot_q8, rel });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  first_bad row {d}: dp4a={d:.6} cpu_q8={d:.6} rel={e}\n", .{ j, c_new[j], dot_q8, rel });
             }
         }
     }
-    std.debug.print("a-U3 q3_k dp4a M=1: bad={d}/{d} max_rel={e} max_abs={e}\n", .{ bad, N, max_rel, max_abs });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "a-U3 q3_k dp4a M=1: bad={d}/{d} max_rel={e} max_abs={e}\n", .{ bad, N, max_rel, max_abs });
     if (bad > 0) return error.Au3Q3kDp4aMismatch;
 
     // Bench kernel puro: escalar vs dp4a (mismo GEMV).
@@ -2027,7 +2034,7 @@ test "a-U3 q3_k M=1 dp4a: paridad vs case 6 escalar + bench" {
         try cudaz.cuStreamSynchronize(stream);
         ns_new = @min(ns_new, t.read());
     }
-    std.debug.print("BENCH a-U3 q3_k k={d} n={d}: escalar={d:.3}ms dp4a={d:.3}ms speedup={d:.2}x\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "BENCH a-U3 q3_k k={d} n={d}: escalar={d:.3}ms dp4a={d:.3}ms speedup={d:.2}x\n", .{
         K,                                                                          N,
         @as(f64, @floatFromInt(ns_ref)) / 1e6,                                      @as(f64, @floatFromInt(ns_new)) / 1e6,
         @as(f64, @floatFromInt(ns_ref)) / @as(f64, @floatFromInt(@max(ns_new, 1))),
@@ -2125,7 +2132,7 @@ test "a-U3 q3_k M=1 dp4a SPLIT: paridad S=2/S=4" {
             if (rel > 1e-2) bad += 1;
         }
         const split: usize = if (N <= 1024) 4 else 2;
-        std.debug.print("a-U3 SPLIT n={d} S={d}: bad={d}/{d} max_rel={e}\n", .{ N, split, bad, N, max_rel });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "a-U3 SPLIT n={d} S={d}: bad={d}/{d} max_rel={e}\n", .{ N, split, bad, N, max_rel });
         if (bad > 0) return error.Au3Q3kSplitMismatch;
     }
 }
@@ -2213,13 +2220,13 @@ test "a-U3 bench: 7 geometrías GEMV 3B (escalar vs dp4a)" {
         sum_scalar += us_s;
         sum_dp4a += us_d;
         const mb = @as(f64, @floatFromInt(w_bytes.len)) / 1e6;
-        std.debug.print("GEMV {s:>9} n={d:5} k={d:5}: escalar={d:7.1}µs dp4a={d:7.1}µs ({d:.2}x) BW dp4a={d:5.0} GB/s\n", .{
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "GEMV {s:>9} n={d:5} k={d:5}: escalar={d:7.1}µs dp4a={d:7.1}µs ({d:.2}x) BW dp4a={d:5.0} GB/s\n", .{
             g.name,                   N,    K,
             us_s,                     us_d, us_s / @max(us_d, 1),
             mb / (us_d * 1e-6) / 1.0,
         });
     }
-    std.debug.print("SUMA/capa: escalar={d:.1}µs dp4a={d:.1}µs ({d:.2}x) — E2E ref PERF_STAGE: GEMV≈616µs de 712µs/capa\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SUMA/capa: escalar={d:.1}µs dp4a={d:.1}µs ({d:.2}x) — E2E ref PERF_STAGE: GEMV≈616µs de 712µs/capa\n", .{
         sum_scalar, sum_dp4a, sum_scalar / @max(sum_dp4a, 1),
     });
 
@@ -2267,7 +2274,7 @@ test "a-U3 bench: 7 geometrías GEMV 3B (escalar vs dp4a)" {
         }
         const us_s: f64 = @as(f64, @floatFromInt(ns_s)) / 1e3;
         const mb = @as(f64, @floatFromInt(w_bytes.len)) / 1e6;
-        std.debug.print("LM_HEAD q6_k n=128256 k=3072: escalar={d:.1}µs BW={d:.0} GB/s (grid 16032 bloques — saturado: el cuello es ALU)\n", .{ us_s, mb / (us_s * 1e-6) });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "LM_HEAD q6_k n=128256 k=3072: escalar={d:.1}µs BW={d:.0} GB/s (grid 16032 bloques — saturado: el cuello es ALU)\n", .{ us_s, mb / (us_s * 1e-6) });
     }
 }
 
@@ -2387,7 +2394,7 @@ test "a-U3 repack128: paridad + bench (hipótesis coalescing)" {
             if (dd > 1e-2) bad += 1;
         }
         if (bad > 0) {
-            std.debug.print("  REPACK n={d}: bad={d} max_rel={e} first: pk={d:.6} 110={d:.6}\n", .{ N, bad, max_rel, cpk[0], c110[0] });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  REPACK n={d}: bad={d} max_rel={e} first: pk={d:.6} 110={d:.6}\n", .{ N, bad, max_rel, cpk[0], c110[0] });
             return error.Au3RepackMismatch;
         }
 
@@ -2412,13 +2419,13 @@ test "a-U3 repack128: paridad + bench (hipótesis coalescing)" {
         sum_110 += us_110;
         sum_pk += us_pk;
         const mb = @as(f64, @floatFromInt(w_pk.len)) / 1e6;
-        std.debug.print("REPACK {s:>9} n={d:5} k={d:5}: dp4a110={d:7.1}µs packed={d:7.1}µs ({d:.2}x) BW pk={d:5.0} GB/s\n", .{
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "REPACK {s:>9} n={d:5} k={d:5}: dp4a110={d:7.1}µs packed={d:7.1}µs ({d:.2}x) BW pk={d:5.0} GB/s\n", .{
             g.name,              N,     K,
             us_110,              us_pk, us_110 / @max(us_pk, 1),
             mb / (us_pk * 1e-6),
         });
     }
-    std.debug.print("SUMA/capa: dp4a110={d:.1}µs packed={d:.1}µs ({d:.2}x) — BW útil x128/110 = {d:.2}x teórico\n", .{
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SUMA/capa: dp4a110={d:.1}µs packed={d:.1}µs ({d:.2}x) — BW útil x128/110 = {d:.2}x teórico\n", .{
         sum_110, sum_pk, sum_110 / @max(sum_pk, 1), 128.0 / 110.0,
     });
 }
@@ -2466,7 +2473,7 @@ test "1.15 gumbel sampler: paridad estadística GPU vs softmax" {
     // Analítica: e^5≈148.4; p_hot = 10*148.4/(990+10*148.4) = 0.5997.
     const p_hot = 10.0 * 148.413 / (990.0 + 10.0 * 148.413);
     const p_meas = @as(f64, @floatFromInt(counts_hot)) / @as(f64, @floatFromInt(N));
-    std.debug.print("1.15 gumbel: p_hot analitica={d:.4} medida={d:.4} (N={d})\n", .{ p_hot, p_meas, N });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "1.15 gumbel: p_hot analitica={d:.4} medida={d:.4} (N={d})\n", .{ p_hot, p_meas, N });
     try std.testing.expect(@abs(p_meas - p_hot) < 0.02);
 
     // (c) rep_penalty: hot token 0 penalizado 2.0 (logit>0 ⇒ /2 ⇒ 2.5):
@@ -2486,7 +2493,7 @@ test "1.15 gumbel sampler: paridad estadística GPU vs softmax" {
     // (990 + 9·e^5 + e^2.5) = 0.0052 — el KERNEL ya lo daba (0.0057).
     const p0_after = 12.182 / (990.0 + 9.0 * 148.413 + 12.182);
     const p0_meas = @as(f64, @floatFromInt(counts_pen)) / @as(f64, @floatFromInt(N));
-    std.debug.print("1.15 gumbel pen: p_tok0 {d:.4} -> {d:.4} medida={d:.4}\n", .{ p0_before, p0_after, p0_meas });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "1.15 gumbel pen: p_tok0 {d:.4} -> {d:.4} medida={d:.4}\n", .{ p0_before, p0_after, p0_meas });
     try std.testing.expect(@abs(p0_meas - p0_after) < 0.02);
 }
 
@@ -2599,7 +2606,7 @@ test "a-U3 qkv fused: paridad 1-launch vs 3-launch" {
         if (@abs(fus_k[j] - sep_k[j]) > 1e-4) bad += 1;
         if (@abs(fus_v[j] - sep_v[j]) > 1e-4) bad += 1;
     }
-    std.debug.print("a-U3 qkv fused: bad={d}/{d} max_abs={e} (fused vs separado)\n", .{ bad, n_q + 2 * n_kv, max_abs });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "a-U3 qkv fused: bad={d}/{d} max_abs={e} (fused vs separado)\n", .{ bad, n_q + 2 * n_kv, max_abs });
     if (bad > 0) return error.Au3QkvFusedMismatch;
 }
 
@@ -2697,7 +2704,7 @@ test "regresión c817c4a: q4gemmMDp4a M=8 paridad [M][N]" {
             if (rel > 1e-2) bad += 1;
         }
     }
-    std.debug.print("regresión c817c4a M=8: bad={d}/{d} max_rel={e}\n", .{ bad, M * N, max_rel });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "regresión c817c4a M=8: bad={d}/{d} max_rel={e}\n", .{ bad, M * N, max_rel });
     if (bad > 0) return error.CrowRegression;
 }
 
@@ -2805,12 +2812,12 @@ fn dp4aParityTest(
             bad += 1;
             if (first_bad == null) {
                 first_bad = j;
-                std.debug.print("  first_bad row {d}: dp4a={d:.6} cpu_q8={d:.6} rel={e}\n", .{ j, c_dp4a[j], dot_q8, rel });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  first_bad row {d}: dp4a={d:.6} cpu_q8={d:.6} rel={e}\n", .{ j, c_dp4a[j], dot_q8, rel });
             }
         }
     }
     const tag = switch (qtype) { 8 => "iq3s", 9 => "iq2s", 18 => "iq4xs", else => "?" };
-    std.debug.print("{s} dp4a M=1 k={d} n={d}: bad={d}/{d} max_rel={e} max_abs={e}\n", .{ tag, K, N, bad, N, max_rel, max_abs });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "{s} dp4a M=1 k={d} n={d}: bad={d}/{d} max_rel={e} max_abs={e}\n", .{ tag, K, N, bad, N, max_rel, max_abs });
     if (bad > 0) {
         return error.Dp4aParityFail;
     }
@@ -2942,7 +2949,7 @@ test "dev-IQ dp4a bench: iq3_s/iq2_s/iq4_xs M=1 speedup vs escalar" {
             try cudaz.cuStreamSynchronize(stream);
             ns_dp4a = @min(ns_dp4a, t.read());
         }
-        std.debug.print("BENCH {s} k={d} n={d}: escalar={d:.3}ms dp4a={d:.3}ms speedup={d:.2}x\n", .{
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "BENCH {s} k={d} n={d}: escalar={d:.3}ms dp4a={d:.3}ms speedup={d:.2}x\n", .{
             case_val.tag,
             K,
             case_val.n,

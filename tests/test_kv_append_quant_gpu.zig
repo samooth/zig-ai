@@ -3,6 +3,13 @@
 //! kernels fusionados (decode + prefill) vs referencia CPU sobre los valores
 //! dequantizados. Cubre q8_0 y q4_0. Se salta si CUDA no está disponible.
 const std = @import("std");
+
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
+    try stdout_writer.interface.print(fmt, args);
+}
 const pa = @import("paged_attention");
 const cudaz = @import("cudaz");
 const layer_kernels = @import("layer_kernels");
@@ -154,15 +161,15 @@ fn cpuRegionBytes(allocator: std.mem.Allocator, spec: FormatSpec, tokens: []cons
 fn dumpDiff(tag: []const u8, b: usize, got: []const u8, exp: []const u8) void {
     for (got, exp, 0..) |gv, ev, i| {
         if (gv != ev) {
-            std.debug.print("[{s} blk={d}] primer byte distinto en {d} (grupo {d}): gpu={d} cpu={d}\n", .{ tag, b, i, i / specFor(.q8_0).group_bytes, gv, ev });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s} blk={d}] primer byte distinto en {d} (grupo {d}): gpu={d} cpu={d}\n", .{ tag, b, i, i / specFor(.q8_0).group_bytes, gv, ev });
             break;
         }
     }
-    std.debug.print("[{s} blk={d}] got[0..36]:", .{ tag, b });
-    for (got[0..@min(36, got.len)]) |gv| std.debug.print(" {x:0>2}", .{gv});
-    std.debug.print("\n[{s} blk={d}] exp[0..36]:", .{ tag, b });
-    for (exp[0..@min(36, exp.len)]) |ev| std.debug.print(" {x:0>2}", .{ev});
-    std.debug.print("\n", .{});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s} blk={d}] got[0..36]:", .{ tag, b });
+    for (got[0..@min(36, got.len)]) |gv| try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), " {x:0>2}", .{gv});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "\n[{s} blk={d}] exp[0..36]:", .{ tag, b });
+    for (exp[0..@min(36, exp.len)]) |ev| try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), " {x:0>2}", .{ev});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "\n", .{});
 }
 
 test "append cuantizado produce bytes bit-exactos vs codificador CPU (q8_0, q4_0, q4_k, q8_k, iq1_s)" {
@@ -185,7 +192,7 @@ test "append cuantizado produce bytes bit-exactos vs codificador CPU (q8_0, q4_0
         pa.QuantFormat.iq3_s,
     }) |fmt| {
         if (!cudaz.isCudaAvailable()) {
-            std.debug.print("SKIP: CUDA no disponible\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
             return error.SkipZigTest;
         }
         const gpa = std.testing.allocator;
@@ -286,7 +293,7 @@ test "append cuantizado produce bytes bit-exactos vs codificador CPU (q8_0, q4_0
                                             else => {},
                                         }
                                     }
-                                    std.debug.print("[escalas {s} SB{d}] gpu={any}\n                 cpu={any}\n", .{ spec.tag, s, ls_gpu, ls_cpu });
+                                    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[escalas {s} SB{d}] gpu={any}\n                 cpu={any}\n", .{ spec.tag, s, ls_gpu, ls_cpu });
                                 }
                             }
                         }
@@ -309,33 +316,33 @@ test "append cuantizado produce bytes bit-exactos vs codificador CPU (q8_0, q4_0
                             mo = @max(mo, off[sbi]);
                             mx_all = @max(mx_all, mx);
                         }
-                        std.debug.print("  CPU k_host[0..8]=[", .{});
-                        for (0..8) |ii| std.debug.print("{s}{d:.6}", .{ if (ii > 0) " " else "", exp_src[ii] });
-                        std.debug.print("]\n", .{});
+                        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  CPU k_host[0..8]=[", .{});
+                        for (0..8) |ii| try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "{s}{d:.6}", .{ if (ii > 0) " " else "", exp_src[ii] });
+                        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "]\n", .{});
                         if (spec.fmt == .iq4_xs) {
                             const dd = if (mx_all > 0) mx_all / (113.0 * 31.0) else 1.0;
-                            std.debug.print("  CPU d={e} ls=[", .{dd});
+                            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  CPU d={e} ls=[", .{dd});
                             for (0..8) |sbi| {
                                 const lsv = 32 + @as(i32, @intFromFloat(@ceil(span[sbi] / (113.0 * dd))));
-                                std.debug.print("{s}{d}", .{ if (sbi > 0) " " else "", @min(@max(lsv, 33), 63) });
+                                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "{s}{d}", .{ if (sbi > 0) " " else "", @min(@max(lsv, 33), 63) });
                             }
-                            std.debug.print("]\n", .{});
+                            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "]\n", .{});
                         } else if (spec.fmt == .q8_k) {
                             const dd = if (mx_all > 0) mx_all / 127.0 else 1.0;
-                            std.debug.print("  CPU(q8_k) d={e} amax=[", .{dd});
-                            for (0..8) |sbi| std.debug.print("{s}{d:.6}", .{ if (sbi > 0) " " else "", span[sbi] });
-                            std.debug.print("]\n", .{});
+                            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  CPU(q8_k) d={e} amax=[", .{dd});
+                            for (0..8) |sbi| try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "{s}{d:.6}", .{ if (sbi > 0) " " else "", span[sbi] });
+                            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "]\n", .{});
                         } else {
                             const dd = if (ms > 0) ms / (15.0 * 63.0) else 1.0;
                             const dm = if (mo > 0) mo / 63.0 else 1.0;
-                            std.debug.print("  CPU d={e} dmin={e}\n", .{ dd, dm });
+                            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  CPU d={e} dmin={e}\n", .{ dd, dm });
                             for (0..2) |jj| {
                                 const sbi = 2 + jj;
                                 const sdv: u8 = @intFromFloat(@min(@round(span[sbi] / (15.0 * dd)), 63));
                                 const smv: u8 = @intFromFloat(@min(@round(off[sbi] / dm), 63));
                                 const dl = dd * @as(f32, @floatFromInt(sdv));
                                 const ml = dm * @as(f32, @floatFromInt(smv));
-                                std.debug.print("  CPU sb={d}: sd={d} sm={d} dl={e} ml={e}\n", .{ sbi, sdv, smv, dl, ml });
+                                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  CPU sb={d}: sd={d} sm={d} dl={e} ml={e}\n", .{ sbi, sdv, smv, dl, ml });
                             }
                         }
                     }
@@ -357,13 +364,13 @@ test "append cuantizado produce bytes bit-exactos vs codificador CPU (q8_0, q4_0
                     if (t_abs >= n_tokens) continue;
                     if (std.mem.eql(u8, got_k[qb * gb ..][0..gb], exp_k[qb * gb ..][0..gb]) and
                         std.mem.eql(u8, got_v[qb * gb ..][0..gb], exp_v[qb * gb ..][0..gb])) continue;
-                    std.debug.print("[{s} blk={d}] mismatch en grupo {d}\n", .{ spec.tag, b, qb });
+                    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s} blk={d}] mismatch en grupo {d}\n", .{ spec.tag, b, qb });
                     dumpDiff(spec.tag, b, got_k[qb * gb ..][0..gb], exp_k[qb * gb ..][0..gb]);
                     return error.AppendMismatch;
                 }
             }
         }
-        std.debug.print("[{s}] append OK: {d} bloques bit-exactos vs CPU\n", .{ spec.tag, num_blocks });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] append OK: {d} bloques bit-exactos vs CPU\n", .{ spec.tag, num_blocks });
     }
 }
 
@@ -389,7 +396,7 @@ test "append cuantizado en paso decode (start_pos>0) indexa el chunk relativo" {
         pa.QuantFormat.iq3_s,
     }) |fmt| {
         if (!cudaz.isCudaAvailable()) {
-            std.debug.print("SKIP: CUDA no disponible\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
             return error.SkipZigTest;
         }
         const gpa = std.testing.allocator;
@@ -471,19 +478,19 @@ test "append cuantizado en paso decode (start_pos>0) indexa el chunk relativo" {
                     const lo = gsb * gb;
                     const hi = (gsb + n_sb_tok) * gb;
                     if (!std.mem.eql(u8, got[lo..hi], exp[lo..hi])) {
-                        std.debug.print("[{s} {s}] decode-step mismatch token {d} SBs [{d},{d})\n", .{ spec.tag, side_tags[si], t_abs, gsb, gsb + n_sb_tok });
+                        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s} {s}] decode-step mismatch token {d} SBs [{d},{d})\n", .{ spec.tag, side_tags[si], t_abs, gsb, gsb + n_sb_tok });
                         return error.DecodeStepAppendMismatch;
                     }
                 } else {
                     const qb = off * kd / 32;
                     if (!std.mem.eql(u8, got[qb * gb ..][0..gb], exp[qb * gb ..][0..gb])) {
-                        std.debug.print("[{s} {s}] decode-step mismatch token {d} grupo {d}\n", .{ spec.tag, side_tags[si], t_abs, qb });
+                        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s} {s}] decode-step mismatch token {d} grupo {d}\n", .{ spec.tag, side_tags[si], t_abs, qb });
                         return error.DecodeStepAppendMismatch;
                     }
                 }
             }
         }
-        std.debug.print("[{s}] append decode-step OK: grupos sp=6..7 bit-exactos\n", .{spec.tag});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] append decode-step OK: grupos sp=6..7 bit-exactos\n", .{spec.tag});
     }
 }
 
@@ -494,11 +501,11 @@ test "q4_cache auto-evict por techo: recache estable tras eviction" {
     // fuerza múltiples evictions (3.6MB de pesos vs techo 1MB) un segundo
     // pase produce resultados BIT-IDÉNTICOS (re-upload determinista).
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     if (std.c.getenv("Q4CACHE_EVICT_TEST") == null or std.c.getenv("ZIG_AI_Q4CACHE_MAX_MB") == null) {
-        std.debug.print("SKIP: Q4CACHE_EVICT_TEST=1 ZIG_AI_Q4CACHE_MAX_MB=1\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: Q4CACHE_EVICT_TEST=1 ZIG_AI_Q4CACHE_MAX_MB=1\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -559,12 +566,12 @@ test "q4_cache auto-evict por techo: recache estable tras eviction" {
     for (0..n_weights) |i| {
         for (0..NN) |j| {
             if (out_lin_a[i][j] != out_lin_b[i][j]) {
-                std.debug.print("[q4cache-evict] MISMATCH i={d} j={d}: {e} vs {e}\n", .{ i, j, out_lin_a[i][j], out_lin_b[i][j] });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[q4cache-evict] MISMATCH i={d} j={d}: {e} vs {e}\n", .{ i, j, out_lin_a[i][j], out_lin_b[i][j] });
                 return error.Q4CacheEvictMismatch;
             }
         }
     }
-    std.debug.print("[q4cache-evict] recache estable ×{d} pesos bit-idéntico ✓\n", .{n_weights});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[q4cache-evict] recache estable ×{d} pesos bit-idéntico ✓\n", .{n_weights});
     // FIX leak (gate Q4CACHE_EVICT_TEST expuesto): el cache q4 es module-level
     // (vive tras el test) y el DebugAllocator flaggea las device allocs del
     // último estado del cache como leak. El test es el dueño del ciclo que
@@ -592,7 +599,7 @@ test "preservación: append mid-bloque no pisa SBs de tokens previos (gran-256)"
         pa.QuantFormat.tq2_0,
     }) |fmt| {
         if (!cudaz.isCudaAvailable()) {
-            std.debug.print("SKIP: CUDA no disponible\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
             return error.SkipZigTest;
         }
         const gpa = std.testing.allocator;
@@ -662,7 +669,7 @@ test "preservación: append mid-bloque no pisa SBs de tokens previos (gran-256)"
         const preserved = 2 * n_sb_tok * gb;
         for ([_][]const u8{ "K", "V" }, [_]usize{ 0, kb }) |tag, base| {
             if (!std.mem.eql(u8, snap[base..][0..preserved], pool2[base..][0..preserved])) {
-                std.debug.print("[{s} {s}] preservación FALLO: SBs offs 0..1 mutados tras append off=2\n", .{ spec.tag, tag });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s} {s}] preservación FALLO: SBs offs 0..1 mutados tras append off=2\n", .{ spec.tag, tag });
                 return error.PreservationMismatch;
             }
             // (b) SB del off 2: igual al CPU encode con sólo esa fila viva.
@@ -675,11 +682,11 @@ test "preservación: append mid-bloque no pisa SBs de tokens previos (gran-256)"
             const lo = 2 * n_sb_tok * gb;
             const hi = 3 * n_sb_tok * gb;
             if (!std.mem.eql(u8, pool2[base + lo ..][0 .. hi - lo], exp[lo..hi])) {
-                std.debug.print("[{s} {s}] preservación FALLO: SB off=2 != CPU encode\n", .{ spec.tag, tag });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s} {s}] preservación FALLO: SB off=2 != CPU encode\n", .{ spec.tag, tag });
                 return error.PreservationMismatch;
             }
         }
-        std.debug.print("[{s}] preservación OK: SBs previos intactos + nuevo SB bit-exacto\n", .{spec.tag});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] preservación OK: SBs previos intactos + nuevo SB bit-exacto\n", .{spec.tag});
     }
 }
 
@@ -796,7 +803,7 @@ test "decode fusionado coincide con referencia CPU (q8_0, q4_0, q4_k)" {
             // lane-a (otro módulo) — el harness de A los cubre; aquí unreachable.
     }) |fmt| {
         if (!cudaz.isCudaAvailable()) {
-            std.debug.print("SKIP: CUDA no disponible\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
             return error.SkipZigTest;
         }
         const gpa = std.testing.allocator;
@@ -899,11 +906,11 @@ test "decode fusionado coincide con referencia CPU (q8_0, q4_0, q4_k)" {
             const g: f32 = x;
             max_diff = @max(max_diff, @abs(g - ref[i]));
             if (@abs(g - ref[i]) > 2e-3) {
-                std.debug.print("[{s}] decode mismatch at {d}: gpu={d} cpu={d}\n", .{ spec.tag, i, g, ref[i] });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] decode mismatch at {d}: gpu={d} cpu={d}\n", .{ spec.tag, i, g, ref[i] });
                 return error.DecodeMismatch;
             }
         }
-        std.debug.print("[{s}] decode OK: {d} dims, max_diff={d}\n", .{ spec.tag, q_stride, max_diff });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] decode OK: {d} dims, max_diff={d}\n", .{ spec.tag, q_stride, max_diff });
     }
 }
 
@@ -911,7 +918,7 @@ test "3.3 dp4a: decode q8_0 variante dp4a ≈ base vs referencia CPU (rel gate)"
     // A/B kernel-vs-kernel sobre el MISMO pool/q: el dp4a añade cuantización
     // q8 de Q (~0.4% ruido) — gate rel ‖err‖/‖ref‖ < 2e-2 (NO bit-exact).
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -994,10 +1001,10 @@ test "3.3 dp4a: decode q8_0 variante dp4a ≈ base vs referencia CPU (rel gate)"
     }
     const rel = @sqrt(err2) / @sqrt(@max(ref2, 1e-30));
     if (rel > 2e-2) {
-        std.debug.print("[dp4a] decode rel={d} > 2e-2\n", .{rel});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[dp4a] decode rel={d} > 2e-2\n", .{rel});
         return error.DecodeRelTooHigh;
     }
-    std.debug.print("[dp4a] decode OK: rel={d:.6} (gate 2e-2, ruido esperado ~4e-3)\n", .{rel});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[dp4a] decode OK: rel={d:.6} (gate 2e-2, ruido esperado ~4e-3)\n", .{rel});
 }
 
 test "3.3-b dp4a: decode q4_0 variante dp4a ≈ base vs referencia CPU (rel gate)" {
@@ -1005,7 +1012,7 @@ test "3.3-b dp4a: decode q4_0 variante dp4a ≈ base vs referencia CPU (rel gate
     // extracción de nibbles (low-pares/high-impares) + corrección −8·Σq8.
     // Gate rel ‖err‖/‖ref‖ < 2e-2.
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -1085,17 +1092,17 @@ test "3.3-b dp4a: decode q4_0 variante dp4a ≈ base vs referencia CPU (rel gate
     }
     const rel = @sqrt(err2) / @sqrt(@max(ref2, 1e-30));
     if (rel > 2e-2) {
-        std.debug.print("[dp4a-q40] decode rel={d} > 2e-2\n", .{rel});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[dp4a-q40] decode rel={d} > 2e-2\n", .{rel});
         return error.DecodeRelTooHigh;
     }
-    std.debug.print("[dp4a-q40] decode OK: rel={d:.6} (gate 2e-2)\n", .{rel});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[dp4a-q40] decode OK: rel={d:.6} (gate 2e-2)\n", .{rel});
 }
 
 test "prefill q8_0 fusionado coincide con referencia CPU (causal)" {
     // NOTA: sólo q8_0 tiene kernel de PREFILL propio hoy (paged_attention_
     // prefill_q8_0_kernel); el prefill q4_0 es request abierto a Lane A.
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -1168,12 +1175,12 @@ test "prefill q8_0 fusionado coincide con referencia CPU (causal)" {
             const g: f32 = out16[t * q_stride + i];
             max_diff = @max(max_diff, @abs(g - ref[i]));
             if (@abs(g - ref[i]) > 2e-3) {
-                std.debug.print("prefill mismatch tok={d} idx={d}: gpu={d} cpu={d}\n", .{ t, i, g, ref[i] });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "prefill mismatch tok={d} idx={d}: gpu={d} cpu={d}\n", .{ t, i, g, ref[i] });
                 return error.PrefillMismatch;
             }
         }
     }
-    std.debug.print("prefill q8_0 OK: {d} tokens causales, max_diff={d}\n", .{ n_tokens, max_diff });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "prefill q8_0 OK: {d} tokens causales, max_diff={d}\n", .{ n_tokens, max_diff });
 }
 
 test "prefill cuantizado coincide con referencia CPU (todos los formatos)" {
@@ -1203,7 +1210,7 @@ test "prefill cuantizado coincide con referencia CPU (todos los formatos)" {
         pa.QuantFormat.tq2_0,
     }) |fmt| {
         if (!cudaz.isCudaAvailable()) {
-            std.debug.print("SKIP: CUDA no disponible\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
             return error.SkipZigTest;
         }
         const gpa = std.testing.allocator;
@@ -1311,18 +1318,18 @@ test "prefill cuantizado coincide con referencia CPU (todos los formatos)" {
                 const g: f32 = out16[t * q_stride + i];
                 max_diff = @max(max_diff, @abs(g - ref[i]));
                 if (@abs(g - ref[i]) > 2e-3) {
-                    std.debug.print("[{s}] prefill mismatch tok={d} idx={d}: gpu={d} cpu={d}\n", .{ spec.tag, t, i, g, ref[i] });
+                    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] prefill mismatch tok={d} idx={d}: gpu={d} cpu={d}\n", .{ spec.tag, t, i, g, ref[i] });
                     return error.PrefillMismatch;
                 }
             }
         }
-        std.debug.print("prefill {s} OK: {d} tokens causales, max_diff={d}\n", .{ spec.tag, n_tokens, max_diff });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "prefill {s} OK: {d} tokens causales, max_diff={d}\n", .{ spec.tag, n_tokens, max_diff });
     }
 }
 
 test "B3 MMQ q4_0 GEMV: paridad vs CPU y bench vs qgemm fp32-A" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -1442,10 +1449,10 @@ test "B3 MMQ q4_0 GEMV: paridad vs CPU y bench vs qgemm fp32-A" {
             max_rel_f32 = @max(max_rel_f32, @abs(g - ef) / denom_f);
         }
         if (max_abs_q > 5e-3) {
-            std.debug.print("[M={d}] MMQ paridad FALLO vs cuantizada: max_rel={d}\n", .{ M, max_abs_q });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[M={d}] MMQ paridad FALLO vs cuantizada: max_rel={d}\n", .{ M, max_abs_q });
             return error.MmqParityMismatch;
         }
-        std.debug.print("[M={d}] MMQ paridad OK: vs_q={d} vs_f32={d}\n", .{ M, max_abs_q, max_rel_f32 });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[M={d}] MMQ paridad OK: vs_q={d} vs_f32={d}\n", .{ M, max_abs_q, max_rel_f32 });
     }
 
     // ── Bench M=1: mmq vs qgemmKernel (A f32 en smem) sobre K=4096 N=3584
@@ -1506,7 +1513,7 @@ test "B3 MMQ q4_0 GEMV: paridad vs CPU y bench vs qgemm fp32-A" {
         ns_base_min = @min(ns_base_min, t.read());
     }
     const speedup = @as(f64, @floatFromInt(ns_base_min)) / @as(f64, @floatFromInt(@max(ns_mmq_min, 1)));
-    std.debug.print("BENCH M=1 K={d} N={d}: mmq={d:.3}ms base(qgemm)={d:.3}ms speedup={d:.2}x\n", .{ Kb, Nb, @as(f64, @floatFromInt(ns_mmq_min)) / 1e6, @as(f64, @floatFromInt(ns_base_min)) / 1e6, speedup });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "BENCH M=1 K={d} N={d}: mmq={d:.3}ms base(qgemm)={d:.3}ms speedup={d:.2}x\n", .{ Kb, Nb, @as(f64, @floatFromInt(ns_mmq_min)) / 1e6, @as(f64, @floatFromInt(ns_base_min)) / 1e6, speedup });
 }
 
 test "B2.4 iq4_xs append GPU vs CPU (INVESTIGACIÓN: paridad roja)" {
@@ -1516,7 +1523,7 @@ test "B2.4 iq4_xs append GPU vs CPU (INVESTIGACIÓN: paridad roja)" {
     // ejecuta por defecto para mantener la suite usable; activar con
     // IQ4_XS_APPEND=1 (requiere DUMP_KVQUANT=1 para trazas).
     if (std.c.getenv("IQ4_XS_APPEND") == null) {
-        std.debug.print("SKIP: IQ4_XS_APPEND=1 para ejecutar investigación\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: IQ4_XS_APPEND=1 para ejecutar investigación\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -1573,7 +1580,7 @@ test "B2.4 iq4_xs append GPU vs CPU (INVESTIGACIÓN: paridad roja)" {
         // para REPRODUCIRLA, no como gate de regresión. Reportar el estado y
         // SKIP en lugar de FAIL para que el gate-open run distinga 'bug
         // conocido reproduciéndose' de 'regresión nueva'.
-        std.debug.print("[iq4_xs] {d}/{d} bloques difieren — bug CONOCIDO (carrera scales_l, ver docstring; DUMP_KVQUANT=1 para trazas)\n", .{ mismatches, num_blocks });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[iq4_xs] {d}/{d} bloques difieren — bug CONOCIDO (carrera scales_l, ver docstring; DUMP_KVQUANT=1 para trazas)\n", .{ mismatches, num_blocks });
         return error.SkipZigTest;
     }
 }
@@ -1582,11 +1589,11 @@ test "B6 mmqQ8_0WGEMV: paridad lm_head cuantizado on-load" {
     // INVESTIGACIÓN: 1 elemento divergente (rel ~2.3%, j=34 kb=2) con K=256;
     // resto exacto. Gateado para no ensuciar la suite; activar con B6_MMQ=1.
     if (std.c.getenv("B6_MMQ") == null) {
-        std.debug.print("SKIP: B6_MMQ=1 para ejecutar investigación\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: B6_MMQ=1 para ejecutar investigación\n", .{});
         return error.SkipZigTest;
     }
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -1703,10 +1710,10 @@ test "B6 mmqQ8_0WGEMV: paridad lm_head cuantizado on-load" {
         }
         if (max_rel > 5e-3) {
             const jw = worst % NN;
-            std.debug.print("[M={d}] B6 FALLO idx={d} j={d} gpu={e} cpu={e} rel={e}\n", .{ M, worst, jw, c_host[worst], expect[worst], max_rel });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[M={d}] B6 FALLO idx={d} j={d} gpu={e} cpu={e} rel={e}\n", .{ M, worst, jw, c_host[worst], expect[worst], max_rel });
             // sn por kb desde los ints exactos que ve cada lado (aq_h/w_bytes)
             const mi_w = worst / NN;
-            std.debug.print("  sn por kb (cpu-ref):", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  sn por kb (cpu-ref):", .{});
             for (0..kb_total) |kbi| {
                 var sacc: i32 = 0;
                 for (0..32) |cc| {
@@ -1714,11 +1721,11 @@ test "B6 mmqQ8_0WGEMV: paridad lm_head cuantizado on-load" {
                     const wv: i32 = @as(i8, @bitCast(w_bytes[jw * kb_total * 34 + kbi * 34 + 2 + cc]));
                     sacc += av * wv;
                 }
-                std.debug.print(" {d}", .{sacc});
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), " {d}", .{sacc});
             }
-            std.debug.print("\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "\n", .{});
             // contribución por bloque del lado CPU (da·db·sn) para j=mi_w
-            std.debug.print("  contrib cpu:", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  contrib cpu:", .{});
             for (0..kb_total) |kbi| {
                 const da_c: f32 = ad_h[mi_w * kb_total + kbi];
                 const dbits = std.mem.readInt(u32, w_bytes[jw * kb_total * 34 + kbi * 34 ..][0..4], .little);
@@ -1730,9 +1737,9 @@ test "B6 mmqQ8_0WGEMV: paridad lm_head cuantizado on-load" {
                     sacc2 += av2 * wv2;
                 }
                 const contrib = da_c * db_c * @as(f32, @floatFromInt(sacc2));
-                std.debug.print(" [{d}]{e}", .{ kbi, contrib });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), " [{d}]{e}", .{ kbi, contrib });
             }
-            std.debug.print("\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "\n", .{});
             // CONCLUSIÓN B6-v2: la suma de las contribuciones CPU por bloque
             // REPRODUCE el total del GPU (~-2.2048) ⇒ KERNEL CORRECTO. El
             // desvío de expect[] proviene de la ruta de referencia
@@ -1741,7 +1748,7 @@ test "B6 mmqQ8_0WGEMV: paridad lm_head cuantizado on-load" {
             // usar este kernel en producción.
             return error.MmqQ80WParityMismatch;
         }
-        std.debug.print("[M={d}] B6 mmqQ8_0W paridad OK: rel={e}\n", .{ M, max_rel });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[M={d}] B6 mmqQ8_0W paridad OK: rel={e}\n", .{ M, max_rel });
     }
 }
 
@@ -1750,7 +1757,7 @@ test "qgemm type 6 (q3_k) / 7 (q2_k): paridad vs gguf.dequant canónico" {
     // (gguf.zig, validado por lane-a contra fuente master). Bytes aleatorios:
     // estructuralmente todo patrón es un bloque válido para ambos lados.
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -1768,7 +1775,7 @@ test "qgemm type 6 (q3_k) / 7 (q2_k): paridad vs gguf.dequant canónico" {
         .{ .qt = 6, .bb = 110, .tag = "q3_k" },
     }) |spec| {
         if (spec.qt == 6 and !q3_k_fixed) {
-            std.debug.print("SKIP q3_k: known-red (investigación en curso)\n", .{});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP q3_k: known-red (investigación en curso)\n", .{});
             continue;
         }
         const w_bytes = try gpa.alloc(u8, NN * spec.bb);
@@ -1830,7 +1837,7 @@ test "qgemm type 6 (q3_k) / 7 (q2_k): paridad vs gguf.dequant canónico" {
                     const dl: f32 = d * @as(f32, @floatFromInt(@as(i8, @bitCast(s16[is])) - 32));
                     const mine = dl * @as(f32, @floatFromInt(qv - hv));
                     if (@abs(mine - w_ref[j * K + idx]) > 1e-3)
-                        std.debug.print("  DIFF[{d}] mine={e} canon={e} (nh={d} jj={d} col={d} is={d}) qs_byte={x:0>2} hm_byte={x:0>2} s16_is={d}\n", .{ j * K + idx, mine, w_ref[j * K + idx], nh, jj, col, is, qs[nh * 32 + col], hm[col], s16[is] });
+                        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  DIFF[{d}] mine={e} canon={e} (nh={d} jj={d} col={d} is={d}) qs_byte={x:0>2} hm_byte={x:0>2} s16_is={d}\n", .{ j * K + idx, mine, w_ref[j * K + idx], nh, jj, col, is, qs[nh * 32 + col], hm[col], s16[is] });
                 }
             }
         }
@@ -1863,18 +1870,18 @@ test "qgemm type 6 (q3_k) / 7 (q2_k): paridad vs gguf.dequant canónico" {
         var max_rel: f32 = 0;
         for (c_host, expect) |g, e| max_rel = @max(max_rel, @abs(g - e) / @max(@abs(e), 1.0));
         if (max_rel > 5e-3) {
-            std.debug.print("[{s}] qgemm FALLO rel={e}\n", .{ spec.tag, max_rel });
-            std.debug.print("  cpu[0..6]={any}\n  gpu[0..6]={any}\n", .{ expect[0..6], c_host[0..6] });
-            std.debug.print("  w_ref[0..8]={any}\n", .{w_ref[0..8]});
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] qgemm FALLO rel={e}\n", .{ spec.tag, max_rel });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  cpu[0..6]={any}\n  gpu[0..6]={any}\n", .{ expect[0..6], c_host[0..6] });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "  w_ref[0..8]={any}\n", .{w_ref[0..8]});
             return error.QgemmKQuantParityMismatch;
         }
-        std.debug.print("[{s}] qgemm paridad OK vs dequant canónico: rel={e}\n", .{ spec.tag, max_rel });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] qgemm paridad OK vs dequant canónico: rel={e}\n", .{ spec.tag, max_rel });
     }
 }
 
 test "qgemm types 10-17: paridad con pesos generados por encoder" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -1963,16 +1970,16 @@ test "qgemm types 10-17: paridad con pesos generados por encoder" {
         var max_rel: f32 = 0;
         for (c_host, expect) |g, e| max_rel = @max(max_rel, @abs(g - e) / @max(@abs(e), 1.0));
         if (max_rel > 5e-3) {
-            std.debug.print("[{s}] qgemm type {d} FALLO rel={e}\n", .{ spec.tag, spec.qt, max_rel });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] qgemm type {d} FALLO rel={e}\n", .{ spec.tag, spec.qt, max_rel });
             return error.QgemmParityMismatch;
         }
-        std.debug.print("[{s}] qgemm type {d} paridad OK: rel={e}\n", .{ spec.tag, spec.qt, max_rel });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s}] qgemm type {d} paridad OK: rel={e}\n", .{ spec.tag, spec.qt, max_rel });
     }
 }
 
 test "qgemm type 9 (iq2_s): paridad vs dequant canónico" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -2024,10 +2031,10 @@ test "qgemm type 9 (iq2_s): paridad vs dequant canónico" {
     var max_rel: f32 = 0;
     for (c_host, expect) |g, e| max_rel = @max(max_rel, @abs(g - e) / @max(@abs(e), 1.0));
     if (max_rel > 5e-3) {
-        std.debug.print("qgemm-iq2_s FALLO rel={e}\n", .{max_rel});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "qgemm-iq2_s FALLO rel={e}\n", .{max_rel});
         return error.QgemmIq2SParityMismatch;
     }
-    std.debug.print("qgemm iq2_s paridad OK: rel={e}\n", .{max_rel});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "qgemm iq2_s paridad OK: rel={e}\n", .{max_rel});
 }
 
 test "qgemm type 8 (iq3_s): paridad vs referencia CPU de layout directo" {
@@ -2035,7 +2042,7 @@ test "qgemm type 8 (iq3_s): paridad vs referencia CPU de layout directo" {
     // grandes del IQ3_M ⇒ sin fallback f32 en streaming. Pesos vía
     // encodeIQ3_S real (bit-exacto con append verificado).
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -2096,10 +2103,10 @@ test "qgemm type 8 (iq3_s): paridad vs referencia CPU de layout directo" {
         var max_rel: f32 = 0;
         for (c_host, expect) |g, e| max_rel = @max(max_rel, @abs(g - e) / @max(@abs(e), 1.0));
         if (max_rel > 5e-3) {
-            std.debug.print("[M={d}] qgemm-iq3_s FALLO rel={e}\n", .{ M, max_rel });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[M={d}] qgemm-iq3_s FALLO rel={e}\n", .{ M, max_rel });
             return error.QgemmIq3SParityMismatch;
         }
-        std.debug.print("[M={d}] qgemm iq3_s paridad OK: rel={e}\n", .{ M, max_rel });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[M={d}] qgemm iq3_s paridad OK: rel={e}\n", .{ M, max_rel });
     }
 }
 
@@ -2107,7 +2114,7 @@ test "qgemm type 5 (q8_0): paridad vs referencia CPU" {
     // Cobertura GEMM para pesos q8_0 (UD-Q8_K_XL local, drafts). Layout
     // 34B/bloque32 [d f16][i8×32]; pesos vía encodeQ8_0 real.
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -2177,10 +2184,10 @@ test "qgemm type 5 (q8_0): paridad vs referencia CPU" {
         var max_rel: f32 = 0;
         for (c_host, expect) |g, e| max_rel = @max(max_rel, @abs(g - e) / @max(@abs(e), 1.0));
         if (max_rel > 5e-3) {
-            std.debug.print("[M={d}] qgemm-q8_0 FALLO rel={e}\n", .{ M, max_rel });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[M={d}] qgemm-q8_0 FALLO rel={e}\n", .{ M, max_rel });
             return error.QgemmQ80ParityMismatch;
         }
-        std.debug.print("[M={d}] qgemm q8_0 paridad OK: rel={e}\n", .{ M, max_rel });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[M={d}] qgemm q8_0 paridad OK: rel={e}\n", .{ M, max_rel });
     }
 }
 
@@ -2191,7 +2198,7 @@ test "qgemm type 4 (q4_k): paridad vs referencia CPU de layout directo" {
     // spill). Los pesos se construyen con encodeQ4_K REAL (B2.2) ⇒ layout
     // canónico garantizado.
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -2292,10 +2299,10 @@ test "qgemm type 4 (q4_k): paridad vs referencia CPU de layout directo" {
             }
         }
         if (max_rel > 5e-3) {
-            std.debug.print("[M={d}] qgemm-q4_k FALLO idx={d} gpu={e} cpu={e} rel={e}\n", .{ M, worst, c_host[worst], expect[worst], max_rel });
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[M={d}] qgemm-q4_k FALLO idx={d} gpu={e} cpu={e} rel={e}\n", .{ M, worst, c_host[worst], expect[worst], max_rel });
             return error.QgemmQ4KParityMismatch;
         }
-        std.debug.print("[M={d}] qgemm q4_k paridad OK: rel={e}\n", .{ M, max_rel });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[M={d}] qgemm q4_k paridad OK: rel={e}\n", .{ M, max_rel });
     }
 
     // Bench gated QGEMM_Q4K_BENCH=1: q4_k vs q6_k (mismo kernel, mismo bound).
@@ -2342,7 +2349,7 @@ test "qgemm type 4 (q4_k): paridad vs referencia CPU de layout directo" {
                 try cudaz.cuStreamSynchronize(stream);
                 ns3 = @min(ns3, t.read());
             }
-            std.debug.print("BENCH qgemm M={d}: q4_k(144B/SB)={d:.3}ms q6_k(210B/SB)={d:.3}ms ratio_bytes={d:.2}\n", .{
+            try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "BENCH qgemm M={d}: q4_k(144B/SB)={d:.3}ms q6_k(210B/SB)={d:.3}ms ratio_bytes={d:.2}\n", .{
                 Mb, @as(f64, @floatFromInt(ns4)) / 200 / 1e6, @as(f64, @floatFromInt(ns3)) / 200 / 1e6, 210.0 / 144.0,
             });
         }
@@ -2356,7 +2363,7 @@ fn blkToSlice(s: []f32) []f32 {
 
 test "B3-v3 mmqQ8_0WFused: paridad vs CPU + bench vs camino 3-launch" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -2451,16 +2458,16 @@ test "B3-v3 mmqQ8_0WFused: paridad vs CPU + bench vs camino 3-launch" {
             const r = @abs(g - e) / @max(@abs(e), 1.0);
             max_rel = @max(max_rel, r);
             if (r > 5e-3 and max_rel == r) {
-                std.debug.print("[M={d}] B3-v3 FALLO idx={d} gpu={e} cpu={e}\n", .{ M, idx, g, e });
+                try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[M={d}] B3-v3 FALLO idx={d} gpu={e} cpu={e}\n", .{ M, idx, g, e });
             }
         }
         if (max_rel > 5e-3) return error.MmqFusedParityMismatch;
-        std.debug.print("[M={d}] B3-v3 fused paridad OK: rel={e}\n", .{ M, max_rel });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[M={d}] B3-v3 fused paridad OK: rel={e}\n", .{ M, max_rel });
     }
 
     // ── Bench comparativo (gated MMQ_FUSED_BENCH=1): fused vs 3-launch vs qgemm.
     if (std.c.getenv("MMQ_FUSED_BENCH") == null) {
-        std.debug.print("SKIP bench: MMQ_FUSED_BENCH=1\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP bench: MMQ_FUSED_BENCH=1\n", .{});
         return;
     }
     const Kb = 4096;
@@ -2524,7 +2531,7 @@ test "B3-v3 mmqQ8_0WFused: paridad vs CPU + bench vs camino 3-launch" {
         const ff: f64 = @floatFromInt(ns_fused);
         const fo: f64 = @floatFromInt(ns_old);
         const fb: f64 = @floatFromInt(ns_base);
-        std.debug.print("BENCH B3-v3 M={d} K={d} N={d}: fused={d:.3}ms old={d:.3}ms qgemm={d:.3}ms | fused_vs_qgemm={d:.2}x old_vs_qgemm={d:.2}x\n", .{
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "BENCH B3-v3 M={d} K={d} N={d}: fused={d:.3}ms old={d:.3}ms qgemm={d:.3}ms | fused_vs_qgemm={d:.2}x old_vs_qgemm={d:.2}x\n", .{
             Mb, Kb, Nb, ff / iters / 1e6, fo / iters / 1e6, fb / iters / 1e6, fb / @max(ff, 1), fb / @max(fo, 1),
         });
     }
@@ -2535,11 +2542,11 @@ test "bench append IQ: latencia por decode-step (kv_dim=1024)" {
     // de 1 token (decode step) con geometría de modelo real (Qwen3.5-9B:
     // head_dim=128 × 8 kv_heads = kv_dim 1024 ⇒ kd/256 SBs por lado).
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     if (std.c.getenv("IQ_APPEND_BENCH") == null) {
-        std.debug.print("SKIP: IQ_APPEND_BENCH=1 para ejecutar bench\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: IQ_APPEND_BENCH=1 para ejecutar bench\n", .{});
         return error.SkipZigTest;
     }
 
@@ -2603,7 +2610,7 @@ test "bench append IQ: latencia por decode-step (kv_dim=1024)" {
             ns_min = @min(ns_min, t.read());
         }
         const per_call_us = @as(f64, @floatFromInt(ns_min)) / @as(f64, @floatFromInt(iters)) / 1000.0;
-        std.debug.print("[bench-append {s}] decode-step n=1 kv_dim={d}: {d:.1} µs/token ({d:.3} ms)\n", .{ spec.tag, kd, per_call_us, per_call_us / 1000.0 });
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[bench-append {s}] decode-step n=1 kv_dim={d}: {d:.1} µs/token ({d:.3} ms)\n", .{ spec.tag, kd, per_call_us, per_call_us / 1000.0 });
     }
 }
 
@@ -2612,7 +2619,7 @@ test "bench append IQ: latencia por decode-step (kv_dim=1024)" {
 // cubre smem>48KB (attr 99KB) ni N grande. Paridad vs dequant CPU directo.
 test "qgemm type 4 (q4_k) geometría 9B: k=12288 n=4096 m=5" {
     if (!cudaz.isCudaAvailable()) {
-        std.debug.print("SKIP: CUDA no disponible\n", .{});
+        try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "SKIP: CUDA no disponible\n", .{});
         return error.SkipZigTest;
     }
     const gpa = std.testing.allocator;
@@ -2711,7 +2718,7 @@ test "qgemm type 4 (q4_k) geometría 9B: k=12288 n=4096 m=5" {
     for (c_host, expect) |g, e| {
         max_rel = @max(max_rel, @abs(g - e) / @max(@abs(e), 1.0));
     }
-    std.debug.print("[q4_k-9Bgeom] k={d} n={d} m={d}: max_rel={e}\n", .{ K, NN, M, max_rel });
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[q4_k-9Bgeom] k={d} n={d} m={d}: max_rel={e}\n", .{ K, NN, M, max_rel });
     try std.testing.expect(max_rel < 5e-3);
 }
 
@@ -2757,5 +2764,5 @@ test "6.3: TQ1_0 encode→decode roundtrip CPU (base-3 digits, LUT inversa)" {
             try std.testing.expectApproxEqAbs(want, g, 1e-5);
         }
     }
-    std.debug.print("[tq1_0-roundtrip] OK: {d} elems, niveles ternarios exactos (d por SB de 256)\n", .{kd});
+    try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[tq1_0-roundtrip] OK: {d} elems, niveles ternarios exactos (d por SB de 256)\n", .{kd});
 }
