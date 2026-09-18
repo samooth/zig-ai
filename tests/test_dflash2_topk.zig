@@ -11,7 +11,7 @@ test "dflash2 top-k GPU vs CPU parity + throughput" {
     const gpa = std.testing.allocator;
     cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
-    _ = std.posix.setenv("ZIG_AI_DFLASH2_TOPK_GPU", "1", 1);
+    _ = std.c.setenv("ZIG_AI_DFLASH2_TOPK_GPU", "1", 1);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
     defer lk.deinit();
@@ -89,7 +89,7 @@ test "dflash2 tree-walk parity vs selector" {
     const gpa = std.testing.allocator;
     cudaz.ensureContext() catch return error.SkipZigTest;
     const stream = try cudaz.cuStreamCreate(0);
-    _ = std.posix.setenv("ZIG_AI_DFLASH2_TOPK_GPU", "1", 1);
+    _ = std.c.setenv("ZIG_AI_DFLASH2_TOPK_GPU", "1", 1);
     defer cudaz.cuStreamDestroy(stream);
     var lk = try layer_kernels.LayerKernels.init(stream);
     defer lk.deinit();

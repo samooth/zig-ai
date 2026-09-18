@@ -158,7 +158,7 @@ fn cpuRegionBytes(allocator: std.mem.Allocator, spec: FormatSpec, tokens: []cons
     return kv_quant.encodeToOwned(allocator, spec.fmt, src);
 }
 
-fn dumpDiff(tag: []const u8, b: usize, got: []const u8, exp: []const u8) void {
+fn dumpDiff(tag: []const u8, b: usize, got: []const u8, exp: []const u8) !void {
     for (got, exp, 0..) |gv, ev, i| {
         if (gv != ev) {
             try stdoutPrint(std.Io.Threaded.global_single_threaded.io(), "[{s} blk={d}] primer byte distinto en {d} (grupo {d}): gpu={d} cpu={d}\n", .{ tag, b, i, i / specFor(.q8_0).group_bytes, gv, ev });

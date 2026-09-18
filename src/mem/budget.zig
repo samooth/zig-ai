@@ -174,7 +174,7 @@ pub fn planLfru(budget: usize, consumers: []Consumer, clock: u64) PlanResult {
             heats[0..n],
             lasts[0..n],
             clock,
-            &pinned,
+            pinned[0..n],
         ) orelse break;
 
         const want_i = consumers[pick.slot].desired -| consumers[pick.slot].shrinkable_floor;
