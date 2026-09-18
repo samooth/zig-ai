@@ -3,7 +3,7 @@
 [English below](#zig-ai-engine-english)
 
 Motor de inferencia de transformers escrito en Zig con aceleración CUDA.
-Carga modelos GGUF y ejecuta generación de texto end-to-end en una sola
+Carga modelos GGUF y ejecuta generación de texto end-to-end en un solo
 binario, sin dependencias de Python ni frameworks externos.
 
 ## Características
